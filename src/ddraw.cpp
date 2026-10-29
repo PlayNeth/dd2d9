@@ -648,6 +648,14 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.ddsCaps.dwCaps = DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER |
                        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE | DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY |
                        DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_VISIBLE;
+    if (D3DProxyEnabled()) {
+        // A Direct3D wrapper (D7VK) renders 3D on top of dd2d9 and passes these caps
+        // on to the game: report a 3D accelerator, as ddraw does with a 3D driver.
+        // Games check this before they try Direct3D at all.
+        c.dwCaps |= DDCAPS_3D;
+        c.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
+        c.dwZBufferBitDepths = DDBD_16 | DDBD_24 | DDBD_32;
+    }
     c.dwSVBCaps = c.dwCaps;
     c.dwSVBCKeyCaps = c.dwCKeyCaps;
     c.dwSVBFXCaps = c.dwFXCaps;

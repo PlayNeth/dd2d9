@@ -56,6 +56,11 @@ static int Run(int w, int h, int bpp) {
     HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
     CHECK(SUCCEEDED(hr), "DirectDrawCreateEx -> 0x%08lx", hr);
     if (!dd) return 1;
+    DDCAPS caps7 = {};
+    caps7.dwSize = sizeof(caps7);
+    hr = dd->GetCaps(&caps7, nullptr);
+    CHECK(SUCCEEDED(hr) && (caps7.dwCaps & DDCAPS_3D) && (caps7.ddsCaps.dwCaps & DDSCAPS_3DDEVICE),
+          "GetCaps reports a 3D accelerator (dwCaps 0x%08lx, ddsCaps 0x%08lx)", caps7.dwCaps, caps7.ddsCaps.dwCaps);
     hr = dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_FPUSETUP);
     CHECK(SUCCEEDED(hr), "SetCooperativeLevel -> 0x%08lx", hr);
     hr = dd->SetDisplayMode(w, h, bpp, 0, 0);

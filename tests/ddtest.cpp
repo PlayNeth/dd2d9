@@ -119,6 +119,15 @@ static int RunUnit() {
     HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
     CHECK(SUCCEEDED(dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL)), "SetCooperativeLevel(NORMAL)");
 
+    {
+        // Alone (as ddraw.dll), no Direct3D is offered, so no 3D support may be reported.
+        DDCAPS caps = {};
+        caps.dwSize = sizeof(caps);
+        hr = dd->GetCaps(&caps, nullptr);
+        CHECK(SUCCEEDED(hr) && !(caps.dwCaps & DDCAPS_3D) && !(caps.ddsCaps.dwCaps & DDSCAPS_3DDEVICE),
+              "GetCaps reports no 3D support on its own (dwCaps 0x%08lx)", caps.dwCaps);
+    }
+
     const DWORD A = 0x00112233, B = 0x00445566, C = 0x00778899, D = 0x00AABBCC, K = 0x00FF00FF;
 
     // Color fill
