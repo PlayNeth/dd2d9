@@ -11,7 +11,18 @@
 
 namespace dd2d9 {
 
+namespace {
+std::vector<DDraw*> g_ddraws;  // every DirectDraw object (g_lock), for the GetSurfaceFromDC export
+// The DirectDraw object in exclusive mode, if any (g_displayLock): the display mode is
+// its to change and restore, as in ddraw.dll.
+DDraw* g_exclusiveDD = nullptr;
+}
+
 DDraw::DDraw() {
+    {
+        Guard l;
+        g_ddraws.push_back(this);
+    }
     wraps_[0] = new DDWrap<1>(this);
     wraps_[1] = new DDWrap<2>(this);
     wraps_[2] = new DDWrap<4>(this);
@@ -25,6 +36,10 @@ DDraw::DDraw() {
 }
 
 DDraw::~DDraw() {
+    {
+        Guard l;
+        g_ddraws.erase(std::find(g_ddraws.begin(), g_ddraws.end(), this));
+    }
     timeEndPeriod(1);
     delete presenter_;
     delete static_cast<DDWrap<1>*>(wraps_[0]);
@@ -51,7 +66,7 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out) {
     else if (IsEqualGUID(r, IID_IDirectDraw4)) v = 4;
     else if (IsEqualGUID(r, IID_IDirectDraw7)) v = 7;
     if (v) {
-        AddRef();
+        AddRef(v);
         *out = Iface(v);
         return S_OK;
     }
@@ -61,19 +76,43 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out) {
     return E_NOINTERFACE;
 }
 
-ULONG DDraw::AddRef() { return ULONG(InterlockedIncrement(&ref_)); }
+static int IfaceIndex(int version) { return version == 1 ? 0 : version == 2 ? 1 : version == 4 ? 2 : 3; }
 
-ULONG DDraw::Release() {
-    LONG r = InterlockedDecrement(&ref_);
+ULONG DDraw::AddRef(int version) {
+    InterlockedIncrement(&ref_);
+    return ULONG(InterlockedIncrement(&ifaceRef_[IfaceIndex(version)]));
+}
+
+ULONG DDraw::Release(int version) {
+    LONG* own = &ifaceRef_[IfaceIndex(version)];
+    LONG r = InterlockedDecrement(own);
+    if (r < 0) {  // released more often than referenced: ignore
+        InterlockedIncrement(own);
+        return 0;
+    }
     // Tear down once: a stray AddRef/Release pair after the final release must
     // not run this (and IntRelease) a second time.
-    if (r == 0 && InterlockedExchange(&tornDown_, 1) == 0) {
+    if (InterlockedDecrement(&ref_) == 0 && InterlockedExchange(&tornDown_, 1) == 0) {
+        // Teardown waits for the presenter thread, which takes g_lock: if this
+        // thread holds it (a surface released inside another call, or the game's
+        // AcquireDDThreadLock), wait until it lets go.
+        RunWhenUnlocked([](void* self) { static_cast<DDraw*>(self)->TearDown(); }, this);
+    }
+    return ULONG(r);
+}
+
+void DDraw::TearDown() {
+    {
         DD2D9_LOG("DirectDraw object released");
         const bool stopped = presenter_->Stop();  // must not hold g_lock: the presenter thread takes it
         {
             DisplayGuard dg;
-            UnhookWindow();
+            // Still hooked while the mode goes back (see OnDisplayChange), as when leaving
+            // exclusive mode.
             RestoreDisplay();
+            RestoreSavedWindow(true);
+            UnhookWindow();
+            if (g_exclusiveDD == this) g_exclusiveDD = nullptr;
         }
         Guard l;
         alive = false;
@@ -86,7 +125,6 @@ ULONG DDraw::Release() {
         if (!stopped) IntAddRef();
         IntRelease();
     }
-    return ULONG(r < 0 ? 0 : r);
 }
 
 void DDraw::IntRelease() {
@@ -145,13 +183,6 @@ void DDraw::Remove3DDevice() {
     DD2D9_LOG("no Direct3D device left: dd2d9 presents again once the game draws");
 }
 
-bool DDraw::PrimaryBusy() const {
-    if (!primary) return false;
-    if (primary->lockCount || primary->dcOut) return true;
-    for (const Surface* s : primary->flipChain)
-        if (s->lockCount || s->dcOut) return true;
-    return false;
-}
 
 // ---------------------------------------------------------------- focus handling
 // Like ddraw.dll, exclusive mode subclasses the game's window: losing focus
@@ -189,6 +220,17 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             PostMessageW(h, deferred, wp, 0);
         }
         if (msg == deferred) return 0;
+    } else if (msg == WM_DISPLAYCHANGE) {
+        // Before the game sees it, as ddraw.dll: the surfaces are lost and the window
+        // covers the screen in the new mode.
+        DDraw* owner = g_hook.owner;
+        if (h == g_hook.hwnd && owner) {
+            owner->InvalidateSurfaces();
+            if (TryEnterCriticalSection(&g_displayLock)) {
+                if (g_hook.owner == owner) owner->OnDisplayChange();
+                LeaveCriticalSection(&g_displayLock);
+            }
+        }
     } else if (msg == WM_SYSCOMMAND && ((wp & 0xFFF0) == SC_SCREENSAVE || (wp & 0xFFF0) == SC_MONITORPOWER)) {
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner && owner->Exclusive()) return 0;
@@ -264,21 +306,33 @@ void DDraw::UnhookWindow() {
 
 // Called with g_displayLock held.
 void DDraw::OnActivate(bool active) {
-    if (applying_ || !Exclusive() || !modeSet_ || !alive) return;
+    if (applying_ || !Exclusive() || !alive) return;
+    // Before SetDisplayMode, the window covers the screen at the desktop mode (see ApplyWindow).
+    const int display = modeSet_ ? activeDisplay_ : g_config.display;
     if (!active) {
         // Window mode is an ordinary window; switch and borderless cover the screen.
-        if (activeDisplay_ == kDisplayWindow || suspended_) return;
-        DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
-        suspended_ = true;      // first: the presenter must not create a new device from here on
-        DropExclusiveDevice();  // D3D9 wants its fullscreen device gone before the mode changes
-        if (switched_) {
-            ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
-            switched_ = false;
-            UpdateRefreshRate();
+        const bool cover = display != kDisplayWindow && !suspended_;
+        if (cover) {
+            DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
+            suspended_ = true;      // first: the presenter must not create a new device from here on
+            DropExclusiveDevice();  // D3D9 wants its fullscreen device gone before the mode changes
+            if (switched_) {
+                ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+                switched_ = false;
+                UpdateRefreshRate();
+            }
+            SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);
-    } else if (suspended_) {
+        // From here on (as in ddraw.dll, once the desktop mode is back) the surfaces are
+        // lost and can't be restored; back in front they can (see UpdateLostSurfaces).
+        // Window mode stays an ordinary, visible window: the game keeps running.
+        if (display != kDisplayWindow) InterlockedExchange(&deviceState_, kDevLost);
+        // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
+        if (cover) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);
+        return;
+    }
+    InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
+    if (suspended_) {
         DD2D9_LOG("focus regained: setting up %lux%lu again", modeW_, modeH_);
         if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
         ApplyWindow();
@@ -286,7 +340,23 @@ void DDraw::OnActivate(bool active) {
         // a device (it would make a windowed one, then replace it right away).
         suspended_ = false;
         MarkDirty();
+    } else if (display != kDisplayWindow && !(coop_ & DDSCL_NOWINDOWCHANGES)) {
+        // ddraw.dll makes the exclusive window topmost once it is in front.
+        SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
+}
+
+// WM_DISPLAYCHANGE on the exclusive window (ours or anyone's mode change). Called with
+// g_displayLock held.
+void DDraw::OnDisplayChange() {
+    if (!Exclusive() || !alive || (coop_ & DDSCL_NOWINDOWCHANGES) || !hwnd_ || IsIconic(hwnd_)) return;
+    const int display = modeSet_ ? activeDisplay_ : g_config.display;
+    if (display == kDisplayWindow) return;
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    const RECT& m = mi.rcMonitor;
+    SetWindowPos(hwnd_, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }
 
 // Exclusive mode: set the display up the way the configuration asks.
@@ -296,11 +366,16 @@ void DDraw::OnActivate(bool active) {
 //   borderless: no mode change; a borderless window covering the monitor, image scaled
 // Called with g_displayLock held and g_lock not held.
 void DDraw::ApplyWindow() {
-    if (!Exclusive() || !modeSet_ || !hwnd_ || !IsWindow(hwnd_)) return;
-    applying_ = true;  // focus changes caused by our own mode / window changes are not the user's
-    SaveWindow();      // before the mode switch, which may move or clamp the window
+    if (!Exclusive() || !hwnd_ || !IsWindow(hwnd_)) return;
     int display = g_config.display;
-    if (display == kDisplaySwitch && !SwitchMode()) {
+    // Before SetDisplayMode: as in ddraw.dll, switch and borderless cover the screen at the
+    // desktop mode; window mode has nothing to show yet and leaves the window alone.
+    if (!modeSet_ && display == kDisplayWindow) return;
+    // DDSCL_NOWINDOWCHANGES: the display mode still changes, the window doesn't.
+    const bool windowChanges = !(coop_ & DDSCL_NOWINDOWCHANGES);
+    applying_ = true;  // focus changes caused by our own mode / window changes are not the user's
+    if (windowChanges) SaveWindow();  // before the mode switch, which may move or clamp the window
+    if (modeSet_ && display == kDisplaySwitch && !SwitchMode()) {
         DD2D9_LOG("display mode %lux%lu not available, using a borderless scaled window", modeW_, modeH_);
         display = kDisplayBorderless;
     }
@@ -311,6 +386,10 @@ void DDraw::ApplyWindow() {
         UpdateRefreshRate();
     }
     activeDisplay_ = display;
+    if (!windowChanges) {
+        applying_ = false;
+        return;
+    }
 
     LONG style = GetWindowLongW(hwnd_, GWL_STYLE);
     LONG exStyle = GetWindowLongW(hwnd_, GWL_EXSTYLE);
@@ -326,15 +405,22 @@ void DDraw::ApplyWindow() {
         int y = std::max<int>(wa.top, wa.top + ((wa.bottom - wa.top) - h) / 2);
         SetWindowPos(hwnd_, nullptr, x, y, w, h, SWP_NOZORDER | SWP_SHOWWINDOW);
     } else {
+        // ddraw.dll keeps the window's style: it draws over the whole screen, frame or
+        // not. The image goes into the client area here, so the frame has to go (as in Wine).
         SetWindowLongW(hwnd_, GWL_STYLE, (style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
         SetWindowLongW(hwnd_, GWL_EXSTYLE, exStyle & ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME));
+        // Shown without activating it; topmost if it's in front (otherwise once it gets there,
+        // see OnActivate), as ddraw.dll does.
         const RECT& m = mi.rcMonitor;
-        SetWindowPos(hwnd_, HWND_TOPMOST, m.left, m.top, m.right - m.left, m.bottom - m.top,
-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        const HWND fg = GetForegroundWindow();
+        const bool front = fg == hwnd_ || !fg || fg == GetDesktopWindow();  // not behind another window
+        SetWindowPos(hwnd_, front ? HWND_TOPMOST : nullptr, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE | (front ? 0 : SWP_NOZORDER));
     }
     applying_ = false;
     static const char* kNames[] = {"display mode switched", "centered window", "borderless window"};
-    DD2D9_LOG("%lux%lu: %s", modeW_, modeH_, kNames[display]);
+    if (modeSet_) DD2D9_LOG("%lux%lu: %s", modeW_, modeH_, kNames[display]);
+    else DD2D9_LOG("exclusive mode: the window covers the screen");
 }
 
 bool DDraw::SwitchMode() {
@@ -372,23 +458,33 @@ void DDraw::DropExclusiveDevice() {
 
 void DDraw::RestoreDisplay() {
     DropExclusiveDevice();
+    if (switched_ && g_exclusiveDD && g_exclusiveDD != this) {
+        DD2D9_LOG("display mode left alone: another DirectDraw object is in exclusive mode");
+        switched_ = false;
+    }
     if (switched_) {
         LONG r = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
         DD2D9_LOG("display mode restored (%ld)", r);
         switched_ = false;
         UpdateRefreshRate();
     }
-    RestoreSavedWindow();
     suspended_ = false;
 }
 
-void DDraw::RestoreSavedWindow() {
+// Leaving exclusive mode: the window gets its style back, keeping WS_VISIBLE and
+// WS_EX_TOPMOST as they are now; then (unless DDSCL_NOWINDOWCHANGES) it stops being
+// topmost. ddraw.dll leaves it the size it had; window mode, which moved it, puts it back.
+void DDraw::RestoreSavedWindow(bool windowChanges) {
     if (windowSaved_ && IsWindow(savedHwnd_)) {
-        SetWindowLongW(savedHwnd_, GWL_STYLE, savedStyle_);
-        SetWindowLongW(savedHwnd_, GWL_EXSTYLE, savedExStyle_);
+        const LONG keep = WS_VISIBLE | WS_MINIMIZE | WS_MAXIMIZE;
+        const LONG style = GetWindowLongW(savedHwnd_, GWL_STYLE), exStyle = GetWindowLongW(savedHwnd_, GWL_EXSTYLE);
+        SetWindowLongW(savedHwnd_, GWL_STYLE, (savedStyle_ & ~keep) | (style & keep));
+        SetWindowLongW(savedHwnd_, GWL_EXSTYLE, (savedExStyle_ & ~WS_EX_TOPMOST) | (exStyle & WS_EX_TOPMOST));
+        UINT flags = SWP_FRAMECHANGED | SWP_NOACTIVATE | (windowChanges ? 0 : SWP_NOZORDER);
         const RECT& r = savedRect_;
-        SetWindowPos(savedHwnd_, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                     SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        if (activeDisplay_ != kDisplayWindow) flags |= SWP_NOMOVE | SWP_NOSIZE;
+        SetWindowPos(savedHwnd_, windowChanges ? HWND_NOTOPMOST : nullptr, r.left, r.top, r.right - r.left,
+                     r.bottom - r.top, flags);
     }
     windowSaved_ = false;
     savedHwnd_ = nullptr;
@@ -396,7 +492,7 @@ void DDraw::RestoreSavedWindow() {
 
 void DDraw::SaveWindow() {
     if (windowSaved_ && savedHwnd_ == hwnd_) return;
-    RestoreSavedWindow();  // exclusive mode moved to another window: give the old one back first
+    RestoreSavedWindow(true);  // exclusive mode moved to another window: give the old one back first
     savedHwnd_ = hwnd_;
     savedStyle_ = GetWindowLongW(hwnd_, GWL_STYLE);
     savedExStyle_ = GetWindowLongW(hwnd_, GWL_EXSTYLE);
@@ -409,26 +505,6 @@ void DDraw::UpdateRefreshRate() {
     dm.dmSize = sizeof(dm);
     if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
         refresh_ = dm.dmDisplayFrequency;
-}
-
-// The display mode changed while a primary exists: give the chain new memory.
-// Called with g_lock held; the caller has checked PrimaryBusy().
-void DDraw::ResizePrimary() {
-    if (!primary) return;
-    DWORD w, h, bpp;
-    DisplayMode(&w, &h, &bpp);
-    Format f = Format::ForDisplayBpp(bpp);
-    std::vector<Surface*> chain = primary->flipChain;
-    if (chain.empty()) chain.push_back(primary);
-    for (Surface* s : chain) {
-        if (s->buf->w == int(w) && s->buf->h == int(h) && s->buf->fmt == f) continue;
-        Buffer* b = Buffer::Create(int(w), int(h), f);
-        if (!b) continue;
-        s->ReplaceBuffer(b);
-        s->desc.dwWidth = w;
-        s->desc.dwHeight = h;
-        f.ToDDPF(&s->desc.ddpfPixelFormat);
-    }
 }
 
 double DDraw::VBlankPhase() const {
@@ -486,50 +562,94 @@ HRESULT DDraw::Initialize(GUID*) {
 
 HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     DD2D9_LOG("SetCooperativeLevel(%p, 0x%lx)%s", static_cast<void*>(hwnd), flags, version == 1 ? " (DirectDraw 1)" : "");
+    DisplayGuard dg;
+    // Called again from the window procedure while this runs (WM_ACTIVATEAPP from the
+    // activation below): ddraw.dll ignores the inner call.
+    if (inCoop_) {
+        DD2D9_LOG("  called from inside SetCooperativeLevel: ignored, as in ddraw.dll");
+        return DD_OK;
+    }
+    struct Busy {
+        bool& b;
+        explicit Busy(bool& f) : b(f) { b = true; }
+        ~Busy() { b = false; }
+    } busy(inCoop_);
     // Validation as in ddraw.dll.
     if (flags & ~0x3FFFu) return DDERR_INVALIDPARAMS;
-    if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
-    if (!(flags & (DDSCL_NORMAL | DDSCL_EXCLUSIVE | DDSCL_SETFOCUSWINDOW | DDSCL_SETDEVICEWINDOW)))
-        return DDERR_INVALIDPARAMS;
+    if (flags & DDSCL_CREATEDEVICEWINDOW) {
+        // Not supported (no game known to use it): the focus window serves as the device window.
+        if (!(flags & DDSCL_EXCLUSIVE)) return DDERR_INVALIDPARAMS;
+        if (!(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
+        if (!hwnd_ && !(flags & DDSCL_SETFOCUSWINDOW)) return DDERR_NOFOCUSWINDOW;
+        if ((flags & DDSCL_SETFOCUSWINDOW) && !hwnd) return DDERR_NOHWND;
+        if (!hwnd) hwnd = hwnd_;
+        DD2D9_LOG("  DDSCL_CREATEDEVICEWINDOW: using the focus window %p", static_cast<void*>(hwnd));
+    }
+    if (!(flags & (DDSCL_NORMAL | DDSCL_EXCLUSIVE | DDSCL_SETFOCUSWINDOW))) return DDERR_INVALIDPARAMS;
     if (hwnd && !IsWindow(hwnd)) return DDERR_INVALIDPARAMS;
-    if ((flags & DDSCL_EXCLUSIVE) && (!hwnd || (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)))
-        return DDERR_INVALIDPARAMS;
-
-    DisplayGuard dg;
-    // Once a call through IDirectDraw (version 1) succeeds, the object keeps the
-    // DirectDraw 1 behavior below, whatever interface is used afterwards.
-    if (version == 1) ddraw1Coop_ = true;
-    if ((flags & (DDSCL_SETFOCUSWINDOW | DDSCL_SETDEVICEWINDOW)) && !(flags & (DDSCL_NORMAL | DDSCL_EXCLUSIVE))) {
+    if ((flags & DDSCL_SETFOCUSWINDOW) && !(flags & DDSCL_CREATEDEVICEWINDOW)) {
+        // Only the focus window is set (DDSCL_NOWINDOWCHANGES aside, nothing goes with it).
+        if (flags & (DDSCL_MULTITHREADED | DDSCL_FPUSETUP | DDSCL_FPUPRESERVE | DDSCL_ALLOWREBOOT |
+                     DDSCL_ALLOWMODEX | DDSCL_SETDEVICEWINDOW | DDSCL_NORMAL | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN))
+            return DDERR_INVALIDPARAMS;
+        if (Exclusive()) return DDERR_HWNDALREADYSET;
+        if (version == 1) ddraw1Coop_ = true;
         Guard l;
         if (hwnd) hwnd_ = hwnd;
         return DD_OK;
     }
+    if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
+    if ((flags & DDSCL_EXCLUSIVE) && (!hwnd || (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)))
+        return DDERR_INVALIDPARAMS;
+    // One DirectDraw object at a time has exclusive mode.
+    if ((flags & DDSCL_EXCLUSIVE) && g_exclusiveDD && g_exclusiveDD != this && g_exclusiveDD->alive)
+        return DDERR_EXCLUSIVEMODEALREADYSET;
+
+    // Once a call through IDirectDraw (version 1) succeeds, the object keeps the
+    // DirectDraw 1 behavior below, whatever interface is used afterwards.
+    if (version == 1) ddraw1Coop_ = true;
     const bool leaving = Exclusive() && !(flags & DDSCL_EXCLUSIVE);
+    // Taking a window as the exclusive (focus) window activates it, as in ddraw.dll.
+    const bool acquire = (flags & DDSCL_EXCLUSIVE) && (!Exclusive() || hwnd != hwnd_);
     // Leaving exclusive mode restores the desktop mode, except with DirectDraw 1:
     // there the display stays as the game set it (games switch through NORMAL
     // between their screens) until RestoreDisplayMode or the final Release.
     const bool restore = leaving && !ddraw1Coop_;
     if (leaving) {
-        UnhookWindow();
         if (restore) {
+            // Still hooked: the window covers the screen in the desktop mode before the game
+            // hears of the change (see OnDisplayChange).
             RestoreDisplay();
+            RestoreSavedWindow(!(flags & DDSCL_NOWINDOWCHANGES));
         } else {
             DropExclusiveDevice();  // a fullscreen device needs exclusive mode
             suspended_ = false;
             DD2D9_LOG("leaving exclusive mode: the display mode stays (DirectDraw 1)");
         }
+        UnhookWindow();
+        // Out of exclusive mode there is no background to be in: restorable again.
+        InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     }
+    // Entering exclusive mode (or moving it to another window) loses the surfaces.
+    if (acquire) InterlockedExchange(&deviceState_, kDevNotRestored);
+    if (flags & DDSCL_EXCLUSIVE) g_exclusiveDD = this;
+    else if (g_exclusiveDD == this) g_exclusiveDD = nullptr;
     {
         Guard l;
         coop_ = flags;
         if (hwnd) hwnd_ = hwnd;
-        if (restore) {
-            modeSet_ = false;
-            if (!PrimaryBusy()) ResizePrimary();
-        }
+        if (restore) modeSet_ = false;
     }
     if (Exclusive()) HookWindow();
     ApplyWindow();
+    // After the window is set up, as ddraw.dll: the activation (WM_ACTIVATEAPP, see
+    // OnActivate) then makes it topmost.
+    // From another thread than the window's, without waiting for it: its WM_ACTIVATEAPP
+    // handler may call back into DirectDraw, which this thread holds.
+    if (acquire) {
+        const bool foreign = GetWindowThreadProcessId(hwnd, nullptr) != GetCurrentThreadId();
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | (foreign ? SWP_ASYNCWINDOWPOS : 0));
+    }
     MarkDirty();
     return DD_OK;
 }
@@ -539,33 +659,74 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
     if (!w || !h || w > 16384 || h > 16384) return DDERR_INVALIDPARAMS;
     if (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) return DDERR_INVALIDMODE;
     DisplayGuard dg;
+    if (g_exclusiveDD && g_exclusiveDD != this) return DDERR_NOEXCLUSIVEMODE;
     {
         Guard l;
-        if (PrimaryBusy()) return DDERR_SURFACEBUSY;  // its memory is about to be replaced
         modeSet_ = true;
         modeW_ = w;
         modeH_ = h;
         modeBpp_ = bpp;
         modeRefresh_ = rr;
         suspended_ = false;
-        ResizePrimary();
     }
-    ApplyWindow();
+    if (Exclusive()) {
+        ApplyWindow();
+    } else if (g_config.display == kDisplaySwitch && !SwitchMode()) {
+        // ddraw.dll changes the display mode in normal mode too (the window stays as it is).
+        DD2D9_LOG("display mode %lux%lu not available: it stays virtual", w, h);
+    }
+    InvalidateSurfaces();
     MarkDirty();
     return DD_OK;
+}
+
+// The primary surface is gone while the game's display mode is set: ddraw.dll has the
+// window repainted. g_lock held.
+void DDraw::OnPrimaryReleased() {
+    if (modeSet_ && hwnd_ && IsWindow(hwnd_)) RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
 }
 
 HRESULT DDraw::RestoreDisplayMode() {
     DisplayGuard dg;
+    if (!modeSet_ && !switched_) return DD_OK;  // nothing set: nothing to restore, nothing lost
+    if (g_exclusiveDD && g_exclusiveDD != this) return DDERR_NOEXCLUSIVEMODE;
     RestoreDisplay();
-    Guard l;
-    modeSet_ = false;
-    if (!PrimaryBusy()) ResizePrimary();
+    {
+        Guard l;
+        modeSet_ = false;
+    }
+    ApplyWindow();  // still exclusive: the window covers the screen at the desktop mode
+    InvalidateSurfaces();
     MarkDirty();
     return DD_OK;
 }
 
-HRESULT DDraw::GetDisplayMode(void* desc) {
+// g_lock held.
+void DDraw::UpdateLostSurfaces() {
+    // Railroad Tycoon 2 restores its surfaces from its WM_QUERYNEWPALETTE handler, before
+    // WM_ACTIVATEAPP has told us the game is in front again (Wine's finding).
+    if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_)
+        InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
+    if (deviceState_ != kDevNotRestored) return;
+    for (Surface* s : surfaces) s->lost = s->CanBeLost();
+    InterlockedCompareExchange(&deviceState_, kDevOk, kDevNotRestored);
+}
+
+HRESULT DDraw::TestCooperativeLevel() {
+    // Back in front without WM_ACTIVATEAPP having said so yet (see UpdateLostSurfaces).
+    if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_)
+        InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
+    return deviceState_ == kDevLost ? DDERR_NOEXCLUSIVEMODE : DD_OK;
+}
+
+HRESULT DDraw::RestoreAllSurfaces() {
+    Guard l;
+    const std::vector<Surface*> list = surfaces;  // Restore doesn't create or destroy any
+    for (Surface* s : list) s->Restore();
+    return DD_OK;
+}
+
+HRESULT DDraw::GetDisplayMode(void* desc, int version) {
     if (!DescSizeOk(desc)) return DDERR_INVALIDPARAMS;
     Guard l;
     DWORD w, h, bpp;
@@ -577,21 +738,23 @@ HRESULT DDraw::GetDisplayMode(void* desc) {
     d.dwWidth = w;
     d.dwHeight = h;
     d.lPitch = LONG(((w * f.Bytes()) + 3) & ~3u);
-    d.dwRefreshRate = refresh_;
+    // The display's own report, as ddraw.dll gives it (0 for the driver default).
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    d.dwRefreshRate = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 0;
     f.ToDDPF(&d.ddpfPixelFormat);
-    DescOut(d, desc);
+    DescOut(d, desc);  // only as much as the caller's structure holds
+    // ddraw.dll then reports the size of this interface version's structure.
+    *static_cast<DWORD*>(desc) = version >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
     return DD_OK;
 }
 
-HRESULT DDraw::EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void* callback, int descVersion) {
-    if (!callback) return DDERR_INVALIDPARAMS;
-    DDSURFACEDESC2 f = {};
-    if (filter && !DescIn(filter, &f)) return DDERR_INVALIDPARAMS;
+// The display sizes offered: the classic modes plus whatever the monitor offers. A
+// classic mode the monitor lacks still works: it falls back to a scaled borderless window.
+static std::vector<SIZE> ModeSizes() {
     static const SIZE kSizes[] = {{320, 200}, {320, 240}, {400, 300}, {512, 384}, {640, 400}, {640, 480},
                                   {800, 600}, {1024, 768}, {1152, 864}, {1280, 720}, {1280, 960},
                                   {1280, 1024}, {1600, 1200}, {1920, 1080}};
-    // The classic modes plus whatever the monitor offers. A classic mode the
-    // monitor lacks still works: it falls back to a scaled borderless window.
     std::vector<SIZE> sizes;
     LONG maxW = GetSystemMetrics(SM_CXSCREEN), maxH = GetSystemMetrics(SM_CYSCREEN);
     DEVMODEW dm = {};
@@ -611,7 +774,14 @@ HRESULT DDraw::EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void
     sizes.erase(std::unique(sizes.begin(), sizes.end(),
                             [](const SIZE& a, const SIZE& b) { return a.cx == b.cx && a.cy == b.cy; }),
                 sizes.end());
+    return sizes;
+}
 
+HRESULT DDraw::EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void* callback, int descVersion) {
+    if (!callback) return DDERR_INVALIDPARAMS;
+    DDSURFACEDESC2 f = {};
+    if (filter && !DescIn(filter, &f)) return DDERR_INVALIDPARAMS;
+    const std::vector<SIZE> sizes = ModeSizes();
     using CB = HRESULT(WINAPI*)(void*, void*);
     static const DWORD kBpps[] = {8, 16, 32};
     for (DWORD bpp : kBpps) {
@@ -619,6 +789,7 @@ HRESULT DDraw::EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void
         for (const SIZE& s : sizes) {
             if (filter && (f.dwFlags & DDSD_WIDTH) && f.dwWidth != DWORD(s.cx)) continue;
             if (filter && (f.dwFlags & DDSD_HEIGHT) && f.dwHeight != DWORD(s.cy)) continue;
+            if (filter && (f.dwFlags & DDSD_REFRESHRATE) && f.dwRefreshRate != refresh_) continue;
             Format pf = Format::ForDisplayBpp(bpp);
             DDSURFACEDESC2 d = {};
             d.dwSize = sizeof(d);
@@ -648,13 +819,16 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
                DDCAPS_CANBLTSYSMEM | DDCAPS_BLTDEPTHFILL | DDCAPS_CANCLIP | DDCAPS_CANCLIPSTRETCHED;
     c.dwCaps2 = DDCAPS2_WIDESURFACES | DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_CANRENDERWINDOWED |
                 DDCAPS2_PRIMARYGAMMA | DDCAPS2_FLIPNOVSYNC | DDCAPS2_FLIPINTERVAL | DDCAPS2_CERTIFIED;
-    c.dwCKeyCaps = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_SRCBLTCLRSPACE | DDCKEYCAPS_DESTBLT | DDCKEYCAPS_DESTBLTCLRSPACE;
+    c.dwCKeyCaps = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT;  // no key ranges (see SetColorKey)
     c.dwFXCaps = DDFXCAPS_BLTSTRETCHX | DDFXCAPS_BLTSTRETCHY | DDFXCAPS_BLTSHRINKX | DDFXCAPS_BLTSHRINKY |
                  DDFXCAPS_BLTSTRETCHXN | DDFXCAPS_BLTSTRETCHYN | DDFXCAPS_BLTSHRINKXN | DDFXCAPS_BLTSHRINKYN |
                  DDFXCAPS_BLTMIRRORLEFTRIGHT | DDFXCAPS_BLTMIRRORUPDOWN;
     c.dwPalCaps = DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256;
-    c.dwVidMemTotal = 512u << 20;
-    c.dwVidMemFree = 480u << 20;
+    {
+        Guard l;
+        c.dwVidMemTotal = DWORD(kVidMemTotal);
+        c.dwVidMemFree = VidMemFree();
+    }
     c.ddsCaps.dwCaps = DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER |
                        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE | DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY |
                        DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_VISIBLE;
@@ -666,6 +840,7 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
         c.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
         c.dwZBufferBitDepths = DDBD_16 | DDBD_24 | DDBD_32;
     }
+    c.ddsOldCaps.dwCaps = c.ddsCaps.dwCaps;  // the DirectX 5 field, same value
     c.dwSVBCaps = c.dwCaps;
     c.dwSVBCKeyCaps = c.dwCKeyCaps;
     c.dwSVBFXCaps = c.dwFXCaps;
@@ -673,11 +848,21 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.dwSSBCaps = c.dwCaps;
     DD2D9_TRACE("GetCaps(%p, %p) -> dwCaps 0x%08lx, ddsCaps 0x%08lx%s", static_cast<void*>(drv),
                static_cast<void*>(hel), c.dwCaps, c.ddsCaps.dwCaps, (c.dwCaps & DDCAPS_3D) ? " (3D)" : "");
+    // The emulation layer's (HEL) surface caps are a fixed set in ddraw.dll.
+    DDCAPS helCaps = c;
+    helCaps.ddsCaps.dwCaps = DDSCAPS_FLIP | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE | DDSCAPS_PRIMARYSURFACE |
+                             DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
+    helCaps.ddsOldCaps.dwCaps = helCaps.ddsCaps.dwCaps;
+    helCaps.dwZBufferBitDepths = DDBD_16;
+    // An object limited to one side reports no surface caps for the other.
+    if (capsSide == kHardwareOnly) helCaps.ddsCaps.dwCaps = helCaps.ddsOldCaps.dwCaps = 0;
+    if (capsSide == kEmulationOnly) c.ddsCaps.dwCaps = c.ddsOldCaps.dwCaps = 0;
     for (DDCAPS* out : {drv, hel}) {
         if (!out) continue;
+        const DDCAPS& src = out == hel ? helCaps : c;
         DWORD size = out->dwSize;
         if (size < sizeof(DWORD) || size > sizeof(DDCAPS)) return DDERR_INVALIDPARAMS;
-        memcpy(out, &c, size);
+        memcpy(out, &src, size);
         out->dwSize = size;
     }
     return DD_OK;
@@ -720,27 +905,37 @@ HRESULT DDraw::WaitForVerticalBlank(DWORD flags, HANDLE) {
 }
 
 HRESULT DDraw::GetAvailableVidMem(DWORD* total, DWORD* free) {
-    if (total) *total = 512u << 20;
-    if (free) *free = 480u << 20;
+    Guard l;
+    if (total) *total = DWORD(kVidMemTotal);
+    if (free) *free = VidMemFree();
     return DD_OK;
 }
 
 HRESULT DDraw::GetDeviceIdentifier(void* id, DWORD, bool v2) {
     if (!id) return DDERR_INVALIDPARAMS;
     DDDEVICEIDENTIFIER2 d = {};
-    strcpy(d.szDriver, "dd2d9");
-    strcpy(d.szDescription, "dd2d9: DirectDraw on Direct3D 9");
-    d.liDriverVersion.QuadPart = 0x0006000E00000001LL;
+    if (!AdapterIdentifier(&d)) {  // no Direct3D 9: something that still looks like a driver
+        strcpy(d.szDriver, "dd2d9.dll");
+        strcpy(d.szDescription, "dd2d9: DirectDraw on Direct3D 9");
+        d.liDriverVersion.QuadPart = 0x0006000E00000001LL;
+    }
     memcpy(id, &d, v2 ? sizeof(DDDEVICEIDENTIFIER2) : sizeof(DDDEVICEIDENTIFIER));
     return DD_OK;
 }
 
-HRESULT DDraw::CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer) {
+HRESULT DDraw::CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer,
+                             int version) {
     if (outer) return CLASS_E_NOAGGREGATION;
     if (!out) return DDERR_INVALIDPARAMS;
+    if (!coop_) return DDERR_NOCOOPERATIVELEVELSET;
     if (!(flags & (DDPCAPS_1BIT | DDPCAPS_2BIT | DDPCAPS_4BIT | DDPCAPS_8BIT))) return DDERR_INVALIDPARAMS;
     Guard l;
-    *out = new Palette(this, flags, entries);
+    auto* p = new Palette(this, flags, entries);
+    if (version >= 4) {  // made through IDirectDraw4/7: references it, as in ddraw.dll
+        AddRef(version);
+        p->ddRef = version;
+    }
+    *out = p;
     return DD_OK;
 }
 
@@ -752,74 +947,213 @@ HRESULT DDraw::CreateClipper(DWORD, IDirectDrawClipper** out, IUnknown* outer) {
     return DD_OK;
 }
 
+// The GDI surface is the one holding the memory the primary surface started with (the
+// screen GDI draws on): after a flip, a back buffer.
+Surface* DDraw::GdiSurface() const {
+    if (!primary) return nullptr;
+    Surface* s = primary;
+    for (int i = 0; i < 4096; i++) {
+        if (s->buf == gdiBuf_) return s;
+        s = s->chainNext;
+        if (!s || s == primary) break;
+    }
+    return primary;
+}
+
 HRESULT DDraw::GetGDISurface(void** out, int version) {
     if (!out) return DDERR_INVALIDPARAMS;
     Guard l;
-    if (!primary) return DDERR_NOTFOUND;
-    primary->AddRef();
-    *out = primary->Iface(version);
+    *out = nullptr;
+    Surface* s = GdiSurface();
+    if (!s) return DDERR_NOTFOUND;
+    s->AddRef(Surface::SlotFor(version));
+    *out = s->Iface(version);
     return DD_OK;
 }
 
+// Flips until the GDI surface is in front again.
+HRESULT DDraw::FlipToGDISurface() {
+    Surface* front;
+    Surface* gdi;
+    {
+        Guard l;
+        front = primary;
+        if (!front) return DDERR_NOTFOUND;
+        if (!(front->desc.ddsCaps.dwCaps & DDSCAPS_FLIP) || !front->chainNext) return DDERR_NOTFLIPPABLE;
+        gdi = GdiSurface();
+        if (gdi == front) return DD_OK;
+        front->AddRef();  // Flip takes the lock itself
+    }
+    HRESULT hr = front->Flip(gdi, DDFLIP_WAIT);
+    front->Release();
+    return hr;
+}
+
 HRESULT DDraw::GetSurfaceFromDC(HDC dc, void** out, int version) {
-    if (!out) return DDERR_INVALIDPARAMS;
+    if (!out) return E_INVALIDARG;
     *out = nullptr;
-    if (!dc) return DDERR_INVALIDPARAMS;
+    if (!dc) return DDERR_NOTFOUND;
     Guard l;
     for (Surface* s : surfaces) {
         if (s->dcOut == dc) {
-            s->AddRef();
+            s->AddRef(Surface::SlotFor(version));
             *out = s->Iface(version);
             return DD_OK;
         }
     }
-    *out = nullptr;
     return DDERR_NOTFOUND;
 }
 
-HRESULT DDraw::EnumSurfaces(DWORD flags, const void*, void* ctx, void* callback, int version) {
+// The GetSurfaceFromDC export: any DirectDraw object's surface, as IDirectDrawSurface.
+HRESULT DDraw::FindSurfaceFromDC(HDC dc, void** out, HDC* deviceDC) {
+    if (!out) return E_INVALIDARG;
+    *out = nullptr;
+    if (!deviceDC) return E_INVALIDARG;
+    *deviceDC = nullptr;
+    Guard l;
+    for (DDraw* d : g_ddraws) {
+        if (FAILED(d->GetSurfaceFromDC(dc, out, 1))) continue;
+        // ddraw.dll also gives a display DC (one for the process, kept for good).
+        static HDC display = CreateDCW(L"DISPLAY", nullptr, nullptr, nullptr);
+        *deviceDC = display;
+        return DD_OK;
+    }
+    return DDERR_NOTFOUND;
+}
+
+// Does surface description `have` match what `want` asks for (the fields it flags)?
+static bool DescMatches(const DDSURFACEDESC2& want, const DDSURFACEDESC2& have) {
+    if ((want.dwFlags & have.dwFlags) != want.dwFlags) return false;
+    auto same = [&](DWORD flag, const void* a, const void* b, size_t n) {
+        return !(want.dwFlags & flag) || memcmp(a, b, n) == 0;
+    };
+#define DD2D9_SAME(FLAG, FIELD) same(FLAG, &want.FIELD, &have.FIELD, sizeof(want.FIELD))
+    if (!DD2D9_SAME(DDSD_ALPHABITDEPTH, dwAlphaBitDepth) || !DD2D9_SAME(DDSD_BACKBUFFERCOUNT, dwBackBufferCount) ||
+        !DD2D9_SAME(DDSD_CAPS, ddsCaps) || !DD2D9_SAME(DDSD_CKDESTBLT, ddckCKDestBlt) ||
+        !DD2D9_SAME(DDSD_CKDESTOVERLAY, ddckCKDestOverlay) || !DD2D9_SAME(DDSD_CKSRCBLT, ddckCKSrcBlt) ||
+        !DD2D9_SAME(DDSD_CKSRCOVERLAY, ddckCKSrcOverlay) || !DD2D9_SAME(DDSD_HEIGHT, dwHeight) ||
+        !DD2D9_SAME(DDSD_LINEARSIZE, dwLinearSize) || !DD2D9_SAME(DDSD_LPSURFACE, lpSurface) ||
+        !DD2D9_SAME(DDSD_MIPMAPCOUNT, dwMipMapCount) || !DD2D9_SAME(DDSD_PITCH, lPitch) ||
+        !DD2D9_SAME(DDSD_REFRESHRATE, dwRefreshRate) || !DD2D9_SAME(DDSD_TEXTURESTAGE, dwTextureStage) ||
+        !DD2D9_SAME(DDSD_WIDTH, dwWidth))
+        return false;
+#undef DD2D9_SAME
+    if (want.dwFlags & DDSD_PIXELFORMAT) {
+        Format a, b;
+        if (!Format::FromDDPF(want.ddpfPixelFormat, &a) || !Format::FromDDPF(have.ddpfPixelFormat, &b) || !(a == b))
+            return false;
+    }
+    return true;
+}
+
+HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version) {
     if (!callback) return DDERR_INVALIDPARAMS;
-    if (!(flags & DDENUMSURFACES_DOESEXIST)) {
-        DD2D9_STUB("EnumSurfaces(CANBECREATED)");
-        return DDERR_UNSUPPORTED;
-    }
-    std::vector<Surface*> list;
-    {
-        Guard l;
-        list = surfaces;
-        for (Surface* s : list) s->AddRef();
-    }
     using CB = HRESULT(WINAPI*)(void*, void*, void*);
-    size_t i = 0;
-    for (; i < list.size(); i++) {
-        DDSURFACEDESC2 d;
-        {
-            Guard l;
-            list[i]->GetSurfaceDesc(&d);
-        }
+    DDSURFACEDESC2 want = {};
+    if (filter && !DescIn(filter, &want)) return DDERR_INVALIDPARAMS;
+    const DWORD how = flags & (DDENUMSURFACES_ALL | DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH);
+    auto call = [&](Surface* s, const DDSURFACEDESC2& d) {
         union {
             DDSURFACEDESC v1;
             DDSURFACEDESC2 v2;
         } out;
         out.v1.dwSize = version >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
         DescOut(d, &out);
-        if (reinterpret_cast<CB>(callback)(list[i]->Iface(version), &out, ctx) == DDENUMRET_CANCEL) {
+        return reinterpret_cast<CB>(callback)(s ? s->Iface(version) : nullptr, &out, ctx);
+    };
+    if (flags & DDENUMSURFACES_CANBECREATED) {
+        // The descriptions surfaces could be created with (no surface handed out): the one
+        // asked for, or without a size, one for each display mode.
+        if (how != DDENUMSURFACES_MATCH || !filter) return DDERR_INVALIDPARAMS;
+        auto tryCreate = [&](const DDSURFACEDESC2& d) -> bool {
+            if (d.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE) {
+                // Not really created (that would start presenting): the display's description.
+                DDSURFACEDESC2 got = {};
+                got.dwSize = sizeof(got);
+                got.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT;
+                DWORD w, h, bpp;
+                {
+                    Guard l;
+                    DisplayMode(&w, &h, &bpp);
+                }
+                const Format f = Format::ForDisplayBpp(bpp);
+                got.dwWidth = w;
+                got.dwHeight = h;
+                got.lPitch = LONG(((w * f.Bytes()) + 7) & ~7u);
+                got.ddsCaps.dwCaps = d.ddsCaps.dwCaps | DDSCAPS_VISIBLE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
+                f.ToDDPF(&got.ddpfPixelFormat);
+                return call(nullptr, got) != DDENUMRET_CANCEL;
+            }
+            union {
+                DDSURFACEDESC v1;
+                DDSURFACEDESC2 v2;
+            } in;
+            in.v1.dwSize = version >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
+            DescOut(d, &in);
+            void* iface = nullptr;
+            if (FAILED(CreateSurfaceImpl(&in, &iface, nullptr, version))) return true;
+            Surface* s = Surface::From(iface);
+            DDSURFACEDESC2 got;
+            {
+                Guard l;
+                s->GetSurfaceDesc(&got);
+            }
+            static_cast<IUnknown*>(iface)->Release();
+            return call(nullptr, got) != DDENUMRET_CANCEL;
+        };
+        if (want.dwFlags & (DDSD_WIDTH | DDSD_HEIGHT)) {
+            tryCreate(want);
+        } else {  // in the display's format, unless the game asks for another
+            for (const SIZE& sz : ModeSizes()) {
+                DDSURFACEDESC2 d = want;
+                d.dwFlags |= DDSD_WIDTH | DDSD_HEIGHT;
+                d.dwWidth = DWORD(sz.cx);
+                d.dwHeight = DWORD(sz.cy);
+                if (!tryCreate(d)) break;
+            }
+        }
+        return DD_OK;
+    }
+    if (!(flags & DDENUMSURFACES_DOESEXIST)) return DDERR_INVALIDPARAMS;
+    const bool nomatch = (flags & DDENUMSURFACES_NOMATCH) != 0;
+    std::vector<Surface*> list;
+    std::vector<DDSURFACEDESC2> descs;
+    {
+        Guard l;
+        for (Surface* s : surfaces) {
+            DDSURFACEDESC2 d;
+            s->GetSurfaceDesc(&d);
+            if (!(flags & DDENUMSURFACES_ALL) && filter && nomatch == DescMatches(want, d)) continue;
+            s->AddRef(Surface::SlotFor(version));  // the callback releases it
+            list.push_back(s);
+            descs.push_back(d);
+        }
+    }
+    size_t i = 0;
+    for (; i < list.size(); i++) {
+        if (call(list[i], descs[i]) == DDENUMRET_CANCEL) {
             i++;
             break;
         }
     }
-    for (; i < list.size(); i++) list[i]->Release();
+    for (; i < list.size(); i++) list[i]->Release(Surface::SlotFor(version));  // never handed to the callback
     return DD_OK;
 }
 
-HRESULT DDraw::DuplicateSurface(void* src, void** out, int version) {
+HRESULT DDraw::DuplicateSurface(void* src, void** out, int ddVersion) {
+    const int version = ddVersion == 2 ? 1 : ddVersion;  // surface interface version handed out
     Surface* s = Surface::From(src);
     if (!s || !out) return DDERR_INVALIDPARAMS;
     Guard l;
     if (s->isPrimary || s->root || !s->flipChain.empty()) return DDERR_CANTDUPLICATE;
     s->buf->AddRef();
     auto* n = new Surface(this, s->desc, s->buf, version);
-    n->AddRef();
+    n->AddRef(Surface::SlotFor(version));
+    n->ddVersion = ddVersion;
+    if (version >= 4) {  // see CreateSurface
+        AddRef(version);
+        n->ddRef = version;
+    }
     *out = n->Iface(version);
     return DD_OK;
 }
@@ -827,26 +1161,71 @@ HRESULT DDraw::DuplicateSurface(void* src, void** out, int version) {
 // ---------------------------------------------------------------- CreateSurface
 
 static void FinishCaps(DDSURFACEDESC2* d) {
+    // Managed textures live in system memory as far as the game can tell.
+    if (d->ddsCaps.dwCaps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE))
+        d->ddsCaps.dwCaps |= DDSCAPS_SYSTEMMEMORY;
     if (!(d->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY))
         d->ddsCaps.dwCaps |= DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
     if (d->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE) d->ddsCaps.dwCaps |= DDSCAPS_VISIBLE;
     d->dwFlags |= DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
 }
 
-HRESULT DDraw::CreateSurface(const void* inDesc, void** out, IUnknown* outer, int version) {
-    const HRESULT hr = CreateSurfaceImpl(inDesc, out, outer, version);
+HRESULT DDraw::CreateSurface(const void* inDesc, void** out, IUnknown* outer, int ddVersion) {
+    const HRESULT hr = CreateSurfaceImpl(inDesc, out, outer, ddVersion);
     if (FAILED(hr)) DD2D9_LOG("CreateSurface failed: 0x%08lx", hr);
     return hr;
 }
 
-HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer, int version) {
+HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer, int ddVersion) {
+    const int version = ddVersion == 2 ? 1 : ddVersion;  // IDirectDraw2 hands out IDirectDrawSurface
     if (outer) return CLASS_E_NOAGGREGATION;
-    if (!out) return DDERR_INVALIDPARAMS;
-    *out = nullptr;
+    Guard l;
+    // In ddraw.dll's order; *out stays untouched until the description is accepted.
+    if (!(coop_ & (DDSCL_NORMAL | DDSCL_EXCLUSIVE))) return DDERR_NOCOOPERATIVELEVELSET;
     DDSURFACEDESC2 in;
     if (!DescIn(inDesc, &in)) return DDERR_INVALIDPARAMS;
-    Guard l;
-    const DWORD caps = (in.dwFlags & DDSD_CAPS) ? in.ddsCaps.dwCaps : DDSCAPS_OFFSCREENPLAIN;
+    // Each interface takes exactly its own description.
+    if (static_cast<const DDSURFACEDESC*>(inDesc)->dwSize != (ddVersion < 4 ? sizeof(DDSURFACEDESC) : sizeof(DDSURFACEDESC2)))
+        return DDERR_INVALIDPARAMS;
+    if (!out) return DDERR_INVALIDPARAMS;
+    *out = nullptr;
+    UpdateLostSurfaces();  // the surfaces lost so far, not this new one
+    // ddraw.dll reads the caps even without DDSD_CAPS. None at all makes an offscreen
+    // surface, whose caps still say nothing but where its memory is.
+    const DWORD caps = in.ddsCaps.dwCaps;
+    const DWORD caps2 = in.ddsCaps.dwCaps2;
+    const bool flip = (caps & DDSCAPS_FLIP) != 0;
+    const bool complex = (caps & DDSCAPS_COMPLEX) != 0;
+    const bool cube = (caps2 & DDSCAPS2_CUBEMAP) != 0;
+    // Caps as ddraw.dll validates them, in its order.
+    if (complex && !(caps & (DDSCAPS_FLIP | DDSCAPS_MIPMAP)) && !cube) return DDERR_INVALIDCAPS;
+    if ((in.dwFlags & DDSD_MIPMAPCOUNT) && !complex) return DDERR_INVALIDCAPS;  // even a count of 1
+    if (flip) {
+        // A flip chain: complex, with at least one back buffer.
+        if (!(in.dwFlags & DDSD_BACKBUFFERCOUNT) || !in.dwBackBufferCount || !complex) return DDERR_INVALIDCAPS;
+        if (cube) return DDERR_INVALIDPARAMS;
+    } else if (in.dwFlags & DDSD_BACKBUFFERCOUNT) {
+        return cube ? DDERR_INVALIDPARAMS : DDERR_INVALIDCAPS;
+    }
+    // DirectDraw sets these itself; IDirectDraw (1) still accepts (and keeps) them, except
+    // a primary back buffer or a flipping front buffer.
+    if (ddVersion > 1 ? (caps & (DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER)) != 0
+                      : (caps & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_BACKBUFFER)) ==
+                                (DDSCAPS_PRIMARYSURFACE | DDSCAPS_BACKBUFFER) ||
+                            (caps & (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER)) == (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER))
+        return DDERR_INVALIDCAPS;
+    if (caps & DDSCAPS_PRIMARYSURFACE) {
+        if (caps & DDSCAPS_TEXTURE) return DDERR_INVALIDCAPS;
+        if (complex && !flip) return DDERR_INVALIDCAPS;
+    }
+    if ((caps & DDSCAPS_SYSTEMMEMORY) && (caps & DDSCAPS_VIDEOMEMORY)) return DDERR_INVALIDCAPS;
+    if ((caps & (DDSCAPS_ALLOCONLOAD | DDSCAPS_MIPMAP)) && !(caps & DDSCAPS_TEXTURE)) return DDERR_INVALIDCAPS;
+    if ((caps2 & DDSCAPS2_CUBEMAP_ALLFACES) && !cube) return DDERR_INVALIDCAPS;
+    if (cube && !(caps2 & DDSCAPS2_CUBEMAP_ALLFACES)) return DDERR_INVALIDPARAMS;
+    const bool managed = (caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) != 0;
+    if (managed && (!(caps & DDSCAPS_TEXTURE) || (caps & (DDSCAPS_VIDEOMEMORY | DDSCAPS_SYSTEMMEMORY))))
+        return DDERR_INVALIDCAPS;
+    if ((caps & DDSCAPS_WRITEONLY) && !managed) return DDERR_INVALIDCAPS;
     DD2D9_LOG("CreateSurface(flags 0x%lx, caps 0x%lx, %lux%lu, backbuffers %lu)", in.dwFlags, caps,
              (in.dwFlags & DDSD_WIDTH) ? in.dwWidth : 0, (in.dwFlags & DDSD_HEIGHT) ? in.dwHeight : 0,
              (in.dwFlags & DDSD_BACKBUFFERCOUNT) ? in.dwBackBufferCount : 0);
@@ -859,6 +1238,7 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
             return DDERR_PRIMARYSURFACEALREADYEXISTS;
         }
         if (!coop_) return DDERR_NOCOOPERATIVELEVELSET;
+        if (flip && !Exclusive()) return DDERR_NOEXCLUSIVEMODE;
         if (in.dwFlags & (DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT))
             DD2D9_LOG("CreateSurface: ignoring size/format given for the primary surface");
         DWORD dw, dh, bpp;
@@ -890,89 +1270,169 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     }
 
     DDSURFACEDESC2 base = in;
-    base.dwFlags &= ~(DDSD_LPSURFACE | DDSD_PITCH | DDSD_ZBUFFERBITDEPTH);
+    base.dwFlags &= ~(DDSD_LPSURFACE | DDSD_PITCH | DDSD_ZBUFFERBITDEPTH | DDSD_LINEARSIZE);
+    // Fields the game didn't flag hold whatever its structure did: not taken over.
+    if (!(in.dwFlags & DDSD_BACKBUFFERCOUNT)) base.dwBackBufferCount = 0;
+    if (!(in.dwFlags & (DDSD_MIPMAPCOUNT | DDSD_REFRESHRATE))) base.dwMipMapCount = 0;
+    if (!(in.dwFlags & DDSD_ALPHABITDEPTH)) base.dwAlphaBitDepth = 0;
+    base.lpSurface = nullptr;
     base.dwWidth = DWORD(w);
     base.dwHeight = DWORD(h);
     base.ddsCaps.dwCaps = caps;
     fmt.ToDDPF(&base.ddpfPixelFormat);
 
+    // Mip levels: as many as asked for, or (without DDSD_MIPMAPCOUNT) down to a side of 1:
+    // the longer side through IDirectDraw7, the shorter one before it. More than the size
+    // allows are clamped (ddraw.dll fails those).
+    DWORD levels = 1;
+    if (caps & DDSCAPS_MIPMAP) {
+        const int longest = std::max(w, h), shortest = std::min(w, h);
+        int full = 1;
+        while ((longest >> full) > 0) full++;  // levels down to 1x1
+        if (complex) {
+            if (in.dwFlags & DDSD_MIPMAPCOUNT) {
+                if (!in.dwMipMapCount) return DDERR_INVALIDPARAMS;
+                levels = std::min<DWORD>(in.dwMipMapCount, DWORD(full));
+            } else {
+                int n = 1;
+                while (((ddVersion == 7 ? longest : shortest) >> n) > 0) n++;
+                levels = DWORD(n);
+            }
+        }
+        base.dwFlags |= DDSD_MIPMAPCOUNT;
+        base.dwMipMapCount = levels;
+    }
+    // No overlays (GetCaps says so): games then fall back to blitting.
+    if (caps & DDSCAPS_OVERLAY) return DDERR_NOOVERLAYHW;
+    // Color key ranges need hardware support, which ddraw.dll reports none of.
+    {
+        static const DWORD kCkFlags[4] = {DDSD_CKDESTOVERLAY, DDSD_CKDESTBLT, DDSD_CKSRCOVERLAY, DDSD_CKSRCBLT};
+        const DDCOLORKEY* keys[4] = {&in.ddckCKDestOverlay, &in.ddckCKDestBlt, &in.ddckCKSrcOverlay, &in.ddckCKSrcBlt};
+        for (int i = 0; i < 4; i++)
+            if ((in.dwFlags & kCkFlags[i]) && keys[i]->dwColorSpaceLowValue != keys[i]->dwColorSpaceHighValue)
+                return DDERR_NOCOLORKEYHW;
+    }
+
     // Main surface memory (client memory when DDSD_LPSURFACE is given).
+    const bool client = (in.dwFlags & DDSD_LPSURFACE) && !(caps & DDSCAPS_PRIMARYSURFACE);
+    if (client) {
+        // In system memory only, with an explicit pitch: a multiple of 4 that holds a row.
+        if (caps & DDSCAPS_VIDEOMEMORY) return DDERR_INVALIDCAPS;
+        if (ddVersion < 4) return DDERR_INVALIDPARAMS;  // client memory came with IDirectDraw4
+        const LONG minPitch = LONG(w * fmt.Bytes());
+        if (!in.lpSurface || !(in.dwFlags & DDSD_PITCH) || fmt.fourcc || in.lPitch < minPitch || (in.lPitch & 3))
+            return DDERR_INVALIDPARAMS;
+        base.ddsCaps.dwCaps |= DDSCAPS_SYSTEMMEMORY;
+    }
     Buffer* b;
-    if ((in.dwFlags & DDSD_LPSURFACE) && in.lpSurface && !(caps & DDSCAPS_PRIMARYSURFACE)) {
-        LONG pitch = (in.dwFlags & DDSD_PITCH) ? in.lPitch : LONG(w * fmt.Bytes());
-        if (fmt.fourcc || pitch < LONG(w * fmt.Bytes())) return DDERR_INVALIDPARAMS;
-        b = Buffer::CreateExternal(in.lpSurface, w, h, pitch, fmt);
+    if (client) {
+        b = Buffer::CreateExternal(in.lpSurface, w, h, in.lPitch, fmt);
     } else {
         b = Buffer::Create(w, h, fmt);
     }
     if (!b) return DDERR_OUTOFMEMORY;
 
-    const bool flip = (caps & DDSCAPS_FLIP) != 0;
-    const DWORD backs = (in.dwFlags & DDSD_BACKBUFFERCOUNT) ? in.dwBackBufferCount : 0;
-    if (flip && (backs == 0 || !(caps & DDSCAPS_COMPLEX))) {
-        b->Release();
-        return DDERR_INVALIDCAPS;
-    }
+    const DWORD backs = flip ? in.dwBackBufferCount : 0;  // validated above
 
-    DDSURFACEDESC2 frontDesc = base;
+    // A cube map's root is its first face; the other faces hang off it, each with its own
+    // mip levels. ddraw.dll lists the faces on the root from the last one back.
+    static const DWORD kFaces[6] = {DDSCAPS2_CUBEMAP_POSITIVEX, DDSCAPS2_CUBEMAP_NEGATIVEX, DDSCAPS2_CUBEMAP_POSITIVEY,
+                                    DDSCAPS2_CUBEMAP_NEGATIVEY, DDSCAPS2_CUBEMAP_POSITIVEZ, DDSCAPS2_CUBEMAP_NEGATIVEZ};
+    std::vector<DWORD> faces;
+    if (cube)
+        for (DWORD f : kFaces)
+            if (caps2 & f) faces.push_back(f);
+    auto faceDesc = [&](DWORD face) {
+        DDSURFACEDESC2 d = base;
+        if (face) d.ddsCaps.dwCaps2 = (caps2 & ~DDSCAPS2_CUBEMAP_ALLFACES) | face;
+        return d;
+    };
+
+    DDSURFACEDESC2 frontDesc = faceDesc(cube ? faces[0] : 0);
     if (flip) frontDesc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
     FinishCaps(&frontDesc);
     auto* front = new Surface(this, frontDesc, b, version);
-    front->AddRef();
+    const int frontSlot = Surface::SlotFor(version);
+    front->AddRef(frontSlot);
+
+    // A member of the complex surface, owned by the root (front).
+    auto addMember = [&](const DDSURFACEDESC2& d, int mw, int mh) -> Surface* {
+        Buffer* mb = Buffer::Create(mw, mh, fmt);
+        if (!mb) return nullptr;
+        DDSURFACEDESC2 md = d;
+        md.dwWidth = DWORD(mw);
+        md.dwHeight = DWORD(mh);
+        FinishCaps(&md);
+        auto* m = new Surface(this, md, mb, version);
+        m->AddRef(Surface::SlotFor(version));  // the root's reference, counted as ddraw.dll does
+        m->root = front;
+        front->children.push_back(m);
+        return m;
+    };
+    // Mip levels 1.. below a face (or a plain texture), each attached to the one above.
+    auto addLevels = [&](Surface* top, const DDSURFACEDESC2& d) -> bool {
+        Surface* prev = top;
+        int mw = w, mh = h;
+        for (DWORD i = 1; i < levels; i++) {
+            mw = std::max(mw / 2, 1);
+            mh = std::max(mh / 2, 1);
+            DDSURFACEDESC2 md = d;
+            md.dwMipMapCount = levels - i;
+            md.ddsCaps.dwCaps2 |= DDSCAPS2_MIPMAPSUBLEVEL;
+            Surface* level = addMember(md, mw, mh);
+            if (!level) return false;
+            prev->attached.push_back(level);
+            prev = level;
+        }
+        return true;
+    };
 
     if (flip) {
         front->flipChain.push_back(front);
         Surface* prev = front;
         for (DWORD i = 0; i < backs; i++) {
-            Buffer* bb = Buffer::Create(w, h, fmt);
-            if (!bb) {
-                front->Release();
-                return DDERR_OUTOFMEMORY;
-            }
             DDSURFACEDESC2 bd = base;
             bd.dwFlags &= ~DDSD_BACKBUFFERCOUNT;
             bd.dwBackBufferCount = 0;
             bd.ddsCaps.dwCaps = (caps & ~(DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_VISIBLE)) |
                                 (i == 0 ? DDSCAPS_BACKBUFFER : 0);
-            FinishCaps(&bd);
-            auto* back = new Surface(this, bd, bb, version);
-            back->AddRef();  // the root's reference
-            back->root = front;
-            front->children.push_back(back);
+            Surface* back = addMember(bd, w, h);
+            if (!back) {
+                front->Release(frontSlot);
+                return DDERR_OUTOFMEMORY;
+            }
             front->flipChain.push_back(back);
             prev->chainNext = back;
             prev = back;
         }
         prev->chainNext = front;
-    }
-
-    // Mipmap levels for textures.
-    if ((caps & DDSCAPS_MIPMAP) && (in.dwFlags & DDSD_MIPMAPCOUNT) && in.dwMipMapCount > 1 && !flip) {
-        Surface* prev = front;
-        int mw = w, mh = h;
-        for (DWORD i = 1; i < in.dwMipMapCount && (mw > 1 || mh > 1); i++) {
-            mw = mw > 1 ? mw / 2 : 1;
-            mh = mh > 1 ? mh / 2 : 1;
-            Buffer* mb = Buffer::Create(mw, mh, fmt);
-            if (!mb) break;
-            DDSURFACEDESC2 md = base;
-            md.dwWidth = DWORD(mw);
-            md.dwHeight = DWORD(mh);
-            md.dwMipMapCount = in.dwMipMapCount - i;
-            md.ddsCaps.dwCaps2 |= DDSCAPS2_MIPMAPSUBLEVEL;
-            FinishCaps(&md);
-            auto* level = new Surface(this, md, mb, version);
-            level->AddRef();  // the root's reference
-            level->root = front;
-            front->children.push_back(level);
-            prev->attached.push_back(level);
-            prev = level;
+    } else {
+        std::vector<Surface*> others;  // the other cube faces, in order
+        for (size_t i = 1; i < faces.size(); i++) {
+            const DDSURFACEDESC2 fd = faceDesc(faces[i]);
+            Surface* face = addMember(fd, w, h);
+            if (!face || !addLevels(face, fd)) {
+                front->Release(frontSlot);
+                return DDERR_OUTOFMEMORY;
+            }
+            others.push_back(face);
+        }
+        for (size_t i = others.size(); i-- > 0;) front->attached.push_back(others[i]);
+        if (!addLevels(front, frontDesc)) {
+            front->Release(frontSlot);
+            return DDERR_OUTOFMEMORY;
         }
     }
 
+    front->ddVersion = ddVersion;
+    if (version >= 4) {  // made through IDirectDraw4/7: references it, as in ddraw.dll
+        AddRef(version);
+        front->ddRef = version;
+    }
     if (caps & DDSCAPS_PRIMARYSURFACE) {
         front->isPrimary = true;
         primary = front;
+        gdiBuf_ = front->buf;
         presenter_->Start();
         MarkDirty();
     }

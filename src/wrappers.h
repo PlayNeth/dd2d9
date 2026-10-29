@@ -33,14 +33,14 @@ public:
     static Surface* S(void* iface) { return Surface::From(iface); }
 
     STDMETHOD(QueryInterface)(REFIID r, void** p) override { return s->QueryInterface(r, p); }
-    STDMETHOD_(ULONG, AddRef)() override { return s->AddRef(); }
-    STDMETHOD_(ULONG, Release)() override { return s->Release(); }
-    STDMETHOD(AddAttachedSurface)(I* a) { Guard l; return s->AddAttachedSurface(S(a)); }
+    STDMETHOD_(ULONG, AddRef)() override { return s->AddRef(Surface::SlotFor(V)); }
+    STDMETHOD_(ULONG, Release)() override { return s->Release(Surface::SlotFor(V)); }
+    STDMETHOD(AddAttachedSurface)(I* a) { Guard l; return s->AddAttachedSurface(S(a), V); }
     STDMETHOD(AddOverlayDirtyRect)(LPRECT) { return DDERR_NOTAOVERLAYSURFACE; }
     STDMETHOD(Blt)(LPRECT d, I* src, LPRECT sr, DWORD f, LPDDBLTFX fx) {
         Surface* ss = S(src);
         if (src && !ss) return DDERR_INVALIDPARAMS;
-        return s->Blt(d, ss, sr, f, fx);
+        return s->Blt(d, ss, sr, f, fx, V);
     }
     STDMETHOD(BltBatch)(LPDDBLTBATCH, DWORD, DWORD) { DD2D9_STUB("BltBatch"); return DDERR_UNSUPPORTED; }
     STDMETHOD(BltFast)(DWORD x, DWORD y, I* src, LPRECT sr, DWORD t) {
@@ -48,7 +48,7 @@ public:
         if (!ss) return DDERR_INVALIDPARAMS;
         return s->BltFast(x, y, ss, sr, t);
     }
-    STDMETHOD(DeleteAttachedSurface)(DWORD f, I* a) { Guard l; return s->DeleteAttachedSurface(f, S(a)); }
+    STDMETHOD(DeleteAttachedSurface)(DWORD f, I* a) { Guard l; return s->DeleteAttachedSurface(f, S(a), V); }
     STDMETHOD(EnumAttachedSurfaces)(LPVOID ctx, typename T::CB cb) {
         return s->EnumAttachedSurfaces(V, ctx, reinterpret_cast<void*>(cb));
     }
@@ -62,7 +62,9 @@ public:
         if (!caps || !out) return DDERR_INVALIDPARAMS;
         Guard l;
         Surface* a = nullptr;
-        HRESULT hr = s->GetAttachedSurface(ToCaps2(*caps), &a);
+        DDSCAPS2 c = ToCaps2(*caps);
+        if (s->version < 7) c.dwCaps2 = c.dwCaps3 = c.dwCaps4 = 0;  // older games leave garbage there
+        HRESULT hr = s->GetAttachedSurface(c, &a, V);
         *out = SUCCEEDED(hr) ? static_cast<I*>(a->Iface(V)) : nullptr;
         return hr;
     }
@@ -82,7 +84,8 @@ public:
     STDMETHOD(GetPalette)(LPDIRECTDRAWPALETTE* p) { Guard l; return s->GetPalette(p); }
     STDMETHOD(GetPixelFormat)(LPDDPIXELFORMAT pf) { Guard l; return s->GetPixelFormat(pf); }
     STDMETHOD(GetSurfaceDesc)(typename T::Desc* d) {
-        if (!DescSizeOk(d)) return DDERR_INVALIDPARAMS;
+        // Only the description of this interface version, as in ddraw.dll.
+        if (!d || d->dwSize != sizeof(typename T::Desc)) return DDERR_INVALIDPARAMS;
         Guard l;
         DDSURFACEDESC2 t;
         s->GetSurfaceDesc(&t);
@@ -90,16 +93,27 @@ public:
         return DD_OK;
     }
     STDMETHOD(Initialize)(LPDIRECTDRAW, typename T::Desc*) { return DDERR_ALREADYINITIALIZED; }
-    STDMETHOD(IsLost)() { return DD_OK; }
+    STDMETHOD(IsLost)() { Guard l; return s->IsLost() ? DDERR_SURFACELOST : DD_OK; }
     STDMETHOD(Lock)(LPRECT r, typename T::Desc* d, DWORD f, HANDLE) {
-        if (!DescSizeOk(d)) return DDERR_INVALIDPARAMS;
+        // Either description size, on any interface version. System-memory textures
+        // made through IDirectDraw7 take any size (filled as far as it goes, as one of
+        // the two structures). dwSize is left as it was.
+        if (!d) return DDERR_INVALIDPARAMS;
+        const DWORD size = d->dwSize;
+        if (!DescSizeOk(d)) {
+            const DWORD caps = s->desc.ddsCaps.dwCaps;
+            if (s->ddVersion != 7 || !(caps & DDSCAPS_TEXTURE) || (caps & DDSCAPS_VIDEOMEMORY))
+                return DDERR_INVALIDPARAMS;
+            d->dwSize = size >= sizeof(DDSURFACEDESC2) ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
+        }
         DDSURFACEDESC2 t;
         HRESULT hr = s->Lock(r, &t, f);
         if (SUCCEEDED(hr)) DescOut(t, d);
+        d->dwSize = size;
         return hr;
     }
     STDMETHOD(ReleaseDC)(HDC dc) { return s->ReleaseDC(dc); }
-    STDMETHOD(Restore)() { return DD_OK; }
+    STDMETHOD(Restore)() { Guard l; return s->Restore(); }
     STDMETHOD(SetClipper)(LPDIRECTDRAWCLIPPER c) { Guard l; return s->SetClipper(c); }
     STDMETHOD(SetColorKey)(DWORD f, LPDDCOLORKEY k) { Guard l; return s->SetColorKey(f, k); }
     STDMETHOD(SetOverlayPosition)(LONG, LONG) { return DDERR_NOTAOVERLAYSURFACE; }
@@ -162,26 +176,26 @@ public:
     explicit DDWrap(DDraw* impl) : d(impl) {}
 
     STDMETHOD(QueryInterface)(REFIID r, void** p) override { return d->QueryInterface(r, p); }
-    STDMETHOD_(ULONG, AddRef)() override { return d->AddRef(); }
-    STDMETHOD_(ULONG, Release)() override { return d->Release(); }
+    STDMETHOD_(ULONG, AddRef)() override { return d->AddRef(V); }
+    STDMETHOD_(ULONG, Release)() override { return d->Release(V); }
     STDMETHOD(Compact)() { return DD_OK; }
     STDMETHOD(CreateClipper)(DWORD f, LPDIRECTDRAWCLIPPER* c, IUnknown* o) { return d->CreateClipper(f, c, o); }
     STDMETHOD(CreatePalette)(DWORD f, LPPALETTEENTRY e, LPDIRECTDRAWPALETTE* p, IUnknown* o) {
-        return d->CreatePalette(f, e, p, o);
+        return d->CreatePalette(f, e, p, o, V);
     }
     STDMETHOD(CreateSurface)(typename T::Desc* desc, SI** out, IUnknown* o) {
-        return d->CreateSurface(desc, reinterpret_cast<void**>(out), o, T::SV);
+        return d->CreateSurface(desc, reinterpret_cast<void**>(out), o, V);
     }
-    STDMETHOD(DuplicateSurface)(SI* src, SI** out) { return d->DuplicateSurface(src, reinterpret_cast<void**>(out), T::SV); }
+    STDMETHOD(DuplicateSurface)(SI* src, SI** out) { return d->DuplicateSurface(src, reinterpret_cast<void**>(out), V); }
     STDMETHOD(EnumDisplayModes)(DWORD f, typename T::Desc* desc, LPVOID ctx, typename T::ModesCB cb) {
         return d->EnumDisplayModes(f, desc, ctx, reinterpret_cast<void*>(cb), V >= 4 ? 2 : 1);
     }
     STDMETHOD(EnumSurfaces)(DWORD f, typename T::Desc* desc, LPVOID ctx, typename T::SurfCB cb) {
         return d->EnumSurfaces(f, desc, ctx, reinterpret_cast<void*>(cb), T::SV);
     }
-    STDMETHOD(FlipToGDISurface)() { return DD_OK; }
+    STDMETHOD(FlipToGDISurface)() { return d->FlipToGDISurface(); }
     STDMETHOD(GetCaps)(LPDDCAPS drv, LPDDCAPS hel) { return d->GetCaps(drv, hel); }
-    STDMETHOD(GetDisplayMode)(typename T::Desc* desc) { return d->GetDisplayMode(desc); }
+    STDMETHOD(GetDisplayMode)(typename T::Desc* desc) { return d->GetDisplayMode(desc, V); }
     STDMETHOD(GetFourCCCodes)(LPDWORD n, LPDWORD) {
         if (!n) return DDERR_INVALIDPARAMS;
         *n = 0;
@@ -200,9 +214,12 @@ public:
     // IDirectDraw2+
     STDMETHOD(GetAvailableVidMem)(typename T::Caps*, LPDWORD total, LPDWORD free) { return d->GetAvailableVidMem(total, free); }
     // IDirectDraw4+
-    STDMETHOD(GetSurfaceFromDC)(HDC dc, SI** out) { return d->GetSurfaceFromDC(dc, reinterpret_cast<void**>(out), T::SV); }
-    STDMETHOD(RestoreAllSurfaces)() { return DD_OK; }
-    STDMETHOD(TestCooperativeLevel)() { return DD_OK; }
+    // IDirectDraw4's hands out the IDirectDrawSurface interface (as ddraw.dll does).
+    STDMETHOD(GetSurfaceFromDC)(HDC dc, SI** out) {
+        return d->GetSurfaceFromDC(dc, reinterpret_cast<void**>(out), V == 4 ? 1 : T::SV);
+    }
+    STDMETHOD(RestoreAllSurfaces)() { return d->RestoreAllSurfaces(); }
+    STDMETHOD(TestCooperativeLevel)() { return d->TestCooperativeLevel(); }
     STDMETHOD(GetDeviceIdentifier)(typename T::DevId* id, DWORD f) { return d->GetDeviceIdentifier(id, f, V == 7); }
     // IDirectDraw7
     STDMETHOD(StartModeTest)(LPSIZE, DWORD, DWORD) { return DDERR_TESTFINISHED; }

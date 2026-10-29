@@ -284,6 +284,35 @@ bool LoadedBehindWrapper() {
     return _wcsicmp(BaseName(g_dllPath).c_str(), L"ddraw.dll") != 0;
 }
 
+volatile LONG g_deferredCount = 0;
+
+namespace {
+struct Deferred {
+    void (*fn)(void*);
+    void* arg;
+};
+thread_local std::vector<Deferred>* t_deferred;
+}  // namespace
+
+void RunWhenUnlocked(void (*fn)(void*), void* arg) {
+    if (!LockHeldByMe()) {
+        fn(arg);
+        return;
+    }
+    if (!t_deferred) t_deferred = new std::vector<Deferred>();
+    t_deferred->push_back({fn, arg});
+    InterlockedIncrement(&g_deferredCount);
+}
+
+void RunDeferred() {
+    while (t_deferred && !t_deferred->empty() && !LockHeldByMe()) {
+        Deferred d = t_deferred->front();
+        t_deferred->erase(t_deferred->begin());
+        InterlockedDecrement(&g_deferredCount);
+        d.fn(d.arg);
+    }
+}
+
 int LogLevel() { return g_logLevel; }
 
 // The module whose image (past its headers) contains `addr`, or null.
@@ -579,6 +608,11 @@ void DescOut(const DDSURFACEDESC2& in, void* out) {
     d->ddckCKSrcBlt = in.ddckCKSrcBlt;
     d->ddpfPixelFormat = in.ddpfPixelFormat;
     d->ddsCaps.dwCaps = in.ddsCaps.dwCaps;
+    // The old structure describes a Z buffer by its depth rather than a pixel format.
+    if ((in.dwFlags & DDSD_PIXELFORMAT) && (in.ddsCaps.dwCaps & DDSCAPS_ZBUFFER)) {
+        d->dwFlags = (d->dwFlags & ~DDSD_PIXELFORMAT) | DDSD_ZBUFFERBITDEPTH;
+        d->dwZBufferBitDepth = in.ddpfPixelFormat.dwZBufferBitDepth;
+    }
 }
 
 }  // namespace dd2d9

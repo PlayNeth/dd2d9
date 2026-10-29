@@ -4,13 +4,16 @@ DirectDraw (DirectX 1–7) for 2D games, implemented on Direct3D 9. On Linux, DX
 turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
 
 ## How it works
-- **Surfaces live in system memory as GDI DIB sections.** `Lock` returns a direct
-  pointer, and `GetDC` works natively, so games that draw text with GDI work.
+- **Surfaces live in system memory**, laid out as ddraw.dll lays them out (the same
+  pitch). `Lock` returns a direct pointer, and `GetDC` puts a GDI device context
+  right on that memory (`D3DKMTCreateDCFromMemory`), so games that draw text with
+  GDI work, on the game's own memory too.
 - **All blitting is done in software**: color fill, raster ops (SRCCOPY,
   BLACKNESS, WHITENESS), stretch, left-right and up-down mirroring, source and
-  destination color keys (including ranges), overlapping copies, and conversion
+  destination color keys, overlapping copies, and conversion
   between 8/16/24/32-bit formats. Color-keyed copies (sprites) use SSE2.
-- **Flip chains** swap memory between surfaces, as the hardware does.
+- **Flip chains** swap memory between surfaces, as the hardware does. DirectDraw 1
+  games can also put them together with `AddAttachedSurface`.
 - **A presenter thread owns the D3D9 device.** It converts the primary surface to
   X8R8G8B8 (applying the palette and the gamma ramp), scales it into the game
   window with `StretchRect` and presents. Only the changed part of the image is
@@ -27,13 +30,18 @@ turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
   a borderless window with the image scaled. `display=window` and
   `display=borderless` avoid mode switches altogether.
 - **Focus handling as in ddraw.dll.** In exclusive mode the game's window is
-  subclassed. Alt+Tab or another loss of focus restores the desktop resolution
-  (or drops the borderless cover) and minimizes the game, and coming back sets
-  it up again. The screensaver and monitor power-off are blocked.
+  subclassed and covers the screen. Alt+Tab or another loss of focus restores the
+  desktop resolution (or drops the borderless cover) and minimizes the game, and
+  coming back sets it up again. The screensaver and monitor power-off are blocked.
+- **Lost surfaces as in ddraw.dll.** Display-mode changes, entering exclusive mode
+  and losing focus in it make video-memory surfaces (and the primary) lost until
+  the game calls `Restore` or `RestoreAllSurfaces`; `Lock` and `Flip` say
+  `DDERR_SURFACELOST` meanwhile, as games expect. Unlike on real hardware, the
+  contents survive.
 - **Blit rules match ddraw.dll.** Without a clipper, `Blt` rejects destination
   rectangles that extend past the surface; with one, it clips to the clipper's
-  window or clip list. `BltFast` never clips, and it rejects a color key the
-  surface doesn't have. These rules were checked against the decompiled XP SP3
+  window or clip list. `BltFast` never clips (with a clipper attached it fails
+  with `DDERR_BLTFASTCANTCLIP`), and it rejects a color key the surface doesn't have. These rules were checked against the decompiled XP SP3
   `ddraw.dll`.
 - **Windowed games** (`DDSCL_NORMAL`) get a desktop-sized primary surface, and
   the part under their window is shown.
@@ -54,12 +62,12 @@ renderers. The `d3d=` ini key overrides this.
 - **Mouse coordinate scaling.** When the image is scaled (`display=borderless`,
   or the fallback when a mode switch fails), games that read the cursor with
   `GetCursorPos` or `WM_MOUSEMOVE` see unscaled coordinates.
-- **Overlays, `BltBatch`, and `EnumSurfaces` with `CANBECREATED`.**
+- **Overlays and `BltBatch`.** Overlay surfaces are refused with `DDERR_NOOVERLAYHW`
+  (the caps say there are none), so games fall back to blitting.
 - **Blits that convert RGB to an 8-bit surface** write index 0.
 - **FourCC surfaces** are limited to DXT1–5, YUY2 and UYVY. They can be locked
   but not blitted. Other FourCC codes are refused.
-- **Surfaces are never lost**, so `IsLost` always succeeds. Games keep running
-  while minimized.
+- **`DDSCL_CREATEDEVICEWINDOW`**: the focus window serves as the device window.
 
 ## Configuration
 See `dd2d9.ini.example`. dd2d9 reads these files in order, later ones winning:
@@ -118,7 +126,7 @@ install DXVK's `d3d9.dll` into the prefix, or put it next to the game.
 - `ddtest fuzz` runs thousands of random blits (8/16/32-bit, color keys and key
   ranges, mirroring, stretching, overlapping copies) against a reference implementation.
 
-All 76 checks pass under Wine 11 (wined3d, Xvfb).
+All checks pass under Wine 11 (wined3d, Xvfb).
 
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter
 throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small

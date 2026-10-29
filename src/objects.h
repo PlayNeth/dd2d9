@@ -24,9 +24,8 @@ struct Buffer {
     LONG pitch = 0;
     Format fmt;
     uint8_t* bits = nullptr;
-    HBITMAP dib = nullptr;
-    HDC dc = nullptr;
-    bool ownsMemory = false;  // allocated with calloc (no DIB)
+    HDC dc = nullptr;  // from GetDC, kept until the buffer goes
+    bool ownsMemory = false;  // allocated here (_aligned_malloc)
     const Palette* dcPal = nullptr;  // palette last loaded into the DIB color table
     DWORD dcPalVersion = 0;
 
@@ -35,6 +34,11 @@ struct Buffer {
     void AddRef() { InterlockedIncrement(&ref); }
     void Release();
     HDC GetDC();
+    void EndDC();  // after the game's ReleaseDC: shadow DIB contents back to memory
+    HBITMAP shadow = nullptr;   // for GetDC where GDI can't use the memory itself
+    uint8_t* shadowBits = nullptr;
+    HANDLE kmtBitmap = nullptr;  // dc came from D3DKMTCreateDCFromMemory
+    void CopyToShadow();
     uint8_t* Row(int y) const { return bits + y * pitch; }
 };
 
@@ -44,6 +48,7 @@ public:
     uint32_t magic = kMagic;
     Palette* self = this;
 
+    void ReserveSystemEntries();
     Palette(DDraw* dd, DWORD caps, const PALETTEENTRY* entries);
     static Palette* From(void* iface) { return static_cast<Palette*>(ImplFromIface(iface)); }
 
@@ -64,6 +69,8 @@ private:
     ~Palette();
     LONG ref_ = 1;
     DDraw* dd_;
+public:
+    int ddRef = 0;  // DirectDraw interface version (4 or 7) this palette holds a reference to
 };
 
 // ---------------------------------------------------------------- Clipper
@@ -85,6 +92,7 @@ public:
     STDMETHOD(SetClipList)(LPRGNDATA data, DWORD flags) override;
     STDMETHOD(SetHWnd)(DWORD flags, HWND hwnd) override;
 
+    HRESULT Usable() const;  // what GetClipList fails with, if it does (g_lock held)
     // Rectangles a blit to `target` may touch, in the target's coordinates.
     std::vector<RECT> Region(const Surface* target) const;
 
@@ -122,16 +130,27 @@ public:
     void* Iface(int version);
 
     HRESULT QueryInterface(REFIID riid, void** out);
-    ULONG AddRef();
-    ULONG Release();
+    // As in ddraw.dll, every interface (IDirectDrawSurface .. 7, the gamma control)
+    // counts its own references, and AddRef/Release return that count; the surface
+    // lives while any is left. A complex surface's root holds its members through the
+    // interface they were created with (as ddraw.dll counts it); dd2d9's own references
+    // (Direct3D render targets) have a count of their own.
+    enum RefSlot { kRefV1, kRefV2, kRefV3, kRefV4, kRefV7, kRefGamma, kRefInternal, kRefSlots };
+    static int SlotFor(int version) {
+        return version == 1 ? kRefV1 : version == 2 ? kRefV2 : version == 3 ? kRefV3 : version == 4 ? kRefV4 : kRefV7;
+    }
+    ULONG AddRef(int slot = kRefInternal);
+    ULONG Release(int slot = kRefInternal);
 
-    HRESULT AddAttachedSurface(Surface* s);
-    HRESULT DeleteAttachedSurface(DWORD flags, Surface* s);
+    HRESULT AddAttachedSurface(Surface* s, int version);
+    HRESULT DeleteAttachedSurface(DWORD flags, Surface* s, int ifaceVersion);
     HRESULT EnumAttachedSurfaces(int version, void* ctx, void* callback);
-    HRESULT GetAttachedSurface(const DDSCAPS2& caps, Surface** out);
-    HRESULT Blt(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx);
+    HRESULT GetAttachedSurface(const DDSCAPS2& caps, Surface** out, int version);
+    // version: the IDirectDrawSurface version called (it decides where DDBLT_KEYDEST's key comes from).
+    HRESULT Blt(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version = 7);
     HRESULT BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans);
-    HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper);
+    HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
+                      bool destKeyFromSource = false);
     HRESULT Flip(Surface* target, DWORD flags);
     HRESULT GetCaps(DDSCAPS2* caps);
     HRESULT GetClipper(IDirectDrawClipper** out);
@@ -151,6 +170,12 @@ public:
     HRESULT SetPrivateData(REFGUID tag, void* data, DWORD size, DWORD flags);
     HRESULT GetPrivateData(REFGUID tag, void* data, DWORD* size);
     HRESULT FreePrivateData(REFGUID tag);
+    // Lost surfaces, as in ddraw.dll: video-memory surfaces (and the primary and Z
+    // buffers) are lost when the display mode or exclusive mode changes, or the
+    // exclusive game loses focus, until restored. Their content is kept here.
+    bool CanBeLost() const;
+    bool IsLost() const;  // g_lock held
+    HRESULT Restore();    // g_lock held
 
     int W() const { return buf->w; }
     int H() const { return buf->h; }
@@ -172,10 +197,25 @@ public:
     // unreferenced links to the other members; then, if still referenced, live on alone.
     void ForgetMembers(const Surface* oldRoot);
     void Detach(const Surface* oldRoot);
+    bool lost = false;    // marked lost (see DDraw::UpdateLostSurfaces); g_lock
+    int ddRef = 0;      // DirectDraw interface version (4 or 7) this surface holds a reference to
+    int ddVersion = 1;  // DirectDraw interface version it was created through (GetDDInterface returns it)
+    uint64_t vidMemBytes = 0;  // counted in the DirectDraw object's video memory use
     std::vector<Surface*> children;    // complex children owned by this root
     std::vector<Surface*> flipChain;   // on a flip-chain root: [front, back1, ..., backN]
     Surface* chainNext = nullptr;      // next surface in the flip chain (for GetAttachedSurface)
-    std::vector<Surface*> attached;    // explicitly attached surfaces (AddRef'd), plus mip levels
+    std::vector<Surface*> attached;    // explicitly attached surfaces, plus mip levels
+    struct AttachRef {
+        Surface* s;
+        int slot;  // the reference taken, through the interface AddAttachedSurface was called on
+    };
+    std::vector<AttachRef> attachRefs;  // the explicitly attached ones (a surface may be attached to several)
+    // A back buffer attached to a flip ring: the reference that holds, whoever detaches it.
+    int attachSlot = -1;
+    // Flip chains built with AddAttachedSurface (IDirectDrawSurface, as ddraw.dll allows):
+    // a ring through chainNext, like a created chain's.
+    bool flipStart = false;     // the surface the ring was formed on (it can't be detached)
+    DWORD attachSavedCaps = 0;  // caps before joining the ring
     Palette* palette = nullptr;
     Clipper* clipper = nullptr;
     DDCOLORKEY ck[4] = {};
@@ -195,10 +235,16 @@ private:
         IUnknown* unk;
     };
     void FillCore(RECT* dst, DWORD value);
-    LONG ref_ = 0;
+    void DropAttachRef();  // releases the reference attachSlot holds
+    HRESULT AttachForFlip(Surface* s, int slot);
+    void LeaveFlipRing(std::vector<Surface*>* drop);
+    LONG refs_[kRefSlots] = {};
+    LONG total_ = 0;  // sum of refs_
     void* wraps_[5] = {};
     std::vector<PrivateData> priv_;
 };
+
+bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out);  // presenter.cpp
 
 // ---------------------------------------------------------------- Presenter
 // Owns the Direct3D 9 device. A dedicated thread copies the primary surface
@@ -292,21 +338,27 @@ public:
     void* Iface(int version);
 
     HRESULT QueryInterface(REFIID riid, void** out);
-    ULONG AddRef();
-    ULONG Release();
+    // Every interface version (1, 2, 4, 7) counts its own references, as in
+    // ddraw.dll; the object is torn down when all of them are released.
+    ULONG AddRef(int version);
+    ULONG Release(int version);
     void IntAddRef() { InterlockedIncrement(&intRef_); }
     void IntRelease();
 
-    HRESULT CreateSurface(const void* desc, void** out, IUnknown* outer, int version);
-    HRESULT CreateSurfaceImpl(const void* desc, void** out, IUnknown* outer, int version);
-    HRESULT CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer);
+    // ddVersion: the IDirectDraw version called (1, 2, 4, 7).
+    HRESULT CreateSurface(const void* desc, void** out, IUnknown* outer, int ddVersion);
+    HRESULT CreateSurfaceImpl(const void* desc, void** out, IUnknown* outer, int ddVersion);
+    HRESULT CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer,
+                          int version);
     HRESULT CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* outer);
-    HRESULT DuplicateSurface(void* src, void** out, int version);
+    HRESULT DuplicateSurface(void* src, void** out, int ddVersion);
     HRESULT EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void* callback, int descVersion);
     HRESULT EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version);
     HRESULT GetCaps(DDCAPS* drv, DDCAPS* hel);
-    HRESULT GetDisplayMode(void* desc);
+    HRESULT GetDisplayMode(void* desc, int version);
     HRESULT GetGDISurface(void** out, int version);
+    HRESULT FlipToGDISurface();
+    Surface* GdiSurface() const;  // g_lock held
     HRESULT GetMonitorFrequency(DWORD* freq);
     HRESULT GetScanLine(DWORD* line);
     HRESULT GetVerticalBlankStatus(BOOL* inVb);
@@ -317,6 +369,7 @@ public:
     HRESULT WaitForVerticalBlank(DWORD flags, HANDLE event);
     HRESULT GetAvailableVidMem(DWORD* total, DWORD* free);
     HRESULT GetSurfaceFromDC(HDC dc, void** out, int version);
+    static HRESULT FindSurfaceFromDC(HDC dc, void** out, HDC* deviceDC);
     HRESULT GetDeviceIdentifier(void* id, DWORD flags, bool v2);
 
     // Display state
@@ -355,6 +408,16 @@ public:
     }
     Presenter* GetPresenter() { return presenter_; }
     void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
+    void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
+    void OnPrimaryReleased();
+    // Lost surfaces (see Surface::CanBeLost). kDevNotRestored: every surface that can be
+    // lost is about to be marked lost; kDevLost: the exclusive game is in the background.
+    enum DeviceState : LONG { kDevOk, kDevNotRestored, kDevLost };
+    LONG DevState() const { return deviceState_; }
+    void InvalidateSurfaces() { InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevOk); }
+    void UpdateLostSurfaces();  // apply a pending kDevNotRestored to the surfaces; g_lock held
+    HRESULT TestCooperativeLevel();
+    HRESULT RestoreAllSurfaces();
     bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
     // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which
     // then presents itself): while any exist, dd2d9 doesn't present.
@@ -375,20 +438,30 @@ public:
 private:
     ~DDraw();
     void ApplyWindow();
-    void RestoreSavedWindow();
+    void RestoreSavedWindow(bool windowChanges);
     void DropExclusiveDevice();
-    bool PrimaryBusy() const;  // a primary-chain surface is locked or has a DC out
     void HookWindow();
     void UnhookWindow();
     bool SwitchMode();
     void RestoreDisplay();
     void SaveWindow();
     void UpdateRefreshRate();
-    void ResizePrimary();
 
     LONG ref_ = 0;
     LONG tornDown_ = 0;
     LONG devices3D_ = 0;
+    LONG ifaceRef_[4] = {};  // per interface version: 1, 2, 4, 7
+public:
+    // Video memory as games see it: a fixed total, minus the video-memory surfaces (g_lock).
+    static constexpr uint64_t kVidMemTotal = 512ull << 20;
+    enum CapsSide { kBoth, kHardwareOnly, kEmulationOnly };
+    CapsSide capsSide = kBoth;  // from DirectDrawCreate's DDCREATE_HARDWAREONLY / DDCREATE_EMULATIONONLY
+    uint64_t vidMemUsed = 0;
+    DWORD VidMemFree() const {
+        return DWORD(vidMemUsed < kVidMemTotal ? kVidMemTotal - vidMemUsed : 0);
+    }
+private:
+    void TearDown();         // the last reference is gone (g_lock not held)
     volatile LONG dirtyAll_ = 1;
     RECT dirtyRect_ = {0, 0, 0, 0};  // guarded by g_lock
     LONG intRef_ = 1;  // released when the last external reference goes away
@@ -401,6 +474,7 @@ private:
     bool ddraw1Coop_ = false;   // a SetCooperativeLevel through IDirectDraw succeeded (g_displayLock)
     bool suspended_ = false;    // display setup undone because the game lost focus
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
+    bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)
     int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used
     HWND savedHwnd_ = nullptr;  // window whose style / position are saved
     bool windowSaved_ = false;  // window style / position saved before taking it over
@@ -410,6 +484,8 @@ private:
     LARGE_INTEGER qpcFreq_, qpcBase_;
     int64_t lastFlip_ = 0;
     Presenter* presenter_ = nullptr;
+    volatile LONG deviceState_ = kDevOk;
+    const Buffer* gdiBuf_ = nullptr;  // the primary's first memory (compared only)
 };
 
 }  // namespace dd2d9

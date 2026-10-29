@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.6.6"
+#define DD2D9_VERSION "0.7.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -57,9 +57,22 @@ const char* GuidName(REFIID riid);
 // Equivalent of the DirectDraw thread lock; taken by every API entry point and
 // by the presenter thread while it reads the primary surface.
 extern CRITICAL_SECTION g_lock;
+// Work that must not run while g_lock is held (DirectDraw teardown waits for the
+// presenter thread, which takes it): a thread holding it queues the work, which
+// runs as soon as that thread has released g_lock completely.
+inline bool LockHeldByMe() {
+    return g_lock.RecursionCount > 0 && g_lock.OwningThread == reinterpret_cast<HANDLE>(ULONG_PTR(GetCurrentThreadId()));
+}
+extern volatile LONG g_deferredCount;  // queued work on any thread: the fast check
+void RunWhenUnlocked(void (*fn)(void*), void* arg);
+void RunDeferred();  // this thread's queued work, once it no longer holds g_lock
+
 struct Guard {
     Guard() { EnterCriticalSection(&g_lock); }
-    ~Guard() { LeaveCriticalSection(&g_lock); }
+    ~Guard() {
+        LeaveCriticalSection(&g_lock);
+        if (g_deferredCount && !LockHeldByMe()) RunDeferred();
+    }
     Guard(const Guard&) = delete;
     Guard& operator=(const Guard&) = delete;
 };

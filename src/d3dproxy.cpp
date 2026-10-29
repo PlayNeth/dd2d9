@@ -385,9 +385,10 @@ HRESULT Viewport::Clear(DWORD count, D3DRECT* rects, DWORD flags, bool haveColor
 class Texture final : public RefObj {
 public:
     explicit Texture(Surface* s) : RefObj(kTexture), surface(s), f1(this), f2(this) {}
-    // Same object and lifetime as the surface.
-    ULONG AddRef() override { return surface->AddRef(); }
-    ULONG Release() override { return surface->Release(); }
+    // Same object and lifetime as the surface: its references are those of the
+    // surface interface it came from (as in ddraw.dll, the one it was created through).
+    ULONG AddRef() override { return surface->AddRef(Surface::SlotFor(surface->version)); }
+    ULONG Release() override { return surface->Release(Surface::SlotFor(surface->version)); }
     HRESULT QueryInterface(REFIID r, void** out) override { return surface->QueryInterface(r, out); }
 
     template <class Stub, class Dev, class Tex>
@@ -579,7 +580,7 @@ HRESULT D3DProxyQuerySurface(Surface* s, REFIID riid, void** out) {
         s->d3dTexture = t;
     }
     *out = IsEqualGUID(riid, IID_IDirect3DTexture2) ? static_cast<void*>(&t->f2) : static_cast<void*>(&t->f1);
-    s->AddRef();
+    t->AddRef();
     return S_OK;
 }
 

@@ -5,13 +5,17 @@ using namespace dd2d9;
 
 namespace {
 
-HRESULT CreateDDraw(REFIID riid, void** out, bool initialized) {
+// guid: DDCREATE_HARDWAREONLY / DDCREATE_EMULATIONONLY limit the caps reported to one side.
+HRESULT CreateDDraw(REFIID riid, void** out, bool initialized, const GUID* guid = nullptr) {
     auto* dd = new DDraw();
     dd->initialized = initialized;
+    const ULONG_PTR special = reinterpret_cast<ULONG_PTR>(guid);
+    if (special == DDCREATE_HARDWAREONLY) dd->capsSide = DDraw::kHardwareOnly;
+    else if (special == DDCREATE_EMULATIONONLY) dd->capsSide = DDraw::kEmulationOnly;
     HRESULT hr = dd->QueryInterface(riid, out);
     if (FAILED(hr)) {
-        dd->AddRef();
-        dd->Release();  // destroys it
+        dd->AddRef(1);
+        dd->Release(1);  // destroys it
     }
     return hr;
 }
@@ -78,7 +82,7 @@ HRESULT WINAPI DD2D9_DirectDrawCreate(GUID* guid, LPDIRECTDRAW* out, IUnknown* o
     DD2D9_LOG("DirectDrawCreate(%p)", static_cast<void*>(guid));
     if (!out) return DDERR_INVALIDPARAMS;
     if (outer) return CLASS_E_NOAGGREGATION;
-    return CreateDDraw(IID_IDirectDraw, reinterpret_cast<void**>(out), true);
+    return CreateDDraw(IID_IDirectDraw, reinterpret_cast<void**>(out), true, guid);
 }
 
 HRESULT WINAPI DD2D9_DirectDrawCreateEx(GUID* guid, LPVOID* out, REFIID riid, IUnknown* outer) {
@@ -86,7 +90,7 @@ HRESULT WINAPI DD2D9_DirectDrawCreateEx(GUID* guid, LPVOID* out, REFIID riid, IU
     if (!out) return DDERR_INVALIDPARAMS;
     if (outer) return CLASS_E_NOAGGREGATION;
     if (!IsEqualGUID(riid, IID_IDirectDraw7)) return DDERR_INVALIDPARAMS;
-    return CreateDDraw(riid, out, true);
+    return CreateDDraw(riid, out, true, guid);
 }
 
 HRESULT WINAPI DD2D9_DirectDrawCreateClipper(DWORD, LPDIRECTDRAWCLIPPER* out, IUnknown* outer) {
@@ -104,28 +108,25 @@ HRESULT WINAPI DD2D9_DirectDrawEnumerateA(LPDDENUMCALLBACKA cb, LPVOID ctx) {
     return DD_OK;
 }
 
-HRESULT WINAPI DD2D9_DirectDrawEnumerateW(LPDDENUMCALLBACKW cb, LPVOID ctx) {
-    DD2D9_LOG("DirectDrawEnumerateW()");
-    if (!cb) return DDERR_INVALIDPARAMS;
-    wchar_t desc[] = L"Primary Display Driver", name[] = L"display";
-    cb(nullptr, desc, name, ctx);
-    return DD_OK;
+// The wide versions were never implemented in ddraw.dll.
+HRESULT WINAPI DD2D9_DirectDrawEnumerateW(LPDDENUMCALLBACKW cb, LPVOID) {
+    DD2D9_LOG("DirectDrawEnumerateW(): unsupported, as in ddraw.dll");
+    return cb ? DDERR_UNSUPPORTED : DDERR_INVALIDPARAMS;
 }
 
 HRESULT WINAPI DD2D9_DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb, LPVOID ctx, DWORD flags) {
     DD2D9_LOG("DirectDrawEnumerateExA(flags 0x%lx)", flags);
     if (!cb) return DDERR_INVALIDPARAMS;
+    if (flags & ~DWORD(DDENUM_ATTACHEDSECONDARYDEVICES | DDENUM_DETACHEDSECONDARYDEVICES | DDENUM_NONDISPLAYDEVICES))
+        return DDERR_INVALIDPARAMS;
     char desc[] = "Primary Display Driver", name[] = "display";
     cb(nullptr, desc, name, ctx, nullptr);
     return DD_OK;
 }
 
-HRESULT WINAPI DD2D9_DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW cb, LPVOID ctx, DWORD flags) {
-    DD2D9_LOG("DirectDrawEnumerateExW(flags 0x%lx)", flags);
-    if (!cb) return DDERR_INVALIDPARAMS;
-    wchar_t desc[] = L"Primary Display Driver", name[] = L"display";
-    cb(nullptr, desc, name, ctx, nullptr);
-    return DD_OK;
+HRESULT WINAPI DD2D9_DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW, LPVOID, DWORD flags) {
+    DD2D9_LOG("DirectDrawEnumerateExW(flags 0x%lx): unsupported, as in ddraw.dll", flags);
+    return DDERR_UNSUPPORTED;
 }
 
 HRESULT WINAPI DD2D9_DllCanUnloadNow() { return S_FALSE; }
@@ -143,7 +144,10 @@ HRESULT WINAPI DD2D9_DllGetClassObject(REFCLSID clsid, REFIID riid, void** out) 
 }
 
 void WINAPI DD2D9_AcquireDDThreadLock() { EnterCriticalSection(&g_lock); }
-void WINAPI DD2D9_ReleaseDDThreadLock() { LeaveCriticalSection(&g_lock); }
+void WINAPI DD2D9_ReleaseDDThreadLock() {
+    LeaveCriticalSection(&g_lock);
+    if (g_deferredCount && !LockHeldByMe()) RunDeferred();  // e.g. a DirectDraw object released meanwhile
+}
 
 // Internal exports used by d3dim.dll and display drivers. DD2D9 does not
 // provide Direct3D, so these only exist to keep the export table compatible.
@@ -157,7 +161,9 @@ HRESULT WINAPI DD2D9_DDInternalUnlock(void*) { return DDERR_UNSUPPORTED; }
 HRESULT WINAPI DD2D9_DSoundHelp(HWND, void*, DWORD) { return 0; }
 HRESULT WINAPI DD2D9_GetDDSurfaceLocal(void*, void*, void**) { return DDERR_UNSUPPORTED; }
 void* WINAPI DD2D9_GetOLEThunkData(DWORD) { return nullptr; }
-HRESULT WINAPI DD2D9_GetSurfaceFromDC(HDC, void**, HDC*) { return DDERR_NOTFOUND; }
+HRESULT WINAPI DD2D9_GetSurfaceFromDC(HDC dc, void** out, HDC* deviceDC) {
+    return DDraw::FindSurfaceFromDC(dc, out, deviceDC);
+}
 HRESULT WINAPI DD2D9_RegisterSpecialCase(DWORD, DWORD, DWORD, DWORD) { return DD_OK; }
 
 }  // extern "C"

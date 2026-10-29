@@ -338,10 +338,17 @@ static int RunUnit() {
             DDSURFACEDESC2 l = {};
             l.dwSize = sizeof(l);
             prim->Lock(nullptr, &l, 0, nullptr);
+            // As in ddraw.dll: the mode changes, the primary keeps its memory and is lost.
             hr = dd->SetDisplayMode(640, 480, 16, 0, 0);
-            CHECK(hr == DDERR_SURFACEBUSY, "SetDisplayMode with the primary locked -> DDERR_SURFACEBUSY (0x%08lx)", hr);
+            CHECK(hr == DD_OK, "SetDisplayMode with the primary locked (0x%08lx)", hr);
+            CHECK(prim->IsLost() == DDERR_SURFACELOST, "primary lost after SetDisplayMode");
+            static_cast<volatile BYTE*>(l.lpSurface)[0] = 1;  // still writable
             prim->Unlock(nullptr);
+            hr = prim->Restore();
+            CHECK(hr == DDERR_WRONGMODE, "primary not restorable in another mode (0x%08lx)", hr);
             dd->RestoreDisplayMode();
+            hr = prim->Restore();
+            CHECK(hr == DD_OK, "primary restorable in its own mode again (0x%08lx)", hr);
         }
         IDirectDrawSurface7* dup = nullptr;
         hr = dd->CreateSurface(&d, &dup, nullptr);
@@ -470,6 +477,13 @@ static int RunFullscreen8(int modeW, int modeH) {
     SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
     Pump();
     CHECK(!IsIconic(hwnd), "window restored after focus returns (was minimized: %d)", minimized);
+    // The surfaces were lost meanwhile, as in ddraw.dll: the game restores them.
+    hr = front->Flip(nullptr, DDFLIP_WAIT);
+    CHECK(hr == DDERR_SURFACELOST, "flip after focus returns: surface lost (0x%08lx)", hr);
+    hr = dd->TestCooperativeLevel();
+    CHECK(hr == DD_OK, "cooperative level fine after focus returns (0x%08lx)", hr);
+    hr = dd->RestoreAllSurfaces();
+    CHECK(hr == DD_OK && front->IsLost() == DD_OK, "surfaces restored (0x%08lx)", hr);
     int flipErrors = 0;
     for (int i = 0; i < 60; i++) {
         Pump();

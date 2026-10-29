@@ -218,19 +218,21 @@ static void MarkClipsDirty(Surface* s, const Clips& clips) {
 
 }  // namespace
 
-HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx) {
+HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version) {
     Guard l;
     DD2D9_TRACE("Blt %p[%s] <- %p[%s] flags=0x%lx%s fx=0x%lx fill=0x%lx", static_cast<void*>(this),
                RectText(dstRect).s, static_cast<void*>(src), RectText(srcRect).s, flags, isPrimary ? " (primary)" : "",
                fx ? fx->dwDDFX : 0, fx ? fx->dwFillColor : 0);
-    return BltLocked(dstRect, src, srcRect, flags, fx, true);
+    // Through IDirectDrawSurface 1-3, DDBLT_KEYDEST takes the key from the source surface.
+    return BltLocked(dstRect, src, srcRect, flags, fx, true, version < 4);
 }
 
 // Rectangle rules follow ddraw.dll: an empty rectangle, or a source rectangle
 // outside the source surface, is DDERR_INVALIDRECT. Without a clipper the
 // destination rectangle must lie inside the destination surface; with one, the
 // blit is clipped to the clipper's region.
-HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper) {
+HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
+                           bool destKeyFromSource) {
     // GDI may still be drawing on a surface whose DC is out (ReleaseDC flushes).
     if (dcOut || (src && src->dcOut)) GdiFlush();
     if (buf->fmt.fourcc) return DDERR_UNSUPPORTED;
@@ -241,6 +243,8 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     std::vector<RECT>& clips = g_clips;
     clips.clear();
     if (useClipper && clipper) {
+        // A clipper with nothing to clip to fails the blit, as its GetClipList would.
+        if (HRESULT hr = clipper->Usable(); FAILED(hr)) return hr;
         for (const RECT& c : clipper->Region(this)) {
             RECT r;
             if (IntersectRect(&r, &c, &bounds) && IntersectRect(&r, &r, &d)) clips.push_back(r);
@@ -293,11 +297,20 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     j.convert = !SameLayout(sb->fmt, buf->fmt);
     if (j.convert && buf->fmt.pal8) DD2D9_STUB("Blt: conversion to an 8-bit surface (writes index 0)");
 
+    // As in ddraw.dll: a key and its override together, or a key the surface doesn't
+    // have, are errors.
+    if ((flags & DDBLT_KEYSRC) && (flags & DDBLT_KEYSRCOVERRIDE)) return DDERR_INVALIDPARAMS;
+    if ((flags & DDBLT_KEYDEST) && (flags & DDBLT_KEYDESTOVERRIDE)) return DDERR_INVALIDPARAMS;
+    Surface* destKeyOwner = destKeyFromSource ? src : this;
+    if ((flags & DDBLT_KEYSRC) && !src->hasCk[kCkSrcBlt]) return DDERR_INVALIDPARAMS;
+    // DDBLT_KEYDEST needs a destination key on the destination even when the value
+    // comes from the source, which then may have none (its last value is used).
+    if ((flags & DDBLT_KEYDEST) && !hasCk[kCkDestBlt]) return DDERR_INVALIDPARAMS;
     const DDCOLORKEY* sk = nullptr;
     if (flags & DDBLT_KEYSRCOVERRIDE) {
         if (!fx) return DDERR_INVALIDPARAMS;
         sk = &fx->ddckSrcColorkey;
-    } else if ((flags & DDBLT_KEYSRC) && src->hasCk[kCkSrcBlt]) {
+    } else if (flags & DDBLT_KEYSRC) {
         sk = &src->ck[kCkSrcBlt];
     }
     if (sk) {
@@ -313,8 +326,8 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     if (flags & DDBLT_KEYDESTOVERRIDE) {
         if (!fx) return DDERR_INVALIDPARAMS;
         dk = &fx->ddckDestColorkey;
-    } else if ((flags & DDBLT_KEYDEST) && hasCk[kCkDestBlt]) {
-        dk = &ck[kCkDestBlt];
+    } else if (flags & DDBLT_KEYDEST) {
+        dk = &destKeyOwner->ck[kCkDestBlt];
     }
     if (dk) {
         const bool range = !(flags & DDBLT_KEYDESTOVERRIDE);
@@ -367,6 +380,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
 // surfaces, and a requested color key must exist.
 HRESULT Surface::BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans) {
     Guard l;
+    if (clipper) return DDERR_BLTFASTCANTCLIP;  // as ddraw.dll: BltFast never clips
     const RECT s = srcRect ? *srcRect : RECT{0, 0, src->W(), src->H()};
     DD2D9_TRACE("BltFast %p (%lu,%lu) <- %p[%s] trans=0x%lx", static_cast<void*>(this), x, y, static_cast<void*>(src),
                RectText(&s).s, trans);

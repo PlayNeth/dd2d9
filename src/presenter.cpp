@@ -7,6 +7,37 @@
 
 namespace dd2d9 {
 
+// The display adapter as Direct3D 9 describes it, for GetDeviceIdentifier (ddraw.dll
+// reports the real one too). Looked up once.
+bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out) {
+    static DDDEVICEIDENTIFIER2 cached;
+    static int state;  // 0 not looked up, 1 found, 2 failed
+    if (!state) {
+        state = 2;
+        if (IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION)) {
+            D3DADAPTER_IDENTIFIER9 id = {};
+            if (SUCCEEDED(d3d->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id))) {
+                DDDEVICEIDENTIFIER2 d = {};
+                lstrcpynA(d.szDriver, id.Driver, sizeof(d.szDriver));
+                lstrcpynA(d.szDescription, id.Description, sizeof(d.szDescription));
+                d.liDriverVersion.QuadPart = id.DriverVersion.QuadPart;
+                d.dwVendorId = id.VendorId;
+                d.dwDeviceId = id.DeviceId;
+                d.dwSubSysId = id.SubSysId;
+                d.dwRevision = id.Revision;
+                d.guidDeviceIdentifier = id.DeviceIdentifier;
+                d.dwWHQLLevel = id.WHQLLevel;
+                cached = d;
+                state = 1;
+            }
+            d3d->Release();
+        }
+    }
+    if (state != 1) return false;
+    *out = cached;
+    return true;
+}
+
 Presenter::Presenter(DDraw* dd) : dd_(dd) {
     InitializeCriticalSection(&gammaLock_);
     for (int c = 0; c < 3; c++) {
