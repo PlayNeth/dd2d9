@@ -369,6 +369,7 @@ void Presenter::Loop() {
         HWND hwnd = nullptr;
         RECT src = {};
         bool havePrimary;
+        bool superseded;
         bool fullscreen = false;
         UINT fw = 0, fh = 0, fhz = 0;
         {
@@ -376,12 +377,20 @@ void Presenter::Loop() {
             // In the background (focus lost) nothing is shown, and no device may be
             // created: the window is about to be minimized.
             // A wrapper's Direct3D device presents instead (see DDraw::Add3DDevice).
-            havePrimary = dd_->primary != nullptr && !dd_->Suspended() && !dd_->Has3D();
+            // A game that made a new DirectDraw object without releasing this one
+            // shows that one's primary: two presenters would fight over the window.
+            // A lost primary (the display mode changed, or the game left exclusive mode
+            // and went on with another DirectDraw object) holds nothing current until
+            // the game restores it: showing it would cover what the game draws now.
+            superseded = dd_->Superseded();
+            havePrimary = dd_->primary != nullptr && !dd_->primary->IsLost() && !dd_->Suspended() &&
+                          !dd_->Has3D() && !superseded;
             if (havePrimary) hwnd = dd_->PresentWindow();
             if (hwnd) src = dd_->PresentSource(hwnd);
             if (hwnd && !exclusiveFailed_) fullscreen = dd_->ExclusivePresent(&fw, &fh, &fhz);
         }
         if (!havePrimary || !hwnd || !IsWindow(hwnd) || IsIconic(hwnd)) {
+            if (superseded && dev_) ReleaseDevice();  // the window belongs to the other object's device
             active_ = false;
             stagingStale_ = true;  // the device may go meanwhile: start over with a full frame
             // After a wrapper's 3D device, the screen shows its last frame, which
@@ -413,7 +422,12 @@ void Presenter::Loop() {
         }
         // Creating the device takes a while: if meanwhile a 3D device appeared,
         // the game lost focus or the device is to be dropped, don't present.
-        if (dropRequest_ || dd_->Has3D() || dd_->Suspended()) {
+        bool supersededNow;
+        {
+            Guard l;
+            supersededNow = dd_->Superseded();
+        }
+        if (dropRequest_ || dd_->Has3D() || dd_->Suspended() || supersededNow) {
             SetEvent(dirtyEvent_);  // handle it right away in the next iteration
             continue;
         }

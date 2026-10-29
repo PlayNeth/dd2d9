@@ -676,6 +676,63 @@ static int RunCoopModes() {
         CHECK(SUCCEEDED(hr) && (keeps ? (w == 640 && h == 480) : (int(w) == deskW && int(h) == deskH)),
               "DirectDraw %d: exclusive -> NORMAL %s the display mode (%lux%lu)", v, keeps ? "keeps" : "restores", w, h);
     }
+
+    // Jazz Jackrabbit 2: back to exclusive mode and a new primary, the old one not released.
+    {
+        IDirectDraw* dd = nullptr;
+        DirectDrawCreate(nullptr, &dd, nullptr);
+        if (!dd) return 1;
+        DDSURFACEDESC d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+        d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+        d.dwBackBufferCount = 2;
+        IDirectDrawSurface *p1 = nullptr, *p2 = nullptr;
+        dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_ALLOWREBOOT);
+        dd->SetDisplayMode(640, 480, 8);
+        HRESULT hr = dd->CreateSurface(&d, &p1, nullptr);
+        CHECK(hr == DD_OK, "JJ2 pattern: first primary (0x%08lx)", hr);
+        IDirectDraw2* dd2 = nullptr;  // through IDirectDraw2, as JJ2: leaving restores the mode
+        dd->QueryInterface(IID_IDirectDraw2, reinterpret_cast<void**>(&dd2));
+        if (dd2) {
+            dd2->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+            dd2->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_ALLOWREBOOT);
+            dd2->SetDisplayMode(640, 480, 8, 0, 0);
+            hr = dd->CreateSurface(&d, &p2, nullptr);
+            CHECK(hr == DD_OK && p2, "JJ2 pattern: new primary while the lost one exists (0x%08lx)", hr);
+            if (p2) {
+                hr = p2->Flip(nullptr, DDFLIP_WAIT);
+                CHECK(hr == DD_OK, "JJ2 pattern: the new primary flips (0x%08lx)", hr);
+            }
+            dd2->Release();
+        }
+        if (p2) p2->Release();
+        if (p1) p1->Release();
+        dd->Release();
+    }
+
+    // Type Wild: a second DirectDraw object takes exclusive mode, the first not released.
+    {
+        IDirectDraw *a = nullptr, *b = nullptr;
+        DirectDrawCreate(nullptr, &a, nullptr);
+        DirectDrawCreate(nullptr, &b, nullptr);
+        if (!a || !b) return 1;
+        a->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        a->SetDisplayMode(640, 480, 16);
+        HRESULT hr = b->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        CHECK(hr == DD_OK, "second DirectDraw object takes exclusive mode (0x%08lx)", hr);
+        hr = b->SetDisplayMode(800, 600, 16);
+        CHECK(hr == DD_OK, "...and sets the display mode (0x%08lx)", hr);
+        hr = a->SetDisplayMode(640, 480, 16);
+        CHECK(hr == DDERR_NOEXCLUSIVEMODE, "...which the first no longer can (0x%08lx)", hr);
+        a->Release();
+        DDSURFACEDESC d = {};
+        d.dwSize = sizeof(d);
+        b->GetDisplayMode(&d);
+        CHECK(d.dwWidth == 800 && d.dwHeight == 600, "releasing the first leaves the second's mode (%lux%lu)",
+              d.dwWidth, d.dwHeight);
+        b->Release();
+    }
     DestroyWindow(hwnd);
     return 0;
 }

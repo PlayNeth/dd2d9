@@ -601,9 +601,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
     if ((flags & DDSCL_EXCLUSIVE) && (!hwnd || (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)))
         return DDERR_INVALIDPARAMS;
-    // One DirectDraw object at a time has exclusive mode.
-    if ((flags & DDSCL_EXCLUSIVE) && g_exclusiveDD && g_exclusiveDD != this && g_exclusiveDD->alive)
-        return DDERR_EXCLUSIVEMODEALREADYSET;
+    // One DirectDraw object at a time has exclusive mode: as in ddraw.dll (and Wine), a
+    // new one takes it over from the old, which games that recreate their DirectDraw
+    // object without releasing the old one rely on.
+    DDraw* const prev = (flags & DDSCL_EXCLUSIVE) && g_exclusiveDD && g_exclusiveDD != this ? g_exclusiveDD : nullptr;
 
     // Once a call through IDirectDraw (version 1) succeeds, the object keeps the
     // DirectDraw 1 behavior below, whatever interface is used afterwards.
@@ -630,6 +631,7 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
         // Out of exclusive mode there is no background to be in: restorable again.
         InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     }
+    if (prev) TakeOverExclusive(prev, hwnd);
     // Entering exclusive mode (or moving it to another window) loses the surfaces.
     if (acquire) InterlockedExchange(&deviceState_, kDevNotRestored);
     if (flags & DDSCL_EXCLUSIVE) g_exclusiveDD = this;
@@ -684,6 +686,38 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
 // window repainted. g_lock held.
 void DDraw::OnPrimaryReleased() {
     if (modeSet_ && hwnd_ && IsWindow(hwnd_)) RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+}
+
+// g_lock held (the other object's primary is read).
+bool DDraw::Superseded() const {
+    const DDraw* x = g_exclusiveDD;
+    return x && x != this && x->primary;
+}
+
+// `prev` had exclusive mode; this object takes it over (SetCooperativeLevel, g_displayLock
+// held). The window's saved style and the desktop mode to go back to come along, and the
+// old object drops to normal mode so it neither restores them nor presents.
+void DDraw::TakeOverExclusive(DDraw* prev, HWND hwnd) {
+    DD2D9_LOG("exclusive mode taken over from DirectDraw object %p", static_cast<void*>(prev));
+    prev->DropExclusiveDevice();
+    if (prev->windowSaved_ && prev->savedHwnd_ == hwnd) {
+        if (!windowSaved_) {
+            windowSaved_ = true;
+            savedHwnd_ = prev->savedHwnd_;
+            savedStyle_ = prev->savedStyle_;
+            savedExStyle_ = prev->savedExStyle_;
+            savedRect_ = prev->savedRect_;
+        }
+        prev->windowSaved_ = false;
+        prev->savedHwnd_ = nullptr;
+    }
+    if (prev->switched_) {
+        switched_ = true;
+        prev->switched_ = false;
+    }
+    prev->suspended_ = false;
+    Guard l;
+    prev->coop_ = (prev->coop_ & ~(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_ALLOWMODEX)) | DDSCL_NORMAL;
 }
 
 HRESULT DDraw::RestoreDisplayMode() {
@@ -1232,10 +1266,17 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
 
     int w, h;
     Format fmt;
+    Surface* replaced = nullptr;  // a lost primary surface the new one takes the place of
     if (caps & DDSCAPS_PRIMARYSURFACE) {
         if (primary) {
-            DD2D9_LOG("CreateSurface: the primary surface %p still exists", static_cast<void*>(primary));
-            return DDERR_PRIMARYSURFACEALREADYEXISTS;
+            // One the display mode change made lost can be replaced, as in ddraw.dll
+            // (Jazz Jackrabbit 2 sets its mode again without releasing its primary).
+            // The old one stays lost; this object no longer shows it.
+            if (!primary->IsLost()) {
+                DD2D9_LOG("CreateSurface: the primary surface %p still exists", static_cast<void*>(primary));
+                return DDERR_PRIMARYSURFACEALREADYEXISTS;
+            }
+            replaced = primary;
         }
         if (!coop_) return DDERR_NOCOOPERATIVELEVELSET;
         if (flip && !Exclusive()) return DDERR_NOEXCLUSIVEMODE;
@@ -1430,6 +1471,10 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         front->ddRef = version;
     }
     if (caps & DDSCAPS_PRIMARYSURFACE) {
+        if (replaced) {
+            DD2D9_LOG("CreateSurface: replacing the lost primary surface %p", static_cast<void*>(replaced));
+            replaced->lost = true;  // lost until the game restores it; no longer shown either way
+        }
         front->isPrimary = true;
         primary = front;
         gdiBuf_ = front->buf;
