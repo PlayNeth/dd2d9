@@ -213,6 +213,7 @@ Surface::Surface(DDraw* d, const DDSURFACEDESC2& sd, Buffer* b, int ver) : dd(d)
         }
     }
     desc.dwFlags &= ~(DDSD_CKDESTBLT | DDSD_CKDESTOVERLAY | DDSD_CKSRCBLT | DDSD_CKSRCOVERLAY | DDSD_LPSURFACE);
+    dd->DisplayMode(&modeW, &modeH, &modeBpp);
     dd->IntAddRef();
     dd->surfaces.push_back(this);
     if (desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) {  // called with g_lock held
@@ -263,10 +264,12 @@ Surface::~Surface() {
     delete static_cast<SurfaceWrap<4>*>(wraps_[3]);
     delete static_cast<SurfaceWrap<7>*>(wraps_[4]);
     delete gamma;
+    delete gammaRamp;
     dd->vidMemUsed -= vidMemBytes;
     if (dd->primary == this) {
         DD2D9_LOG("primary surface %p released", static_cast<void*>(this));
         dd->primary = nullptr;
+        dd->ApplyGamma();  // its ramp goes with it
         dd->MarkDirty();
         dd->OnPrimaryReleased();
     }
@@ -292,6 +295,7 @@ void* Surface::Iface(int v) {
 HRESULT Surface::QueryInterface(REFIID r, void** out) {
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
+    if (IsBadReadPtr(&r, sizeof(IID))) return DDERR_INVALIDPARAMS;
     int v = 0;
     if (IsEqualGUID(r, IID_IUnknown) || IsEqualGUID(r, IID_IDirectDrawSurface)) v = 1;
     else if (IsEqualGUID(r, IID_IDirectDrawSurface2)) v = 2;
@@ -325,6 +329,9 @@ ULONG Surface::AddRef(int slot) {
 }
 
 ULONG Surface::Release(int slot) {
+    // A member of a complex surface with only its root's reference left: ddraw.dll
+    // ignores the call (and returns 0).
+    if (root && total_ <= 1) return 0;
     // Released more often than referenced through this interface: ignored.
     LONG r;
     do {
@@ -379,78 +386,117 @@ void Surface::Detach(const Surface* oldRoot) {
 
 // Testing ddraw.dll with DDCREATE_EMULATIONONLY showed the primary and Z buffers can be
 // lost even in system memory.
+// As ddraw.dll (spec: re/spec/surface-lock-dc.md, section 9): every surface but those
+// created in system memory on request; the primary's flip chain always.
 bool Surface::CanBeLost() const {
-    const DWORD caps = desc.ddsCaps.dwCaps;
-    return !(caps & DDSCAPS_SYSTEMMEMORY) || (caps & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_ZBUFFER));
+    return !sysmemRequested || isPrimary || (root && root->isPrimary);
 }
 
-bool Surface::IsLost() const {
+bool Surface::IsLost(bool poll) const {
+    if (poll && !dd->Exclusive()) dd->PollDisplayChange();
     return CanBeLost() && (dd->DevState() != DDraw::kDevOk || lost);
 }
 
+// Checks in ddraw.dll's order (spec: re/spec/surface-lock-dc.md, section 6). A surface that
+// isn't lost needs nothing; one made with its root (back buffer, mip level, cube face) is
+// restored through it; any other only in the display mode it was created in.
 HRESULT Surface::Restore() {
-    if (isPrimary) {  // only in the display mode it was made for
-        DWORD w, h, bpp;
-        dd->DisplayMode(&w, &h, &bpp);
-        if (int(w) != buf->w || int(h) != buf->h || !(Format::ForDisplayBpp(bpp) == buf->fmt))
-            return DDERR_WRONGMODE;
-    }
-    if (!CanBeLost()) return DD_OK;
     dd->UpdateLostSurfaces();
-    if (dd->DevState() == DDraw::kDevLost) return DDERR_WRONGMODE;
-    // With the surfaces of its complex structure below it.
+    if (!IsLost()) return DD_OK;
+    if (root) return DDERR_IMPLICITLYCREATED;
+    DWORD w, h, bpp;
+    dd->DisplayMode(&w, &h, &bpp);
+    if (w != modeW || h != modeH || bpp != modeBpp) return DDERR_WRONGMODE;
+    if (dd->OtherExclusive() || dd->DevState() == DDraw::kDevLost) return DDERR_WRONGMODE;
+    // With the surfaces of its complex structure.
     lost = false;
-    if (!root) {
-        for (Surface* c : children) c->lost = false;
-    } else {
-        for (Surface* s = NextMipLevel(); s; s = s->NextMipLevel()) s->lost = false;
-        for (Surface* s : root->flipChain) s->lost = false;
-    }
+    for (Surface* c : children) c->lost = false;
     return DD_OK;
 }
 
-// What may be attached to what, as ddraw.dll decides it. IDirectDrawSurface7 takes only
-// Z buffers; before it, offscreen surfaces and primaries of one size go together, Z
-// buffers go on primaries and 3D devices, and IDirectDrawSurface (1) surfaces build flip
-// chains by attaching their back buffers.
-static bool FlipAttachable(const Surface* s) {
-    return s->version == 1 && !s->root &&
-           !(s->desc.ddsCaps.dwCaps & (DDSCAPS_ZBUFFER | DDSCAPS_TEXTURE | DDSCAPS_OVERLAY));
+// ddraw.dll's attach list, newest first (spec: re/spec/surface-other.md): what
+// AddAttachedSurface added, in the order it was added, then what the surface was
+// created with (the next member of its flip chain, its mip level, other cube faces).
+// The link to the next ring member counts as explicit when AddAttachedSurface made it
+// (that member then holds an attachment reference).
+std::vector<Surface::AttachEntry> Surface::AttachList() const {
+    std::vector<AttachEntry> list;
+    const bool ringExplicit = chainNext && chainNext != this && chainNext->attachSlot >= 0;
+    if (ringExplicit) list.push_back({chainNext, chainNext->attachSlot, chainNext->ringSeq});
+    for (const AttachRef& r : attachRefs) list.push_back({r.s, r.slot, r.seq});
+    std::sort(list.begin(), list.end(), [](const AttachEntry& x, const AttachEntry& y) { return x.seq > y.seq; });
+    if (chainNext && chainNext != this && !ringExplicit) list.push_back({chainNext, -1, 0});
+    for (Surface* a : attached) {
+        bool expl = false;
+        for (const AttachRef& r : attachRefs) expl |= r.s == a;
+        if (!expl) list.push_back({a, -1, 0});
+    }
+    return list;
 }
 
+static uint32_t NextAttachSeq() {
+    static uint32_t seq = 0;  // g_lock held
+    return ++seq;
+}
+
+// ddraw.dll's "flip-compatible" (FUN_73733941): the same Z buffer, texture, overlay and
+// alpha bits, and not two mipmaps. The interface version and pixel format don't matter.
+static bool FlipCompatible(const Surface* a, const Surface* b) {
+    const DWORD ac = a->desc.ddsCaps.dwCaps, bc = b->desc.ddsCaps.dwCaps;
+    const DWORD kinds = DDSCAPS_ZBUFFER | DDSCAPS_TEXTURE | DDSCAPS_OVERLAY | DDSCAPS_ALPHA;
+    if ((ac ^ bc) & kinds) return false;
+    return !((ac & bc & DDSCAPS_TEXTURE) && (ac & bc & DDSCAPS_MIPMAP));
+}
+
+// Checks in ddraw.dll's order (spec: re/spec/surface-other.md, AddAttachedSurface).
 HRESULT Surface::AddAttachedSurface(Surface* s, int version) {
     if (!s) return DDERR_INVALIDPARAMS;
     const DWORD tc = desc.ddsCaps.dwCaps, ac = s->desc.ddsCaps.dwCaps;
-    const DWORD screen = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN;
-    const bool forFlip = FlipAttachable(s);
-    if (version == 7) {
-        if (!(ac & DDSCAPS_ZBUFFER)) return DDERR_CANNOTATTACHSURFACE;
-    } else if ((tc & screen) && (ac & screen)) {
-        if (s->W() != W() || s->H() != H()) return DDERR_CANNOTATTACHSURFACE;
-    } else if (!((tc & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_3DDEVICE)) && (ac & DDSCAPS_ZBUFFER)) &&
-               !(this->version == 1 && !(tc & (DDSCAPS_ZBUFFER | DDSCAPS_TEXTURE | DDSCAPS_OVERLAY)) && forFlip)) {
+    // IDirectDrawSurface7 attaches Z buffers only (to anything but a Z buffer, or the other way round).
+    if (version == 7 && !((tc ^ ac) & DDSCAPS_ZBUFFER)) return DDERR_CANNOTATTACHSURFACE;
+    if ((desc.ddsCaps.dwCaps2 & DDSCAPS2_CUBEMAP) && !(ac & DDSCAPS_ZBUFFER)) return DDERR_CANNOTATTACHSURFACE;
+    if ((tc & DDSCAPS_PRIMARYSURFACE) && !dd->Exclusive()) return DDERR_NOEXCLUSIVEMODE;
+    if (s == this) return DDERR_CANNOTATTACHSURFACE;
+    if (IsLost() || s->IsLost()) return DDERR_SURFACELOST;
+    const int slot = SlotFor(version);
+    for (const AttachEntry& e : AttachList()) {
+        if (e.s != s) continue;
+        // The same interface pointer is there already. Through another interface version
+        // ddraw.dll refuses it too, as a different attachment it can't make.
+        if (e.slot < 0 || e.slot == slot) return DDERR_SURFACEALREADYATTACHED;
         return DDERR_CANNOTATTACHSURFACE;
     }
-    if (s == this) return DDERR_CANNOTATTACHSURFACE;
-    const int slot = SlotFor(version);
-    if (forFlip) return AttachForFlip(s, slot);
-    // Parts of one complex surface are already attached to each other; a
-    // reference to our own root would also keep the chain alive forever.
-    if ((s->root ? s->root : s) == (root ? root : this)) return DDERR_CANNOTATTACHSURFACE;
-    // Attached through another interface version: ddraw.dll counts it as a different
-    // attachment it can't make.
-    for (const AttachRef& r : attachRefs)
-        if (r.s == s) return r.slot == slot ? DDERR_SURFACEALREADYATTACHED : DDERR_CANNOTATTACHSURFACE;
-    for (Surface* a : attached)
-        if (a == s) return DDERR_SURFACEALREADYATTACHED;
-    for (Surface* a : s->attached)
-        if (a == this) return DDERR_SURFACEALREADYATTACHED;  // the other way round
-    // A Z buffer has to be the size of what it serves.
-    if ((ac & DDSCAPS_ZBUFFER) && !(tc & DDSCAPS_ZBUFFER) && (s->W() != W() || s->H() != H()))
+    // Sizes: a mipmap level no bigger than this one; a texture and a non-texture of any
+    // sizes (a Z buffer on a texture); otherwise equal.
+    const DWORD mipTex = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
+    if ((tc & ac & mipTex) == mipTex) {
+        if (W() < s->W() || H() < s->H()) return DDERR_CANNOTATTACHSURFACE;
+    } else if (!((tc ^ ac) & DDSCAPS_TEXTURE) && (W() != s->W() || H() != s->H())) {
         return DDERR_CANNOTATTACHSURFACE;
+    }
+    // One of each kind: a second Z buffer, alpha surface or (mip)texture is refused.
+    const DWORD kinds = ac & (DDSCAPS_MIPMAP | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_ALPHA);
+    if (kinds) {
+        for (const AttachEntry& e : AttachList()) {
+            const DWORD ec = e.s->desc.ddsCaps.dwCaps, shared = ec & kinds;
+            if (shared && (!(shared & DDSCAPS_TEXTURE) || !((ec ^ kinds) & DDSCAPS_MIPMAP)))
+                return DDERR_CANNOTATTACHSURFACE;
+        }
+    }
+    const bool flipPair = FlipCompatible(this, s);
+    if ((ac & DDSCAPS_FLIP) && flipPair) return DDERR_CANNOTATTACHSURFACE;  // already in a ring
+    // System and video memory don't mix, but for a system-memory Z buffer.
+    const bool tSys = (tc & DDSCAPS_SYSTEMMEMORY) != 0, aSys = (ac & DDSCAPS_SYSTEMMEMORY) != 0;
+    if (tSys != aSys && !(aSys && (ac & DDSCAPS_ZBUFFER))) return DDERR_CANNOTATTACHSURFACE;
+    // dd2d9's own limits, against reference cycles that would keep surfaces alive forever:
+    // a part of our own complex surface, or a surface this one is attached to.
+    if ((s->root ? s->root : s) == (root ? root : this)) return DDERR_CANNOTATTACHSURFACE;
+    for (Surface* a : s->attached)
+        if (a == this) return DDERR_SURFACEALREADYATTACHED;
+    if (flipPair) return AttachForFlip(s, slot);
     s->AddRef(slot);
     attached.push_back(s);
-    attachRefs.push_back({s, slot});
+    attachRefs.push_back({s, slot, NextAttachSeq()});
     return DD_OK;
 }
 
@@ -468,30 +514,43 @@ static void UpdateBackBufferCount(Surface* start, int delta) {
     }
 }
 
-// s joins this surface's flip ring right after it (forming one if there is none).
+// s joins this surface's flip ring right after it (forming one if there is none), as
+// ddraw.dll links it.
 HRESULT Surface::AttachForFlip(Surface* s, int slot) {
-    if (isPrimary && !dd->Exclusive()) return DDERR_NOEXCLUSIVEMODE;
-    if (chainNext == s) return DDERR_SURFACEALREADYATTACHED;
-    if (s->chainNext || s->W() != W() || s->H() != H() || !(s->buf->fmt == buf->fmt))
+    // Flip swaps the memory of the members: dd2d9 can't put two formats in one ring.
+    if (s->chainNext || !(s->buf->fmt == buf->fmt)) {
+        DD2D9_LOG("AddAttachedSurface: a flip ring of two pixel formats isn't supported");
         return DDERR_CANNOTATTACHSURFACE;
+    }
+    const DWORD roles = DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER;
     s->attachSavedCaps = s->desc.ddsCaps.dwCaps & ~DDSCAPS_FRONTBUFFER;
     s->flipStart = false;
-    s->desc.ddsCaps.dwCaps |= DDSCAPS_FLIP;
+    s->desc.ddsCaps.dwCaps = (s->desc.ddsCaps.dwCaps & ~roles) | DDSCAPS_FLIP;
     if (!chainNext) {
         flipStart = true;
         chainNext = s;
         s->chainNext = this;
         attachSavedCaps = desc.ddsCaps.dwCaps & ~DDSCAPS_FRONTBUFFER;
         desc.ddsCaps.dwCaps |= DDSCAPS_FLIP;
-        if (!(desc.ddsCaps.dwCaps & (DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER))) desc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
-        s->desc.ddsCaps.dwCaps |= (desc.ddsCaps.dwCaps & DDSCAPS_BACKBUFFER) ? DDSCAPS_FRONTBUFFER : DDSCAPS_BACKBUFFER;
+        if (desc.ddsCaps.dwCaps & DDSCAPS_BACKBUFFER) {
+            s->desc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
+        } else {
+            desc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
+            s->desc.ddsCaps.dwCaps |= DDSCAPS_BACKBUFFER;
+        }
     } else {
+        // Right after the front, the new surface is the back buffer.
+        if (desc.ddsCaps.dwCaps & DDSCAPS_FRONTBUFFER) {
+            chainNext->desc.ddsCaps.dwCaps &= ~DDSCAPS_BACKBUFFER;
+            s->desc.ddsCaps.dwCaps |= DDSCAPS_BACKBUFFER;
+        }
         s->chainNext = chainNext;
         chainNext = s;
     }
     UpdateBackBufferCount(this, 1);
     s->AddRef(slot);
     s->attachSlot = slot;
+    s->ringSeq = NextAttachSeq();
     return DD_OK;
 }
 
@@ -537,52 +596,56 @@ void Surface::LeaveFlipRing(std::vector<Surface*>* drop) {
     chainNext = nullptr;
 }
 
-HRESULT Surface::DeleteAttachedSurface(DWORD, Surface* s, int ifaceVersion) {
-    if (!s) return DDERR_CANNOTDETACHSURFACE;
-    if (FlipAttachable(s)) {
-        // A back buffer attached for flipping: only from the surface before it in the ring.
-        if (version != 1 || chainNext != s) return DDERR_SURFACENOTATTACHED;
-        if (s->root || s->flipStart) return DDERR_CANNOTDETACHSURFACE;
+// One entry of the attach list, as ddraw.dll's FUN_7373545a detaches it.
+HRESULT Surface::DetachOne(Surface* s, int slot) {
+    if (chainNext == s && s != this) {
+        if (s->attachSlot < 0) return DDERR_CANNOTDETACHSURFACE;  // a link the ring was made with
+        if (s->attachSlot != slot) return DDERR_SURFACENOTATTACHED;
         UpdateBackBufferCount(this, -1);
+        const DWORD roles = DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER;
+        const DWORD sc = s->desc.ddsCaps.dwCaps;
         Surface* next = chainNext = s->chainNext;
-        if (next == this) {
+        if (next == this) {  // a ring of two: this one is on its own again
             flipStart = false;
             chainNext = nullptr;
             desc.ddsCaps.dwCaps = attachSavedCaps;
-        } else if (!(next->desc.ddsCaps.dwCaps & DDSCAPS_FRONTBUFFER) || (s->desc.ddsCaps.dwCaps & DDSCAPS_FRONTBUFFER)) {
-            // The surface after it takes its role (the front keeps its own).
-            next->desc.ddsCaps.dwCaps &= ~(DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER);
-            if (s->desc.ddsCaps.dwCaps & DDSCAPS_FRONTBUFFER) {
-                desc.ddsCaps.dwCaps |= DDSCAPS_BACKBUFFER;
-                next->desc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
-            } else {
-                next->desc.ddsCaps.dwCaps |= DDSCAPS_BACKBUFFER;
-            }
+        } else if (sc & DDSCAPS_BACKBUFFER) {
+            next->desc.ddsCaps.dwCaps |= DDSCAPS_BACKBUFFER;
+        } else if (sc & DDSCAPS_FRONTBUFFER) {
+            next->desc.ddsCaps.dwCaps = (next->desc.ddsCaps.dwCaps & ~roles) | DDSCAPS_FRONTBUFFER;
+            if (next->chainNext && next->chainNext != next) next->chainNext->desc.ddsCaps.dwCaps |= DDSCAPS_BACKBUFFER;
         }
         s->desc.ddsCaps.dwCaps = s->attachSavedCaps;
         s->chainNext = nullptr;
         s->DropAttachRef();
         return DD_OK;
     }
-    Surface* family = root ? root : this;
-    for (size_t i = 0; i < attached.size(); i++) {
-        Surface* a = attached[i];
-        if (a != s) continue;
-        // Levels of our own complex surface (mipmaps) can't be detached.
-        if ((a->root ? a->root : a) == family) return DDERR_CANNOTDETACHSURFACE;
-        for (size_t k = 0; k < attachRefs.size(); k++) {
-            if (attachRefs[k].s != s) continue;
-            const int slot = attachRefs[k].slot;
-            // Only through the interface version it was attached with.
-            if (slot != SlotFor(ifaceVersion)) return DDERR_SURFACENOTATTACHED;
-            attachRefs.erase(attachRefs.begin() + k);
-            attached.erase(attached.begin() + i);
-            s->Release(slot);
-            return DD_OK;
-        }
-        return DDERR_CANNOTDETACHSURFACE;
+    for (size_t k = 0; k < attachRefs.size(); k++) {
+        if (attachRefs[k].s != s) continue;
+        // Only through the interface pointer it was attached with.
+        if (attachRefs[k].slot != slot) return DDERR_SURFACENOTATTACHED;
+        attachRefs.erase(attachRefs.begin() + k);
+        attached.erase(std::find(attached.begin(), attached.end(), s));
+        s->Release(slot);
+        return DD_OK;
     }
-    return DDERR_CANNOTDETACHSURFACE;
+    // A member of our own complex surface (a mip level, a cube face).
+    if (std::find(attached.begin(), attached.end(), s) != attached.end()) return DDERR_CANNOTDETACHSURFACE;
+    return DDERR_SURFACENOTATTACHED;
+}
+
+// As ddraw.dll: without a surface, everything attached goes, newest first, up to the
+// first that can't (a part of the surface's own complex structure).
+HRESULT Surface::DeleteAttachedSurface(DWORD flags, Surface* s, int ifaceVersion) {
+    if (flags) return DDERR_INVALIDPARAMS;
+    if (IsLost() || (s && s->IsLost())) return DDERR_SURFACELOST;
+    if (s) return DetachOne(s, SlotFor(ifaceVersion));
+    for (const AttachEntry& e : AttachList()) {
+        if (e.slot < 0) return DDERR_CANNOTDETACHSURFACE;
+        const HRESULT hr = DetachOne(e.s, e.slot);
+        if (FAILED(hr)) return hr;
+    }
+    return DD_OK;
 }
 
 HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
@@ -591,8 +654,8 @@ HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
     std::vector<Surface*> list;
     {
         Guard l;
-        if (chainNext && chainNext != this) list.push_back(chainNext);
-        for (Surface* a : attached) list.push_back(a);
+        if (IsLost()) return DDERR_SURFACELOST;
+        for (const AttachEntry& e : AttachList()) list.push_back(e.s);
         for (Surface* s : list) s->AddRef(SlotFor(v));  // the callback releases it
     }
     size_t i = 0;
@@ -614,21 +677,22 @@ HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
     return DD_OK;
 }
 
+// As ddraw.dll: the newest attachment that has every requested bit (at least one).
 HRESULT Surface::GetAttachedSurface(const DDSCAPS2& caps, Surface** out, int version) {
     if (IsLost()) return DDERR_SURFACELOST;
-    auto matches = [&](Surface* s) {
-        return (s->desc.ddsCaps.dwCaps & caps.dwCaps) == caps.dwCaps &&
-               (s->desc.ddsCaps.dwCaps2 & caps.dwCaps2) == caps.dwCaps2;
-    };
-    Surface* found = nullptr;
-    if (chainNext && chainNext != this && matches(chainNext)) found = chainNext;
-    for (Surface* a : attached) {
-        if (!found && matches(a)) found = a;
+    if (version >= 4 && (caps.dwCaps & 0x03000000)) return DDERR_INVALIDCAPS;  // reserved bits
+    if (!(caps.dwCaps | caps.dwCaps2 | caps.dwCaps3 | caps.dwCaps4)) return DDERR_NOTFOUND;
+    auto has = [](DWORD have, DWORD want) { return (have & want) == want; };
+    for (const AttachEntry& e : AttachList()) {
+        const DDSCAPS2& c = e.s->desc.ddsCaps;
+        if (has(c.dwCaps, caps.dwCaps) && has(c.dwCaps2, caps.dwCaps2) && has(c.dwCaps3, caps.dwCaps3) &&
+            has(c.dwCaps4, caps.dwCaps4)) {
+            e.s->AddRef(SlotFor(version));
+            *out = e.s;
+            return DD_OK;
+        }
     }
-    if (!found) return DDERR_NOTFOUND;
-    found->AddRef(SlotFor(version));
-    *out = found;
-    return DD_OK;
+    return DDERR_NOTFOUND;
 }
 
 HRESULT Surface::GetCaps(DDSCAPS2* caps) {
@@ -636,8 +700,10 @@ HRESULT Surface::GetCaps(DDSCAPS2* caps) {
     return DD_OK;
 }
 
+// As ddraw.dll (spec: re/spec/surface-flip-key-palette.md): the out pointer is cleared first.
 HRESULT Surface::GetClipper(IDirectDrawClipper** out) {
     if (!out) return DDERR_INVALIDPARAMS;
+    *out = nullptr;
     if (!clipper) return DDERR_NOCLIPPERATTACHED;
     clipper->AddRef();
     *out = clipper;
@@ -649,6 +715,7 @@ static bool LiveClipper(const Clipper* c);
 HRESULT Surface::SetClipper(IDirectDrawClipper* c) {
     Clipper* nc = c ? Clipper::From(c) : nullptr;
     if (c && (!nc || !LiveClipper(nc))) return DDERR_INVALIDPARAMS;
+    if (!nc && !clipper) return DDERR_NOCLIPPERATTACHED;  // nothing to detach
     if (nc) nc->AddRef();
     if (clipper) clipper->Release();
     clipper = nc;
@@ -656,8 +723,10 @@ HRESULT Surface::SetClipper(IDirectDrawClipper* c) {
     return DD_OK;
 }
 
-static int CkIndex(DWORD flags) {
-    switch (flags & ~DDCKEY_COLORSPACE) {
+static constexpr DWORD kCkTypes = DDCKEY_DESTBLT | DDCKEY_DESTOVERLAY | DDCKEY_SRCBLT | DDCKEY_SRCOVERLAY;
+
+static int CkIndex(DWORD type) {
+    switch (type) {
     case DDCKEY_DESTBLT: return kCkDestBlt;
     case DDCKEY_DESTOVERLAY: return kCkDestOverlay;
     case DDCKEY_SRCBLT: return kCkSrcBlt;
@@ -666,47 +735,78 @@ static int CkIndex(DWORD flags) {
     }
 }
 
+static bool OneBit(DWORD v) { return v && !(v & (v - 1)); }
+
+// Checks in ddraw.dll's order (spec: re/spec/surface-flip-key-palette.md, section 4).
 HRESULT Surface::GetColorKey(DWORD flags, DDCOLORKEY* key) {
-    int i = CkIndex(flags);
-    if (i < 0 || !key) return DDERR_INVALIDPARAMS;
+    if (IsLost()) return DDERR_SURFACELOST;
+    if (desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER) return DDERR_NOCOLORKEY;
+    if (flags & ~(kCkTypes | DDCKEY_COLORSPACE)) return DDERR_INVALIDPARAMS;
+    const DWORD type = flags & kCkTypes;
+    if (type && !OneBit(type)) return DDERR_INVALIDPARAMS;  // two types at once
+    if ((type & DDCKEY_SRCOVERLAY) && !(desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY)) return DDERR_INVALIDPARAMS;
+    if (!type || !key) return DDERR_INVALIDPARAMS;
+    const int i = CkIndex(type);
     if (!hasCk[i]) return DDERR_NOCOLORKEY;
     *key = ck[i];
     return DD_OK;
 }
 
-HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key) {
-    int i = CkIndex(flags);
-    if (i < 0) return DDERR_INVALIDPARAMS;
+// Checks in ddraw.dll's order (spec section 3). dd2d9 reports colour keys for blits only
+// (DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT): overlay keys and key ranges are refused as on
+// hardware without them.
+HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key, int version) {
+    if (IsLost()) return DDERR_SURFACELOST;
+    if (desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER) return DDERR_INVALIDSURFACETYPE;
+    if (version == 7 && (desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) return DDERR_NOTONMIPMAPSUBLEVEL;
+    if (flags & ~(kCkTypes | DDCKEY_COLORSPACE)) return DDERR_INVALIDPARAMS;
     if (!key) {
-        hasCk[i] = false;
+        // Removes the key of the first type named, in ddraw.dll's order; none named: nothing.
+        if (flags & DDCKEY_DESTOVERLAY) return DDERR_NOOVERLAYHW;
+        if (flags & DDCKEY_DESTBLT) hasCk[kCkDestBlt] = false;
+        else if (flags & DDCKEY_SRCOVERLAY) hasCk[kCkSrcOverlay] = false;
+        else if (flags & DDCKEY_SRCBLT) hasCk[kCkSrcBlt] = false;
         return DD_OK;
     }
-    // Without DDCKEY_COLORSPACE the key is the low value; key ranges need hardware
-    // support, which ddraw.dll reports none of.
-    if ((flags & DDCKEY_COLORSPACE) && key->dwColorSpaceLowValue != key->dwColorSpaceHighValue)
-        return DDERR_NOCOLORKEYHW;
-    ck[i].dwColorSpaceLowValue = ck[i].dwColorSpaceHighValue = key->dwColorSpaceLowValue;
+    const DWORD type = flags & kCkTypes;
+    if (!OneBit(type)) return DDERR_INVALIDPARAMS;  // none, or two at once
+    // Without DDCKEY_COLORSPACE the key is the low value.
+    const DWORD low = key->dwColorSpaceLowValue;
+    const DWORD high = (flags & DDCKEY_COLORSPACE) ? key->dwColorSpaceHighValue : low;
+    if (type & (DDCKEY_SRCOVERLAY | DDCKEY_DESTOVERLAY)) return DDERR_NOCOLORKEYHW;
+    if (low != high) return DDERR_NOCOLORKEYHW;
+    const int i = CkIndex(type);
+    ck[i].dwColorSpaceLowValue = ck[i].dwColorSpaceHighValue = low;
     hasCk[i] = true;
     return DD_OK;
 }
 
+const Palette* Surface::ShownPalette() const {
+    if (palette) return palette;
+    for (Surface* s : flipChain)
+        if (s->palette) return s->palette;
+    return nullptr;
+}
+
 const PALETTEENTRY* Surface::EffectivePalette() const {
     if (palette) return palette->entries;
-    if (dd->primary && dd->primary->palette) return dd->primary->palette->entries;
+    if (const Palette* p = dd->primary ? dd->primary->ShownPalette() : nullptr) return p->entries;
     return dd->defaultPalette;
 }
 
+// Checks in ddraw.dll's order (spec: re/spec/surface-lock-dc.md, sections 3 and 4). A DC
+// out counts as one more lock: the surface can't be locked meanwhile, but a locked one can
+// still give a DC.
 HRESULT Surface::GetDC(HDC* out) {
-    if (!out) return DDERR_INVALIDPARAMS;
     Guard l;
-    if (dcOut) return DDERR_DCALREADYCREATED;
+    if (IsLost()) return DDERR_SURFACELOST;
+    if (dcOut) return DDERR_DCALREADYCREATED;  // *out left alone, as ddraw.dll
+    if (!out) return DDERR_INVALIDPARAMS;
+    *out = nullptr;
     HDC dc = buf->GetDC();
-    if (!dc) {
-        *out = nullptr;  // as ddraw.dll (DDERR_DCALREADYCREATED leaves it alone)
-        return DDERR_CANTCREATEDC;
-    }
+    if (!dc) return DDERR_CANTCREATEDC;
     if (buf->fmt.pal8) {
-        const Palette* p = palette ? palette : (dd->primary ? dd->primary->palette : nullptr);
+        const Palette* p = palette ? palette : (dd->primary ? dd->primary->ShownPalette() : nullptr);
         if (p != buf->dcPal || (p && p->version != buf->dcPalVersion) || !p) {
             const PALETTEENTRY* e = EffectivePalette();
             RGBQUAD q[256];
@@ -717,34 +817,32 @@ HRESULT Surface::GetDC(HDC* out) {
         }
     }
     dcOut = dc;
+    dcCounted = true;
+    lockCount++;
     *out = dc;
     DD2D9_TRACE("GetDC %p%s", static_cast<void*>(this), isPrimary ? " (primary)" : "");
     return DD_OK;
 }
 
-HRESULT Surface::ReleaseDC(HDC dc) {
+// IDirectDrawSurface 1 and 2 take any DC (even null) and release the surface's own.
+HRESULT Surface::ReleaseDC(HDC dc, int version) {
     Guard l;
-    if (!dcOut) {
-        // ddraw.dll's GetDC locks the surface and ReleaseDC unlocks it: with no DC out, a
-        // lock taken before GetDC is what goes.
-        if (lockCount <= 0) return DDERR_NODC;
-        lockCount--;
-        uniqueness++;
-        MarkDirtyIfVisible(&lockArea);
-        return DD_OK;
-    }
-    if (dc != dcOut) return DDERR_INVALIDPARAMS;
+    if (!dcOut) return DDERR_NODC;
+    if (dc != dcOut && version >= 3) return DDERR_INVALIDPARAMS;
     GdiFlush();
     buf->EndDC();
     dcOut = nullptr;
+    if (dcCounted) lockCount--;
+    dcCounted = false;
     DD2D9_TRACE("ReleaseDC %p%s", static_cast<void*>(this), isPrimary ? " (primary)" : "");
-    uniqueness++;
+    BumpUniqueness();
     MarkDirtyIfVisible();
     return DD_OK;
 }
 
 HRESULT Surface::GetPalette(IDirectDrawPalette** out) {
     if (!out) return DDERR_INVALIDPARAMS;
+    *out = nullptr;  // first, as ddraw.dll
     if (IsLost()) return DDERR_SURFACELOST;
     if (!palette) return DDERR_NOPALETTEATTACHED;
     palette->AddRef();
@@ -752,95 +850,128 @@ HRESULT Surface::GetPalette(IDirectDrawPalette** out) {
     return DD_OK;
 }
 
-HRESULT Surface::SetPalette(IDirectDrawPalette* p) {
+// Checks in ddraw.dll's order (spec: re/spec/surface-flip-key-palette.md, section 5). The
+// palette goes to this surface only, not the rest of its flip chain.
+HRESULT Surface::SetPalette(IDirectDrawPalette* p, int version) {
     Palette* np = p ? Palette::From(p) : nullptr;
     if (p && !np) return DDERR_INVALIDPARAMS;
-    if (desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL) return DDERR_NOTONMIPMAPSUBLEVEL;  // the top level's applies
+    if (desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER) return DDERR_INVALIDSURFACETYPE;
+    if (version == 7 && (desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) return DDERR_NOTONMIPMAPSUBLEVEL;
     if (IsLost()) return DDERR_SURFACELOST;
     if (np && (np->caps & DDPCAPS_ALPHA) && !(desc.ddsCaps.dwCaps & DDSCAPS_TEXTURE)) return DDERR_INVALIDSURFACETYPE;
-    if (!buf->fmt.pal8) return DDERR_INVALIDPIXELFORMAT;
+    if (isPrimary && dd->OtherExclusive()) return DDERR_NOEXCLUSIVEMODE;
+    if (!np && !palette) return DDERR_NOPALETTEATTACHED;
+    // An 8-bit palette (256 entries of colours) for an 8-bit surface only.
+    if (np && (!buf->fmt.pal8 || !(np->caps & DDPCAPS_8BIT) || (np->caps & DDPCAPS_8BITENTRIES)))
+        return DDERR_INVALIDPIXELFORMAT;
     DD2D9_TRACE("SetPalette %p%s <- %p", static_cast<void*>(this), isPrimary ? " (primary)" : "", static_cast<void*>(np));
     if (np) np->AddRef();
     if (palette) palette->Release();
     palette = np;
-    // Palettes set on a flip chain apply to the whole chain.
-    if (root == nullptr) {
-        for (Surface* s : flipChain) {
-            if (s == this) continue;
-            if (np) np->AddRef();
-            if (s->palette) s->palette->Release();
-            s->palette = np;
-        }
-    }
+    BumpUniqueness();
     MarkDirtyIfVisible();
+    // A back buffer's palette is shown while the front has none (see ShownPalette).
+    if (!isPrimary && dd->primary && !dd->primary->palette) dd->MarkDirty();
     return DD_OK;
+}
+
+// The primary chain has no pixel format of its own: ddraw.dll reports the display's,
+// which differs from the memory's only once a mode change has made the chain lost.
+Format Surface::ReportedFormat() const {
+    if (!isPrimary && !(root && root->isPrimary)) return buf->fmt;
+    DWORD w, h, bpp;
+    dd->DisplayMode(&w, &h, &bpp);
+    return Format::ForDisplayBpp(bpp);
 }
 
 HRESULT Surface::GetPixelFormat(DDPIXELFORMAT* pf) {
-    if (!pf) return DDERR_INVALIDPARAMS;
-    buf->fmt.ToDDPF(pf);
+    if (!pf || pf->dwSize != sizeof(DDPIXELFORMAT)) return DDERR_INVALIDPARAMS;
+    ReportedFormat().ToDDPF(pf);
     return DD_OK;
 }
 
+// Built the way ddraw.dll builds it (FUN_73733184), not from the creation flags: no
+// alpha depth or refresh rate, overlay keys never (no overlay data here), no FVF (vertex
+// buffers only; dwFVF shares its place with the pixel format).
 HRESULT Surface::GetSurfaceDesc(DDSURFACEDESC2* d) {
-    *d = desc;
+    *d = {};
     d->dwSize = sizeof(DDSURFACEDESC2);
+    d->dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d->ddsCaps = desc.ddsCaps;
     d->dwWidth = DWORD(buf->w);
     d->dwHeight = DWORD(buf->h);
-    d->dwFlags |= DDSD_WIDTH | DDSD_HEIGHT | DDSD_CAPS | DDSD_PIXELFORMAT;
-    buf->fmt.ToDDPF(&d->ddpfPixelFormat);
+    ReportedFormat().ToDDPF(&d->ddpfPixelFormat);
     if (buf->fmt.BlockCompressed()) {
-        d->dwFlags = (d->dwFlags & ~DDSD_PITCH) | DDSD_LINEARSIZE;
+        d->dwFlags |= DDSD_LINEARSIZE;
         d->dwLinearSize = DWORD(buf->pitch) * ((buf->h + 3) & ~3);
     } else {
         d->dwFlags |= DDSD_PITCH;
         d->lPitch = buf->pitch;
     }
-    d->lpSurface = nullptr;
-    static const DWORD kCkFlags[4] = {DDSD_CKDESTBLT, DDSD_CKDESTOVERLAY, DDSD_CKSRCBLT, DDSD_CKSRCOVERLAY};
-    DDCOLORKEY* keys[4] = {&d->ddckCKDestBlt, &d->ddckCKDestOverlay, &d->ddckCKSrcBlt, &d->ddckCKSrcOverlay};
-    for (int i = 0; i < 4; i++) {
-        if (hasCk[i]) {
-            d->dwFlags |= kCkFlags[i];
-            *keys[i] = ck[i];
-        }
+    if (hasCk[kCkDestBlt]) {
+        d->dwFlags |= DDSD_CKDESTBLT;
+        d->ddckCKDestBlt = ck[kCkDestBlt];
+    }
+    if (hasCk[kCkSrcBlt]) {
+        d->dwFlags |= DDSD_CKSRCBLT;
+        d->ddckCKSrcBlt = ck[kCkSrcBlt];
+    }
+    // The back buffer count only on a created chain's front.
+    if (desc.dwFlags & DDSD_BACKBUFFERCOUNT) {
+        d->dwFlags |= DDSD_BACKBUFFERCOUNT;
+        d->dwBackBufferCount = desc.dwBackBufferCount;
+    }
+    if (desc.ddsCaps.dwCaps & DDSCAPS_MIPMAP) {
+        d->dwFlags |= DDSD_MIPMAPCOUNT;
+        d->dwMipMapCount = desc.dwMipMapCount;
+    }
+    if (desc.dwFlags & DDSD_TEXTURESTAGE) {
+        d->dwFlags |= DDSD_TEXTURESTAGE;
+        d->dwTextureStage = desc.dwTextureStage;
     }
     return DD_OK;
 }
 
 HRESULT Surface::SetSurfaceDesc(const DDSURFACEDESC2& d, DWORD flags) {
     // Points a system-memory surface at client memory (DDSD_LPSURFACE), optionally with a new
-    // size, pitch and pixel format. Checks in the order ddraw.dll makes them.
+    // size, pitch and pixel format. Checks in ddraw.dll's order (spec: re/spec/surface-other.md);
+    // the wrapper checked the structure's size.
     if (flags) return DDERR_INVALIDPARAMS;
+    if (IsLost()) return DDERR_SURFACELOST;
+    if (lockCount || dcOut) return DDERR_SURFACEBUSY;
     const DWORD caps = desc.ddsCaps.dwCaps, caps2 = desc.ddsCaps.dwCaps2;
-    if (!(caps & DDSCAPS_SYSTEMMEMORY) || (caps & DDSCAPS_PRIMARYSURFACE) ||
-        (caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)))
+    if (!sysmemRequested ||
+        (caps & (DDSCAPS_ALLOCONLOAD | DDSCAPS_PRIMARYSURFACE | DDSCAPS_PRIMARYSURFACELEFT | DDSCAPS_OVERLAY)) ||
+        (caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) || (root && root->isPrimary))
         return DDERR_INVALIDSURFACETYPE;
     if (d.dwFlags & ~(DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT | DDSD_CAPS))
         return DDERR_INVALIDPARAMS;
-    if (!(d.dwFlags & DDSD_LPSURFACE) || !d.lpSurface) return DDERR_INVALIDPARAMS;
-    if ((d.dwFlags & DDSD_CAPS) && d.ddsCaps.dwCaps) return DDERR_INVALIDCAPS;  // caps 0 is ignored
-    // Width and pitch go together. The pitch only has to be positive and DWORD-aligned.
-    if (!(d.dwFlags & DDSD_WIDTH) != !(d.dwFlags & DDSD_PITCH)) return DDERR_INVALIDPARAMS;
-    if ((d.dwFlags & DDSD_WIDTH) && (!d.dwWidth || d.lPitch <= 0 || (d.lPitch & 3))) return DDERR_INVALIDPARAMS;
+    if ((d.dwFlags & DDSD_WIDTH) && !d.dwWidth) return DDERR_INVALIDPARAMS;
     if ((d.dwFlags & DDSD_HEIGHT) && !d.dwHeight) return DDERR_INVALIDPARAMS;
-    if (lockCount || dcOut) return DDERR_SURFACEBUSY;
+    if ((d.dwFlags & DDSD_PITCH) && (d.lPitch <= 0 || (d.lPitch & 3))) return DDERR_INVALIDPARAMS;
+    // A new pixel format only for a surface that was created with one.
+    if ((d.dwFlags & DDSD_PIXELFORMAT) && !ownFormat) return DDERR_INVALIDPARAMS;
+    // Width and pitch go together.
+    if (!(d.dwFlags & DDSD_WIDTH) != !(d.dwFlags & DDSD_PITCH)) return DDERR_INVALIDPARAMS;
+    if (!(d.dwFlags & DDSD_LPSURFACE) || !d.lpSurface) return DDERR_INVALIDPARAMS;
+    if ((d.dwFlags & DDSD_CAPS) && (d.ddsCaps.dwCaps || d.ddsCaps.dwCaps3 || d.ddsCaps.dwCaps4))
+        return DDERR_INVALIDCAPS;
     const int w = (d.dwFlags & DDSD_WIDTH) ? int(d.dwWidth) : buf->w;
     const int h = (d.dwFlags & DDSD_HEIGHT) ? int(d.dwHeight) : buf->h;
     const LONG pitch = (d.dwFlags & DDSD_PITCH) ? d.lPitch : buf->pitch;
     if (w <= 0 || h <= 0) return DDERR_INVALIDPARAMS;  // above INT_MAX
     Format f = buf->fmt;
-    if ((d.dwFlags & DDSD_PIXELFORMAT) && !Format::FromDDPF(d.ddpfPixelFormat, &f)) return DDERR_INVALIDPARAMS;
+    if ((d.dwFlags & DDSD_PIXELFORMAT) && !Format::FromDDPF(d.ddpfPixelFormat, &f)) return DDERR_INVALIDPIXELFORMAT;
     const bool reshaped = w != buf->w || h != buf->h || !(f == buf->fmt);
-    // ddraw.dll lets mipmap levels change shape independently. A flip-chain member can't:
-    // Flip swaps buffers between the members.
+    // dd2d9's own limit: Flip swaps memory between the members of a flip ring, so a
+    // member can't change shape (ddraw.dll allows it outside the primary's chain).
     if (reshaped && chainNext) return DDERR_INVALIDPARAMS;
     Buffer* nb = Buffer::CreateExternal(d.lpSurface, w, h, pitch, f);
     if (!nb) return DDERR_OUTOFMEMORY;
     ReplaceBuffer(nb);
     desc.dwWidth = DWORD(w);
     desc.dwHeight = DWORD(h);
-    uniqueness++;
+    uniqueness = 0;  // as ddraw.dll: no longer counted
     return DD_OK;
 }
 
@@ -849,28 +980,114 @@ void Surface::ReplaceBuffer(Buffer* b) {
     buf = b;
 }
 
-HRESULT Surface::Lock(RECT* r, DDSURFACEDESC2* out, DWORD flags) {
+// Fills the caller's description for Lock in place, as ddraw.dll does: what Lock doesn't
+// set keeps the caller's values; dwSize stays as given.
+void Surface::FillLockDesc(void* outDesc, uint8_t* bits) const {
+    auto* d = static_cast<DDSURFACEDESC2*>(outDesc);  // the two structures share their layout up to ddsCaps
+    const bool v2 = d->dwSize >= sizeof(DDSURFACEDESC2);  // as ddraw.dll: the DirectX 7 fields need the whole structure
+    const DWORD caps = desc.ddsCaps.dwCaps;
+    DWORD flags = DDSD_CAPS;
+    d->ddsCaps.dwCaps = caps;
+    if (v2) {
+        d->ddsCaps.dwCaps2 = desc.ddsCaps.dwCaps2;
+        d->ddsCaps.dwCaps3 = desc.ddsCaps.dwCaps3;
+        d->ddsCaps.dwCaps4 = desc.ddsCaps.dwCaps4;
+        d->dwTextureStage = 0;
+        if (desc.dwFlags & DDSD_TEXTURESTAGE) {
+            d->dwTextureStage = desc.dwTextureStage;
+            flags = DDSD_CAPS | DDSD_TEXTURESTAGE;
+        }
+    }
+    d->lpSurface = bits;
+    if (hasCk[kCkDestBlt]) {
+        flags |= DDSD_CKDESTBLT;
+        d->ddckCKDestBlt = ck[kCkDestBlt];
+    }
+    if (hasCk[kCkSrcBlt]) {
+        flags |= DDSD_CKSRCBLT;
+        d->ddckCKSrcBlt = ck[kCkSrcBlt];
+    }
+    if (!root && (caps & DDSCAPS_FRONTBUFFER) && (desc.dwFlags & DDSD_BACKBUFFERCOUNT)) {
+        flags |= DDSD_BACKBUFFERCOUNT;
+        d->dwBackBufferCount = desc.dwBackBufferCount;
+    }
+    if (caps & DDSCAPS_MIPMAP) {
+        flags |= DDSD_MIPMAPCOUNT;
+        d->dwMipMapCount = desc.dwMipMapCount;
+    }
+    d->dwWidth = DWORD(buf->w);
+    d->dwHeight = DWORD(buf->h);
+    if (buf->fmt.BlockCompressed()) {
+        flags |= DDSD_WIDTH | DDSD_HEIGHT | DDSD_LINEARSIZE;
+        d->dwLinearSize = DWORD(buf->pitch) * ((buf->h + 3) & ~3);
+    } else {
+        flags |= DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH;
+        d->lPitch = buf->pitch;
+    }
+    buf->fmt.ToDDPF(&d->ddpfPixelFormat);
+    if (buf->fmt.zbuf && !v2) {
+        // The old structure describes a Z buffer by its depth.
+        flags |= DDSD_ZBUFFERBITDEPTH;
+        d->dwMipMapCount = d->ddpfPixelFormat.dwZBufferBitDepth;  // dwZBufferBitDepth's slot
+    } else {
+        flags |= DDSD_PIXELFORMAT;
+    }
+    d->ddckCKDestOverlay = {};  // no overlays here
+    d->ddckCKSrcOverlay = {};
+    d->dwFlags = flags;
+}
+
+// Checks in ddraw.dll's order (spec: re/spec/surface-lock-dc.md, section 1). Rectangle
+// locks nest as long as they don't overlap; a whole-surface lock (or a DC out) excludes
+// the rest. System-memory textures made through IDirectDraw7 take ddraw.dll's fast path:
+// any descriptor size, no checks, no nesting.
+HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     Guard l;
     if (IsLost()) return DDERR_SURFACELOST;
-    // Busy with a DC out, or locked as a whole already (rectangles may still be locked
-    // side by side).
-    if (dcOut) return DDERR_SURFACEBUSY;
-    if (lockCount && (!r || (lockArea.left <= 0 && lockArea.top <= 0 && lockArea.right >= buf->w &&
-                             lockArea.bottom >= buf->h)))
-        return DDERR_SURFACEBUSY;
-    GdiFlush();
-    GetSurfaceDesc(out);
-    uint8_t* p = buf->bits;
-    if (r && !buf->fmt.BlockCompressed()) {
-        if (r->left < 0 || r->top < 0 || r->right > buf->w || r->bottom > buf->h || r->left >= r->right ||
-            r->top >= r->bottom)
-            return DDERR_INVALIDPARAMS;
-        p += r->top * buf->pitch + r->left * LONG(buf->fmt.Bytes());
+    auto* d = static_cast<DDSURFACEDESC2*>(outDesc);
+    const DWORD caps = desc.ddsCaps.dwCaps;
+    const bool fast = ddVersion == 7 && sysmemRequested && (caps & DDSCAPS_TEXTURE);
+    RECT area = {0, 0, buf->w, buf->h};
+    if (fast) {
+        if (!d) return DDERR_INVALIDPARAMS;
+        if (lockCount) return DDERR_SURFACEBUSY;
+        if (r && !buf->fmt.BlockCompressed()) {  // unchecked by ddraw.dll; kept inside the surface here
+            area = {std::clamp<LONG>(r->left, 0, buf->w), std::clamp<LONG>(r->top, 0, buf->h),
+                    std::clamp<LONG>(r->right, 0, buf->w), std::clamp<LONG>(r->bottom, 0, buf->h)};
+            area.right = std::max(area.right, area.left);
+            area.bottom = std::max(area.bottom, area.top);
+        }
+        fastLocked = true;
+        wholeReadOnly = (flags & DDLOCK_READONLY) != 0;
+    } else {
+        if (flags & ~0x17831u) return DDERR_INVALIDPARAMS;
+        if (!d || !DescSizeOk(d)) return DDERR_INVALIDPARAMS;
+        d->lpSurface = nullptr;  // from here on, a failure leaves it null
+        if (r) {
+            if (r->left < 0 || r->top < 0 || r->right < r->left || r->bottom < r->top || r->right > buf->w ||
+                r->bottom > buf->h)
+                return DDERR_INVALIDPARAMS;  // an empty rectangle is fine
+            if (!buf->fmt.BlockCompressed()) area = *r;
+            RECT x;
+            for (const LockRec& k : rectLocks)
+                if (IntersectRect(&x, &k.r, r)) return DDERR_SURFACEBUSY;
+            if (rectLocks.empty() && lockCount) return DDERR_SURFACEBUSY;  // locked whole, or a DC out
+        } else if (lockCount) {
+            return DDERR_SURFACEBUSY;
+        }
     }
-    out->lpSurface = p;  // ddraw.dll doesn't set DDSD_LPSURFACE in the returned description
+    GdiFlush();
+    uint8_t* p = buf->bits + area.top * buf->pitch + area.left * LONG(buf->fmt.Bytes());
+    if (fast) {
+    } else if (r) {
+        rectLocks.push_back({*r, p, (flags & DDLOCK_READONLY) != 0});
+    } else {
+        wholeLocked = true;
+        wholeReadOnly = (flags & DDLOCK_READONLY) != 0;
+    }
+    FillLockDesc(d, p);
     // While locked, the presenter treats this area as changing (see Presenter::Loop).
-    const RECT area = r && !buf->fmt.BlockCompressed() ? *r : RECT{0, 0, buf->w, buf->h};
-    if (lockCount == 0) {
+    if (lockCount == 0 || (dcOut && lockCount == 1)) {
         lockArea = area;
     } else {
         lockArea = {std::min(lockArea.left, area.left), std::min(lockArea.top, area.top),
@@ -878,19 +1095,71 @@ HRESULT Surface::Lock(RECT* r, DDSURFACEDESC2* out, DWORD flags) {
     }
     lockCount++;
     DD2D9_TRACE("Lock %p%s rect=%s%ld,%ld-%ld,%ld flags=0x%lx -> %p pitch=%ld", static_cast<void*>(this),
-               isPrimary ? " (primary)" : "", r ? "" : "full ", r ? r->left : 0L, r ? r->top : 0L,
-               r ? r->right : LONG(buf->w), r ? r->bottom : LONG(buf->h), flags, static_cast<void*>(p), buf->pitch);
+               isPrimary ? " (primary)" : "", r ? "" : "full ", area.left, area.top, area.right, area.bottom, flags,
+               static_cast<void*>(p), buf->pitch);
     return DD_OK;
 }
 
-HRESULT Surface::Unlock() {
+// Checks in ddraw.dll's order (spec section 2): with rectangle locks out, the one to undo
+// is named by its rectangle (4, 7) or pointer (1-3); no name, only if it's the one lock.
+HRESULT Surface::Unlock(void* pointer, const RECT* rect, int version) {
     Guard l;
     DD2D9_TRACE("Unlock %p%s", static_cast<void*>(this), isPrimary ? " (primary)" : "");
-    if (lockCount <= 0) return DDERR_NOTLOCKED;
-    lockCount--;
-    uniqueness++;
-    MarkDirtyIfVisible(&lockArea);
-    return DD_OK;
+    bool readOnly = false;
+    RECT area = lockArea;
+    if (fastLocked) {
+        fastLocked = false;
+        readOnly = wholeReadOnly;
+        lockCount--;
+    } else {
+        if (lockCount <= 0) return DDERR_NOTLOCKED;
+        const bool named = pointer || rect;
+        if (lockCount > 1 && !named) return DDERR_INVALIDRECT;
+        if (dcOut && version >= 3) return DDERR_GENERIC;
+        if (rectLocks.empty()) {
+            if (wholeLocked) {  // whatever is named
+                wholeLocked = false;
+                readOnly = wholeReadOnly;
+            } else if (dcCounted) {  // only a DC out (IDirectDrawSurface 1/2): its share goes
+                dcCounted = false;
+            } else {
+                return DDERR_NOTLOCKED;
+            }
+        } else {
+            size_t k = rectLocks.size();
+            if (!named) {
+                k = 0;  // the one lock (checked above)
+            } else {
+                for (size_t i = 0; i < rectLocks.size(); i++) {
+                    const LockRec& lr = rectLocks[i];
+                    if (version <= 3 ? lr.ptr == pointer : (rect && EqualRect(&lr.r, rect))) {
+                        k = i;
+                        break;
+                    }
+                }
+            }
+            if (k == rectLocks.size()) return DDERR_NOTLOCKED;
+            area = rectLocks[k].r;
+            readOnly = rectLocks[k].readOnly;
+            rectLocks.erase(rectLocks.begin() + k);
+        }
+        lockCount--;
+    }
+    // The area still locked, for the presenter.
+    lockArea = wholeLocked || fastLocked ? RECT{0, 0, buf->w, buf->h} : RECT{0, 0, 0, 0};
+    for (const LockRec& k : rectLocks) UnionRect(&lockArea, &lockArea, &k.r);
+    if (!readOnly) {
+        BumpUniqueness();
+        MarkDirtyIfVisible(&area);
+    }
+    return IsLost() ? DDERR_SURFACELOST : DD_OK;  // unlocked either way, as ddraw.dll
+}
+
+// PageLock and PageUnlock: nothing to pin here; ddraw.dll checks only these.
+HRESULT Surface::PageLock(DWORD flags) {
+    if (flags) return DDERR_INVALIDPARAMS;
+    Guard l;
+    return IsLost() ? DDERR_SURFACELOST : DD_OK;
 }
 
 HRESULT Surface::GetDDInterface(void** out) {
@@ -902,10 +1171,15 @@ HRESULT Surface::GetDDInterface(void** out) {
     return DD_OK;
 }
 
+// As ddraw.dll (spec: re/spec/surface-other.md), but for one thing: the new object is
+// referenced before the old entry goes, so setting the same one again keeps it alive.
 HRESULT Surface::SetPrivateData(REFGUID tag, void* data, DWORD size, DWORD flags) {
-    if (!data) return DDERR_INVALIDPARAMS;
-    if ((flags & DDSPD_IUNKNOWNPOINTER) && size != sizeof(IUnknown*)) return DDERR_INVALIDPARAMS;
-    PrivateData p = {tag, {}, nullptr};
+    if (!size || (flags & ~(DDSPD_IUNKNOWNPOINTER | DDSPD_VOLATILE))) return DDERR_INVALIDPARAMS;
+    if (!data || ((flags & DDSPD_IUNKNOWNPOINTER) && size != sizeof(IUnknown*))) {
+        FreePrivateData(tag);  // ddraw.dll has freed the old entry by then
+        return DDERR_INVALIDPARAMS;
+    }
+    PrivateData p = {tag, {}, nullptr, (flags & DDSPD_VOLATILE) != 0, uniqueness};
     if (flags & DDSPD_IUNKNOWNPOINTER) {
         // The pointer the game passes, not what it points to (a copy of the pointer).
         p.unk = static_cast<IUnknown*>(data);
@@ -913,7 +1187,7 @@ HRESULT Surface::SetPrivateData(REFGUID tag, void* data, DWORD size, DWORD flags
     } else {
         p.data.assign(static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
     }
-    FreePrivateData(tag);  // after the AddRef: setting the same object again keeps it alive
+    FreePrivateData(tag);
     priv_.push_back(std::move(p));
     return DD_OK;
 }
@@ -922,6 +1196,11 @@ HRESULT Surface::GetPrivateData(REFGUID tag, void* data, DWORD* size) {
     for (auto& p : priv_) {
         if (!IsEqualGUID(p.tag, tag)) continue;
         if (!size) return DDERR_INVALIDPARAMS;
+        // Volatile data is gone once the contents change (or aren't counted).
+        if (p.isVolatile && (!uniqueness || uniqueness != p.stamp)) {
+            *size = 0;
+            return DDERR_EXPIRED;
+        }
         const DWORD need = p.unk ? sizeof(IUnknown*) : DWORD(p.data.size());
         if (*size < need) {
             *size = need;
@@ -952,7 +1231,7 @@ void Surface::FillRect(const RECT& r, DWORD value) {
     RECT c;
     if (buf->fmt.BlockCompressed() || !IntersectRect(&c, &r, &bounds)) return;
     FillCore(&c, value);
-    uniqueness++;
+    BumpUniqueness();
     MarkDirtyIfVisible(&c);
 }
 
@@ -974,28 +1253,42 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
     bool wait = false;
     {
         Guard l;
-        if (IsLost()) return DDERR_SURFACELOST;
+        // Checks in ddraw.dll's order (spec: re/spec/surface-flip-key-palette.md, section 1).
+        // No overlays or stereo surfaces here: DDFLIP_EVEN/ODD and DDFLIP_STEREO never apply.
+        const DWORD kIntervals = 0x07000000;
+        if ((flags & ~(0x3Fu | kIntervals)) || (flags & (DDFLIP_EVEN | DDFLIP_ODD | DDFLIP_STEREO)) ||
+            ((flags & DDFLIP_NOVSYNC) && (flags & kIntervals)))
+            return DDERR_INVALIDPARAMS;
+        if (IsLost() || (target && target->IsLost(false))) return DDERR_SURFACELOST;
         // Called on the front buffer of a chain (created, or put together with AddAttachedSurface).
         const DWORD caps = desc.ddsCaps.dwCaps;
-        if (!(caps & DDSCAPS_FLIP) || !(caps & DDSCAPS_FRONTBUFFER) || !chainNext) return DDERR_NOTFLIPPABLE;
+        if (!(caps & DDSCAPS_FLIP) || !(caps & DDSCAPS_FRONTBUFFER)) return DDERR_NOTFLIPPABLE;
+        if (lockCount || dcOut) return DDERR_SURFACEBUSY;
         if (isPrimary && !dd->Exclusive()) return DDERR_NOEXCLUSIVEMODE;
+        if (!chainNext) return DDERR_NOTFLIPPABLE;
         DD2D9_TRACE("Flip %p target=%p flags=0x%lx", static_cast<void*>(this), static_cast<void*>(target), flags);
         // The chain's order is the ring's (back buffers attached later sit right after the front).
         std::vector<Surface*> chain{this};
         for (Surface* m = chainNext; m && m != this && chain.size() < 4096; m = m->chainNext) chain.push_back(m);
-        for (Surface* s : chain)
-            if (s->lockCount || s->dcOut) return DDERR_SURFACEBUSY;
+        // Only the buffers that change hands have to be free: with a target, the others may be locked.
+        size_t k = 0;
+        for (size_t i = 1; i < chain.size(); i++) {
+            Surface* s = chain[i];
+            if (s->IsLost(false)) return DDERR_SURFACELOST;
+            if ((!target || s == target) && (s->lockCount || s->dcOut)) return DDERR_SURFACEBUSY;
+            if (s == target) k = i;
+        }
+        if (target && !k) return DDERR_NOTFLIPPABLE;  // the front buffer, or not in the chain
         if (target) {
-            size_t k = 0;
-            while (k < chain.size() && chain[k] != target) k++;
-            if (k == 0 || k == chain.size()) return DDERR_NOTFLIPPABLE;  // the front buffer, or not in the chain
             std::swap(chain[0]->buf, chain[k]->buf);
         } else {
             Buffer* first = chain[0]->buf;
             for (size_t i = 0; i + 1 < chain.size(); i++) chain[i]->buf = chain[i + 1]->buf;
             chain.back()->buf = first;
         }
-        for (Surface* s : chain) s->uniqueness++;
+        // As ddraw.dll: only the front and the buffer it swapped with count as changed.
+        chain[0]->BumpUniqueness();
+        chain[target ? k : 1]->BumpUniqueness();
         if (isPrimary) {
             Presenter* p = dd->GetPresenter();
             wait = g_config.vsync == kVSyncOn || (g_config.vsync == kVSyncAuto && !(flags & DDFLIP_NOVSYNC));
@@ -1010,6 +1303,13 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         dd->PaceFlip();
         for (int i = 1; i < intervals; i++) dd->PaceFlip();
     }
+    return DD_OK;
+}
+
+// No flip is ever pending here: valid calls succeed (spec section 2).
+HRESULT Surface::GetFlipStatus(DWORD flags) {
+    if (flags != DDGFS_CANFLIP && flags != DDGFS_ISFLIPDONE) return DDERR_INVALIDPARAMS;
+    if (IsLost()) return DDERR_SURFACELOST;
     return DD_OK;
 }
 
@@ -1034,13 +1334,21 @@ Palette::Palette(DDraw* dd, DWORD c, const PALETTEENTRY* e) : caps(c), dd_(dd) {
 // the system: always black and white, whatever the game sets.
 void Palette::ReserveSystemEntries() {
     if ((caps & DDPCAPS_8BIT) && !(caps & (DDPCAPS_ALLOW256 | DDPCAPS_8BITENTRIES))) {
-        entries[0] = {0, 0, 0, 0};
-        entries[255] = {255, 255, 255, 0};
+        // Only the colors: ddraw.dll leaves the game's peFlags.
+        entries[0].peRed = entries[0].peGreen = entries[0].peBlue = 0;
+        entries[255].peRed = entries[255].peGreen = entries[255].peBlue = 255;
     }
 }
 
+// Released more often than referenced (the surfaces it's attached to hold references):
+// ddraw.dll detaches it, so GetPalette then says DDERR_NOPALETTEATTACHED instead of
+// handing out freed memory. g_lock held.
 Palette::~Palette() {
-    if (dd_) dd_->IntRelease();
+    if (dd_) {
+        for (Surface* s : dd_->surfaces)
+            if (s->palette == this) s->palette = nullptr;
+        dd_->IntRelease();
+    }
 }
 
 int Palette::Count() const {
@@ -1081,13 +1389,17 @@ ULONG Palette::Release() {
 
 HRESULT Palette::GetCaps(LPDWORD c) {
     if (!c) return DDERR_INVALIDPARAMS;
-    *c = caps;
+    Guard l;
+    // As ddraw.dll: the size and entry layout (not DDPCAPS_ALPHA or the creation-only
+    // flags), and PRIMARYSURFACE while the palette is the primary surface's.
+    *c = caps & (DDPCAPS_1BIT | DDPCAPS_2BIT | DDPCAPS_4BIT | DDPCAPS_8BIT | DDPCAPS_8BITENTRIES | DDPCAPS_ALLOW256);
+    if (dd_ && dd_->primary && dd_->primary->palette == this) *c |= DDPCAPS_PRIMARYSURFACE;
     return DD_OK;
 }
 
-HRESULT Palette::GetEntries(DWORD, DWORD base, DWORD count, LPPALETTEENTRY out) {
+HRESULT Palette::GetEntries(DWORD flags, DWORD base, DWORD count, LPPALETTEENTRY out) {
     const DWORD n = DWORD(Count());
-    if (!out || base > n || count > n - base) return DDERR_INVALIDPARAMS;
+    if (flags || !out || !count || base >= n || count > n - base) return DDERR_INVALIDPARAMS;
     Guard l;
     if (caps & DDPCAPS_8BITENTRIES) {
         auto* idx = reinterpret_cast<uint8_t*>(out);
@@ -1100,9 +1412,9 @@ HRESULT Palette::GetEntries(DWORD, DWORD base, DWORD count, LPPALETTEENTRY out) 
 
 HRESULT Palette::Initialize(LPDIRECTDRAW, DWORD, LPPALETTEENTRY) { return DDERR_ALREADYINITIALIZED; }
 
-HRESULT Palette::SetEntries(DWORD, DWORD start, DWORD count, LPPALETTEENTRY in) {
+HRESULT Palette::SetEntries(DWORD flags, DWORD start, DWORD count, LPPALETTEENTRY in) {
     const DWORD n = DWORD(Count());
-    if (!in || start > n || count > n - start) return DDERR_INVALIDPARAMS;
+    if (flags || !in || !count || start >= n || count > n - start) return DDERR_INVALIDPARAMS;
     Guard l;
     if (caps & DDPCAPS_8BITENTRIES) {
         auto* idx = reinterpret_cast<const uint8_t*>(in);
@@ -1113,8 +1425,8 @@ HRESULT Palette::SetEntries(DWORD, DWORD start, DWORD count, LPPALETTEENTRY in) 
     ReserveSystemEntries();
     version++;
     DD2D9_TRACE("Palette %p SetEntries start=%lu count=%lu%s", static_cast<void*>(this), start, count,
-               dd_ && dd_->primary && dd_->primary->palette == this ? " (primary)" : "");
-    if (dd_ && dd_->primary && dd_->primary->palette == this) dd_->MarkDirty();
+               dd_ && dd_->primary && dd_->primary->ShownPalette() == this ? " (primary)" : "");
+    if (dd_ && dd_->primary && dd_->primary->ShownPalette() == this) dd_->MarkDirty();
     return DD_OK;
 }
 
@@ -1148,6 +1460,12 @@ Clipper::~Clipper() {
     if (dd_) dd_->IntRelease();
 }
 
+// A clipper the class factory made answers only Initialize until it gets one.
+static HRESULT ClipperReady(const Clipper* c) {
+    if (!LiveClipper(c)) return DDERR_INVALIDPARAMS;
+    return c->initialized ? DD_OK : DDERR_NOTINITIALIZED;
+}
+
 HRESULT Clipper::QueryInterface(REFIID r, void** out) {
     if (!out || !LiveClipper(this)) return DDERR_INVALIDPARAMS;
     if (IsEqualGUID(r, IID_IUnknown) || IsEqualGUID(r, IID_IDirectDrawClipper)) {
@@ -1165,35 +1483,93 @@ ULONG Clipper::AddRef() {
 }
 
 ULONG Clipper::Release() {
-    Guard l;  // the check and the decrement go together
-    // Also a no-op with the clipper's vtable overwritten (as ddraw.dll).
-    if (!LiveClipper(this) || *reinterpret_cast<void* const*>(this) != g_clipperVtbl) return 0;
-    LONG r = InterlockedDecrement(&ref_);
-    if (r == 0) delete this;
+    DDraw* owner = nullptr;
+    int ownerRef = 0;
+    LONG r;
+    {
+        Guard l;  // the check and the decrement go together
+        // Also a no-op with the clipper's vtable overwritten (as ddraw.dll).
+        if (!LiveClipper(this) || *reinterpret_cast<void* const*>(this) != g_clipperVtbl) return 0;
+        r = InterlockedDecrement(&ref_);
+        if (r == 0) {
+            owner = dd_;
+            ownerRef = ddRef;
+            if (owner) owner->IntAddRef();  // see Surface::Release
+            delete this;
+        }
+    }
+    // The DirectDraw interface it referenced (made through IDirectDraw4/7): released
+    // last and without g_lock, as it may tear the object down.
+    if (ownerRef) owner->Release(ownerRef);
+    if (owner) owner->IntRelease();
     return ULONG(r < 0 ? 0 : r);
 }
 
+// The rectangles in `in` that meet `clip`, clipped to it (ddraw.dll's FUN_737364ff).
+static std::vector<RECT> ClipRects(const RECT* in, size_t n, const RECT& clip) {
+    std::vector<RECT> out;
+    for (size_t i = 0; i < n; i++) {
+        RECT r;
+        if (IntersectRect(&r, &in[i], &clip)) out.push_back(r);
+    }
+    return out;
+}
+
+// As ddraw.dll (spec: re/spec/palette-clipper-exports.md): with a window, the part of
+// its client area that is visible on the screen, in screen coordinates; otherwise the
+// list SetClipList gave. Either clipped to `rect`.
 HRESULT Clipper::GetClipList(LPRECT rect, LPRGNDATA data, LPDWORD size) {
-    if (!size || !LiveClipper(this)) return DDERR_INVALIDPARAMS;
+    if (HRESULT hr = ClipperReady(this); FAILED(hr)) return hr;
+    if (data) data->rdh.nCount = 0;  // ddraw.dll's first step, whatever follows
     Guard l;
     std::vector<uint8_t> list;
     if (hwnd) {
         RECT cr;
         if (!GetClientRect(hwnd, &cr)) return E_FAIL;  // the window is gone
         MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
-        if (rect && !IntersectRect(&cr, &cr, rect)) SetRectEmpty(&cr);
-        list.resize(sizeof(RGNDATAHEADER) + sizeof(RECT));
+        std::vector<RECT> rects;
+        HRGN rgn = CreateRectRgn(0, 0, 0, 0);
+        HDC dc = GetDC(hwnd);
+        // The window's visible region (SYSRGN is in screen coordinates).
+        if (dc && rgn && GetRandomRgn(dc, rgn, SYSRGN) == 1) {
+            const DWORD bytes = GetRegionData(rgn, 0, nullptr);
+            std::vector<uint8_t> raw(bytes);
+            if (bytes && GetRegionData(rgn, bytes, reinterpret_cast<RGNDATA*>(raw.data()))) {
+                const auto* rd = reinterpret_cast<const RGNDATA*>(raw.data());
+                rects = ClipRects(reinterpret_cast<const RECT*>(rd->Buffer), rd->rdh.nCount, cr);
+            }
+        } else {
+            // No region to be had: the client area on the screen.
+            RECT screen = {GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)};
+            screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            rects = ClipRects(&cr, 1, screen);
+        }
+        if (dc) ReleaseDC(hwnd, dc);
+        if (rgn) DeleteObject(rgn);
+        if (rect) rects = ClipRects(rects.data(), rects.size(), *rect);
+        list.resize(sizeof(RGNDATAHEADER) + rects.size() * sizeof(RECT));
         auto* rd = reinterpret_cast<RGNDATA*>(list.data());
         rd->rdh.dwSize = sizeof(RGNDATAHEADER);
         rd->rdh.iType = RDH_RECTANGLES;
-        rd->rdh.nCount = IsRectEmpty(&cr) ? 0 : 1;
-        rd->rdh.nRgnSize = sizeof(RECT);
-        rd->rdh.rcBound = cr;
-        memcpy(rd->Buffer, &cr, sizeof(RECT));
+        rd->rdh.nCount = DWORD(rects.size());
+        rd->rdh.nRgnSize = DWORD(rects.size() * sizeof(RECT));
+        SetRectEmpty(&rd->rdh.rcBound);
+        for (const RECT& r : rects) UnionRect(&rd->rdh.rcBound, &rd->rdh.rcBound, &r);
+        if (!rects.empty()) memcpy(rd->Buffer, rects.data(), rects.size() * sizeof(RECT));
     } else {
         if (clipList_.empty()) return DDERR_NOCLIPLIST;
         list = clipList_;
+        if (rect) {
+            // Clipped to `rect`; the header's bounds and size stay as they were.
+            auto* rd = reinterpret_cast<RGNDATA*>(list.data());
+            const size_t n = std::min<size_t>(rd->rdh.nCount, (list.size() - sizeof(RGNDATAHEADER)) / sizeof(RECT));
+            const std::vector<RECT> rects = ClipRects(reinterpret_cast<const RECT*>(rd->Buffer), n, *rect);
+            rd->rdh.nCount = DWORD(rects.size());
+            if (!rects.empty()) memcpy(rd->Buffer, rects.data(), rects.size() * sizeof(RECT));
+        }
     }
+    if (!size) return DDERR_INVALIDPARAMS;
     if (!data) {
         *size = DWORD(list.size());
         return DD_OK;
@@ -1236,38 +1612,74 @@ std::vector<RECT> Clipper::Region(const Surface* target) const {
 }
 
 HRESULT Clipper::GetHWnd(HWND* out) {
-    if (!out || !LiveClipper(this)) return DDERR_INVALIDPARAMS;
+    if (HRESULT hr = ClipperReady(this); FAILED(hr)) return hr;
+    if (!out) return DDERR_INVALIDPARAMS;
     *out = hwnd;
     return DD_OK;
 }
 
-HRESULT Clipper::Initialize(LPDIRECTDRAW, DWORD) { return LiveClipper(this) ? DD_OK : DDERR_INVALIDPARAMS; }
-
-HRESULT Clipper::IsClipListChanged(WINBOOL* changed) {
-    if (!changed || !LiveClipper(this)) return DDERR_INVALIDPARAMS;
-    *changed = FALSE;
+// Only a clipper from the class factory needs it: it then belongs to that DirectDraw
+// object (without a reference, as in ddraw.dll).
+HRESULT Clipper::Initialize(LPDIRECTDRAW dd, DWORD flags) {
+    if (!LiveClipper(this)) return DDERR_INVALIDPARAMS;
+    Guard l;
+    if (initialized) return DDERR_ALREADYINITIALIZED;
+    if (flags) return DDERR_INVALIDPARAMS;
+    if (DDraw* d = DDraw::From(dd)) {
+        dd_ = d;
+        d->IntAddRef();  // keeps dd2d9's object allocated, not a game reference
+    }
+    initialized = true;
     return DD_OK;
 }
 
-HRESULT Clipper::SetClipList(LPRGNDATA data, DWORD) {
-    if (!LiveClipper(this)) return DDERR_INVALIDPARAMS;
+// ddraw.dll keeps no track of changes: always "changed".
+HRESULT Clipper::IsClipListChanged(WINBOOL* changed) {
+    if (HRESULT hr = ClipperReady(this); FAILED(hr)) return hr;
+    if (!changed) return DDERR_INVALIDPARAMS;
+    *changed = TRUE;
+    return DD_OK;
+}
+
+// Checks in ddraw.dll's order.
+HRESULT Clipper::SetClipList(LPRGNDATA data, DWORD flags) {
+    if (HRESULT hr = ClipperReady(this); FAILED(hr)) return hr;
+    if (flags) return DDERR_INVALIDPARAMS;
+    if (data) {
+        if (!data->rdh.nCount) return DDERR_INVALIDCLIPLIST;
+        // A clipper made through IDirectDraw takes any header.
+        if (!fromDD1 && (data->rdh.dwSize < sizeof(RGNDATAHEADER) || data->rdh.iType != RDH_RECTANGLES))
+            return DDERR_INVALIDCLIPLIST;
+    }
     Guard l;
     if (hwnd) return DDERR_CLIPPERISUSINGHWND;
     if (!data) {
         clipList_.clear();
         return DD_OK;
     }
-    if (data->rdh.nCount > 65536) return DDERR_INVALIDPARAMS;  // also keeps the size below from overflowing
+    // dd2d9's own limit, which also keeps the size below from overflowing.
+    if (data->rdh.nCount > 65536) return DDERR_INVALIDCLIPLIST;
     size_t size = sizeof(RGNDATAHEADER) + size_t(data->rdh.nCount) * sizeof(RECT);
     clipList_.assign(reinterpret_cast<uint8_t*>(data), reinterpret_cast<uint8_t*>(data) + size);
     return DD_OK;
 }
 
-HRESULT Clipper::SetHWnd(DWORD, HWND h) {
-    if (!LiveClipper(this)) return DDERR_INVALIDPARAMS;
+HRESULT Clipper::SetHWnd(DWORD flags, HWND h) {
+    if (HRESULT hr = ClipperReady(this); FAILED(hr)) return hr;
+    if (flags || (h && !IsWindow(h))) return DDERR_INVALIDPARAMS;
     Guard l;
     hwnd = h;
     if (dd_) dd_->MarkDirty();
+    return DD_OK;
+}
+
+// Set/GetPriority and Set/GetLOD: managed textures only, at their top level (ddraw.dll
+// hands them to Direct3D's texture manager).
+HRESULT Surface::ManagedTextureCheck() const {
+    const DDSCAPS2& c = desc.ddsCaps;
+    if ((c.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL) || (root && (c.dwCaps2 & DDSCAPS2_CUBEMAP))) return DDERR_INVALIDPARAMS;
+    if (!(c.dwCaps & DDSCAPS_TEXTURE)) return DDERR_INVALIDOBJECT;
+    if (!(c.dwCaps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE))) return DDERR_INVALIDPARAMS;
     return DD_OK;
 }
 
@@ -1277,20 +1689,44 @@ HRESULT GammaControl::QueryInterface(REFIID r, void** out) { return surface->Que
 ULONG GammaControl::AddRef() { return surface->AddRef(Surface::kRefGamma); }
 ULONG GammaControl::Release() { return surface->Release(Surface::kRefGamma); }
 
-HRESULT GammaControl::GetGammaRamp(DWORD, LPDDGAMMARAMP ramp) {
-    if (!ramp) return DDERR_INVALIDPARAMS;
-    Presenter* p = surface->dd->GetPresenter();
-    if (!p) return DDERR_GENERIC;
-    p->GetGamma(ramp);
+// As ddraw.dll (spec: re/spec/surface-other.md): the primary's only. Without a ramp
+// of its own, the display's (the identity if Windows has none to give).
+HRESULT GammaControl::GetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
+    Guard l;
+    if (!ramp || flags || !(surface->desc.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)) return DDERR_INVALIDPARAMS;
+    if (surface->IsLost()) return DDERR_SURFACELOST;
+    if (surface->gammaRamp) {
+        *ramp = *surface->gammaRamp;
+        return DD_OK;
+    }
+    HDC dc = GetDC(nullptr);
+    const bool ok = dc && GetDeviceGammaRamp(dc, ramp);
+    if (dc) ReleaseDC(nullptr, dc);
+    if (!ok)
+        for (int i = 0; i < 256; i++) ramp->red[i] = ramp->green[i] = ramp->blue[i] = WORD(i * 0x101);
     return DD_OK;
 }
 
-HRESULT GammaControl::SetGammaRamp(DWORD, LPDDGAMMARAMP ramp) {
-    if (!ramp) return DDERR_INVALIDPARAMS;
-    Presenter* p = surface->dd->GetPresenter();
-    if (!p) return DDERR_GENERIC;
-    p->SetGamma(*ramp);
-    surface->dd->MarkDirty();
+// The ramp is the primary's and shows only while its DirectDraw object is exclusive;
+// NULL drops it. No calibrator here: DDSGR_CALIBRATE (1) is unsupported.
+HRESULT GammaControl::SetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
+    Guard l;
+    const DWORD kCalibrate = 1;  // DDSGR_CALIBRATE
+    if (flags & ~kCalibrate) return DDERR_INVALIDPARAMS;
+    if (flags & kCalibrate) return DDERR_UNSUPPORTED;
+    if (!(surface->desc.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)) return DDERR_INVALIDPARAMS;
+    if (surface->IsLost()) return DDERR_SURFACELOST;
+    if (!ramp) {
+        delete surface->gammaRamp;
+        surface->gammaRamp = nullptr;
+    } else {
+        if (!surface->gammaRamp) surface->gammaRamp = new DDGAMMARAMP;
+        *surface->gammaRamp = *ramp;
+    }
+    if (surface->dd->primary == surface) {
+        surface->dd->ApplyGamma();
+        surface->dd->MarkDirty();
+    }
     return DD_OK;
 }
 

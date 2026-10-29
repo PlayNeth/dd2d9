@@ -29,16 +29,18 @@ so the mode-switch tests fail there).
 - To look at one sub-test: `WT_ONLY=test_lost_device WINETEST_PLATFORM=windows wine work/ddraw7.exe`,
   with `log=2` in a `dd2d9.ini` next to it.
 
-`baseline.json` was made from dd2d9 0.7.5 with Wine 11.0 (WoW64) on Xvnc. Another Wine
+`baseline.json` was made from dd2d9 0.7.7 with Wine 11.0 (WoW64) on Xvnc. Another Wine
 version or X server may move a few display-related results; compare runs from the
-same machine when in doubt.
+same machine when in doubt. A full run takes a few hours; the four `ddrawN` files can
+run at once (`--only`, each with its own `--display` and `--prefix`), but then the
+mode-switch tests miss a display-change message now and then (`test_coop_level_mode_set`).
 
 ## Expected failures
 The differences dd2d9 makes on purpose (see the main README), and environment ones:
 
 | Sub-tests | Why |
 | --- | --- |
-| `test_window_style`, parts of `test_coop_level_mode_set` | dd2d9 removes the window's frame in fullscreen |
+| `test_window_style`, `test_redundant_mode_set`, parts of `test_coop_level_mode_set` | in exclusive mode dd2d9 grows the window so that its frame lies off the screen (`ddraw.dll` puts the whole window on it) |
 | `test_p8_blit` | 8-bit to RGB blits go through the palette |
 | `test_caps`, the 3D tests | no Direct3D without D7VK |
 | `test_coop_level_create_device_window` | `DDSCL_CREATEDEVICEWINDOW` isn't implemented |

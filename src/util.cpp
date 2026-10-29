@@ -611,7 +611,7 @@ void DescOut(const DDSURFACEDESC2& in, void* out) {
     auto* d = static_cast<DDSURFACEDESC*>(out);
     memset(d, 0, sizeof(*d));
     d->dwSize = sizeof(DDSURFACEDESC);
-    d->dwFlags = in.dwFlags;
+    d->dwFlags = in.dwFlags & ~(DDSD_TEXTURESTAGE | DDSD_FVF | DDSD_SRCVBHANDLE | DDSD_DEPTH);
     d->dwHeight = in.dwHeight;
     d->dwWidth = in.dwWidth;
     d->lPitch = in.lPitch;

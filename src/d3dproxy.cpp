@@ -86,6 +86,7 @@ HRESULT CopyChain(Surface* dst, const POINT* point, Surface* src, const RECT* re
         RECT dr = {p.x, p.y, p.x + (sr.right - sr.left), p.y + (sr.bottom - sr.top)};
         HRESULT hr = dst->BltLocked(&dr, src, &sr, 0, nullptr, false);
         if (FAILED(hr)) return level == 0 ? hr : DD_OK;  // smaller levels may simply not line up
+        dst->BumpUniqueness();
         dst = dst->NextMipLevel();
         src = src->NextMipLevel();
         sr = {sr.left / 2, sr.top / 2, std::max<LONG>(sr.right / 2, sr.left / 2 + 1),

@@ -493,8 +493,10 @@ void Presenter::Loop() {
                     snap.buf = p->buf;
                     snap.buf->AddRef();
                     snap.fmt = snap.buf->fmt;
-                    if (snap.fmt.pal8)
-                        memcpy(snap.pal, p->palette ? p->palette->entries : dd_->defaultPalette, sizeof(snap.pal));
+                    if (snap.fmt.pal8) {
+                        const Palette* sp = p->ShownPalette();
+                        memcpy(snap.pal, sp ? sp->entries : dd_->defaultPalette, sizeof(snap.pal));
+                    }
                 }
                 lastSrc_ = src;
                 lastPrimary_ = p;
@@ -502,8 +504,8 @@ void Presenter::Loop() {
                 stagingStale_ = false;
                 DD2D9_TRACE("present #%llu: primary %p, area %ld,%ld-%ld,%ld, palette %p v%lu",
                            static_cast<unsigned long long>(seq), static_cast<void*>(p), area.left, area.top,
-                           area.right, area.bottom, static_cast<void*>(p->palette),
-                           p->palette ? p->palette->version : 0);
+                           area.right, area.bottom, static_cast<const void*>(p->ShownPalette()),
+                           p->ShownPalette() ? p->ShownPalette()->version : 0);
             }
             lockTime = Seconds() - t0;
         }

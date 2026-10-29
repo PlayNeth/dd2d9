@@ -97,6 +97,9 @@ public:
     std::vector<RECT> Region(const Surface* target) const;
 
     HWND hwnd = nullptr;
+    bool fromDD1 = false;     // made through IDirectDraw: SetClipList takes any header
+    bool initialized = true;  // false for one made by the class factory, until Initialize
+    int ddRef = 0;            // the DirectDraw interface version it references (made through 4/7)
 
 private:
     ~Clipper();
@@ -146,9 +149,10 @@ public:
     HRESULT DeleteAttachedSurface(DWORD flags, Surface* s, int ifaceVersion);
     HRESULT EnumAttachedSurfaces(int version, void* ctx, void* callback);
     HRESULT GetAttachedSurface(const DDSCAPS2& caps, Surface** out, int version);
-    // version: the IDirectDrawSurface version called (it decides where DDBLT_KEYDEST's key comes from).
-    HRESULT Blt(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version = 7);
-    HRESULT BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans);
+    // version: the IDirectDrawSurface version called; srcOldIface: the source was passed as an
+    // IDirectDrawSurface or IDirectDrawSurface2 (DDBLT_KEYDEST then takes the source's key).
+    HRESULT Blt(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version, bool srcOldIface);
+    HRESULT BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans, int version);
     HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
                       bool destKeyFromSource = false);
     HRESULT Flip(Surface* target, DWORD flags);
@@ -156,16 +160,25 @@ public:
     HRESULT GetClipper(IDirectDrawClipper** out);
     HRESULT SetClipper(IDirectDrawClipper* c);
     HRESULT GetColorKey(DWORD flags, DDCOLORKEY* key);
-    HRESULT SetColorKey(DWORD flags, DDCOLORKEY* key);
+    HRESULT SetColorKey(DWORD flags, DDCOLORKEY* key, int version);
+    HRESULT GetFlipStatus(DWORD flags);
     HRESULT GetDC(HDC* dc);
-    HRESULT ReleaseDC(HDC dc);
+    HRESULT ReleaseDC(HDC dc, int version);
     HRESULT GetPalette(IDirectDrawPalette** out);
-    HRESULT SetPalette(IDirectDrawPalette* p);
+    HRESULT SetPalette(IDirectDrawPalette* p, int version);
+    // The palette the screen shows for this surface: its own, or on the front of a flip
+    // chain without one, a back buffer's (palettes stay with the surface they were set on).
+    const Palette* ShownPalette() const;
+    Format ReportedFormat() const;
     HRESULT GetPixelFormat(DDPIXELFORMAT* pf);
     HRESULT GetSurfaceDesc(DDSURFACEDESC2* desc);
     HRESULT SetSurfaceDesc(const DDSURFACEDESC2& desc, DWORD flags);
-    HRESULT Lock(RECT* rect, DDSURFACEDESC2* desc, DWORD flags);
-    HRESULT Unlock();
+    // desc: the caller's DDSURFACEDESC or DDSURFACEDESC2, filled in place as ddraw.dll does.
+    HRESULT Lock(RECT* rect, void* desc, DWORD flags);
+    // version 1-3 identify the lock by the pointer Lock returned, 4 and 7 by its rectangle.
+    HRESULT Unlock(void* pointer, const RECT* rect, int version);
+    HRESULT PageLock(DWORD flags);  // and PageUnlock: neither does anything here
+    void FillLockDesc(void* desc, uint8_t* bits) const;
     HRESULT GetDDInterface(void** out);
     HRESULT SetPrivateData(REFGUID tag, void* data, DWORD size, DWORD flags);
     HRESULT GetPrivateData(REFGUID tag, void* data, DWORD* size);
@@ -174,8 +187,13 @@ public:
     // buffers) are lost when the display mode or exclusive mode changes, or the
     // exclusive game loses focus, until restored. Their content is kept here.
     bool CanBeLost() const;
-    bool IsLost() const;  // g_lock held
+    // g_lock held. Out of exclusive mode it first looks for display changes others made,
+    // as ddraw.dll does once per call: a second surface of the same call passes poll = false.
+    bool IsLost(bool poll = true) const;
     HRESULT Restore();    // g_lock held
+    bool sysmemRequested = false;  // created with DDSCAPS_SYSTEMMEMORY asked for (such surfaces aren't lost)
+    bool ownFormat = false;        // created with a pixel format (ddraw.dll's HASPIXELFORMAT)
+    DWORD modeW = 0, modeH = 0, modeBpp = 0;  // the display mode it was created in (Restore checks it)
 
     int W() const { return buf->w; }
     int H() const { return buf->h; }
@@ -208,7 +226,15 @@ public:
     struct AttachRef {
         Surface* s;
         int slot;  // the reference taken, through the interface AddAttachedSurface was called on
+        uint32_t seq;  // when (attach lists are newest first)
     };
+    struct AttachEntry {
+        Surface* s;
+        int slot;  // -1: made with the surface (it can't be detached)
+        uint32_t seq;
+    };
+    std::vector<AttachEntry> AttachList() const;
+    uint32_t ringSeq = 0;  // when attachSlot's link was made
     std::vector<AttachRef> attachRefs;  // the explicitly attached ones (a surface may be attached to several)
     // A back buffer attached to a flip ring: the reference that holds, whoever detaches it.
     int attachSlot = -1;
@@ -221,11 +247,29 @@ public:
     DDCOLORKEY ck[4] = {};
     bool hasCk[4] = {};
     bool isPrimary = false;
+    // ddraw.dll's usage count: outstanding locks, plus one while a DC is out (lockCount),
+    // with the rectangles of rectangle locks (a whole-surface lock excludes everything).
+    struct LockRec {
+        RECT r;
+        uint8_t* ptr;   // what Lock returned (Unlock through IDirectDrawSurface 1-3 names it)
+        bool readOnly;  // DDLOCK_READONLY: Unlock leaves the contents unchanged
+    };
     LONG lockCount = 0;
-    RECT lockArea = {0, 0, 0, 0};  // union of the rectangles locked now (with lockCount > 0)
+    std::vector<LockRec> rectLocks;
+    bool wholeLocked = false, wholeReadOnly = false;
+    bool fastLocked = false;  // a DirectDraw 7 system-memory texture's lock (no nesting, no checks)
+    bool dcCounted = false;   // the DC out is part of lockCount (Unlock through version 1/2 can drop it)
+    RECT lockArea = {0, 0, 0, 0};  // union of the areas locked now (with lockCount > 0)
     HDC dcOut = nullptr;
     DWORD uniqueness = 1, priority = 0, lod = 0;
+    // The contents changed. As ddraw.dll: 0 (OWNDC surfaces, after SetSurfaceDesc) stays 0,
+    // and counting skips 0.
+    void BumpUniqueness() {
+        if (uniqueness && !++uniqueness) uniqueness = 1;
+    }
     GammaControl* gamma = nullptr;
+    DDGAMMARAMP* gammaRamp = nullptr;  // the primary's ramp (SetGammaRamp), applied while exclusive
+    HRESULT ManagedTextureCheck() const;  // Set/GetPriority, Set/GetLOD
     void* d3dTexture = nullptr;  // Direct3D texture object (d3dproxy.cpp), created on demand
 
 private:
@@ -233,10 +277,13 @@ private:
         GUID tag;
         std::vector<uint8_t> data;
         IUnknown* unk;
+        bool isVolatile;  // DDSPD_VOLATILE: valid while the contents stay as they were (stamp)
+        DWORD stamp;
     };
     void FillCore(RECT* dst, DWORD value);
     void DropAttachRef();  // releases the reference attachSlot holds
     HRESULT AttachForFlip(Surface* s, int slot);
+    HRESULT DetachOne(Surface* s, int slot);
     void LeaveFlipRing(std::vector<Surface*>* drop);
     LONG refs_[kRefSlots] = {};
     LONG total_ = 0;  // sum of refs_
@@ -350,7 +397,7 @@ public:
     HRESULT CreateSurfaceImpl(const void* desc, void** out, IUnknown* outer, int ddVersion);
     HRESULT CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer,
                           int version);
-    HRESULT CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* outer);
+    HRESULT CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* outer, int version);
     HRESULT DuplicateSurface(void* src, void** out, int ddVersion);
     HRESULT EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void* callback, int descVersion);
     HRESULT EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version);
@@ -367,7 +414,7 @@ public:
     HRESULT SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD refresh, DWORD flags);
     HRESULT RestoreDisplayMode();
     HRESULT WaitForVerticalBlank(DWORD flags, HANDLE event);
-    HRESULT GetAvailableVidMem(DWORD* total, DWORD* free);
+    HRESULT GetAvailableVidMem(const DDSCAPS2* caps, DWORD* total, DWORD* free);
     HRESULT GetSurfaceFromDC(HDC dc, void** out, int version);
     static HRESULT FindSurfaceFromDC(HDC dc, void** out, HDC* deviceDC);
     HRESULT GetDeviceIdentifier(void* id, DWORD flags, bool v2);
@@ -410,6 +457,9 @@ public:
     void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
     void OnPrimaryReleased();
+    // The primary's gamma ramp while this object is exclusive, as ddraw.dll applies it;
+    // the identity otherwise. g_lock held.
+    void ApplyGamma();
     // Lost surfaces (see Surface::CanBeLost). kDevNotRestored: every surface that can be
     // lost is about to be marked lost; kDevLost: the exclusive game is in the background.
     enum DeviceState : LONG { kDevOk, kDevNotRestored, kDevLost };
@@ -421,7 +471,12 @@ public:
     bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
     // Another DirectDraw object has exclusive mode: this one's primary isn't shown.
     bool Superseded() const;
+    bool OtherExclusive() const;  // another DirectDraw object has exclusive mode
+    bool AnyLocked() const;
+    void NoteDisplayMode();
+    void PollDisplayChange();     // the display mode changed behind dd2d9's back: surfaces lost
     bool InOwnMode() const;  // the display is in the mode this object set and switched to
+    bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
     // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which
     // then presents itself): while any exist, dd2d9 doesn't present.
@@ -442,6 +497,9 @@ public:
 private:
     ~DDraw();
     void ApplyWindow();
+    void CoverMonitor(HWND insertAfter, UINT flags);  // client area over the monitor, frame outside
+    void ConfineCursor(bool on);  // g_displayLock held
+    void Uncover();
     void RestoreSavedWindow(bool windowChanges);
     void DropExclusiveDevice();
     void HookWindow();
@@ -478,6 +536,10 @@ private:
     bool ddraw1Coop_ = false;   // a SetCooperativeLevel through IDirectDraw succeeded (g_displayLock)
     bool suspended_ = false;    // display setup undone because the game lost focus
     bool backgrounded_ = false;  // lost focus at some point during this exclusive mode
+    HWND coverHwnd_ = nullptr;   // window CoverMonitor grew past the screen (and gave a region)
+    ULONG expectedMode_ = 0;  // NoteDisplayMode
+    bool cursorConfined_ = false;  // ConfineCursor
+    SIZE coverSize_ = {};        // its size, frame included
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
     bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)
     int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used

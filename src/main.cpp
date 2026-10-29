@@ -40,11 +40,12 @@ public:
         return ULONG(r);
     }
     STDMETHOD(CreateInstance)(IUnknown* outer, REFIID r, void** out) override {
-        if (!out) return E_POINTER;
+        if (!out) return DDERR_INVALIDPARAMS;  // as ddraw.dll, before the outer check
         *out = nullptr;
         if (outer) return CLASS_E_NOAGGREGATION;
         if (IsEqualGUID(clsid_, CLSID_DirectDrawClipper)) {
             auto* c = new Clipper(nullptr);
+            c->initialized = false;  // as ddraw.dll: Initialize first
             HRESULT hr = c->QueryInterface(r, out);
             c->Release();
             return hr;
@@ -80,22 +81,24 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
 
 HRESULT WINAPI DD2D9_DirectDrawCreate(GUID* guid, LPDIRECTDRAW* out, IUnknown* outer) {
     DD2D9_LOG("DirectDrawCreate(%p)", static_cast<void*>(guid));
-    if (!out) return DDERR_INVALIDPARAMS;
     if (outer) return CLASS_E_NOAGGREGATION;
+    if (!out) return DDERR_INVALIDPARAMS;
     return CreateDDraw(IID_IDirectDraw, reinterpret_cast<void**>(out), true, guid);
 }
 
 HRESULT WINAPI DD2D9_DirectDrawCreateEx(GUID* guid, LPVOID* out, REFIID riid, IUnknown* outer) {
     DD2D9_LOG("DirectDrawCreateEx(%p, %s)", static_cast<void*>(guid), GuidName(riid));
-    if (!out) return DDERR_INVALIDPARAMS;
     if (outer) return CLASS_E_NOAGGREGATION;
     if (!IsEqualGUID(riid, IID_IDirectDraw7)) return DDERR_INVALIDPARAMS;
+    if (!out) return DDERR_INVALIDPARAMS;
     return CreateDDraw(riid, out, true, guid);
 }
 
-HRESULT WINAPI DD2D9_DirectDrawCreateClipper(DWORD, LPDIRECTDRAWCLIPPER* out, IUnknown* outer) {
-    if (!out) return DDERR_INVALIDPARAMS;
+HRESULT WINAPI DD2D9_DirectDrawCreateClipper(DWORD flags, LPDIRECTDRAWCLIPPER* out, IUnknown* outer) {
     if (outer) return CLASS_E_NOAGGREGATION;
+    if (!out) return DDERR_INVALIDPARAMS;
+    *out = nullptr;
+    if (flags) return DDERR_INVALIDPARAMS;
     *out = new Clipper(nullptr);
     return DD_OK;
 }
@@ -132,11 +135,11 @@ HRESULT WINAPI DD2D9_DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW, LPVOID, DWORD f
 HRESULT WINAPI DD2D9_DllCanUnloadNow() { return S_FALSE; }
 
 HRESULT WINAPI DD2D9_DllGetClassObject(REFCLSID clsid, REFIID riid, void** out) {
-    if (!out) return E_POINTER;
+    if (!out) return DDERR_INVALIDPARAMS;  // as ddraw.dll
     *out = nullptr;
     if (!IsEqualGUID(clsid, CLSID_DirectDraw) && !IsEqualGUID(clsid, CLSID_DirectDraw7) &&
         !IsEqualGUID(clsid, CLSID_DirectDrawClipper))
-        return CLASS_E_CLASSNOTAVAILABLE;
+        return E_FAIL;
     auto* f = new ClassFactory(clsid);
     HRESULT hr = f->QueryInterface(riid, out);
     f->Release();

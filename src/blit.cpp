@@ -218,16 +218,73 @@ static void MarkClipsDirty(Surface* s, const Clips& clips) {
 
 }  // namespace
 
-HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version) {
+// Checks in ddraw.dll's order (spec: re/spec/surface-blt.md, section 1); BltLocked then
+// draws. As ddraw.dll's software blitter: ROPs SRCCOPY, BLACKNESS and WHITENESS only, no
+// rotation, no DDROPS.
+HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version,
+                     bool srcOldIface) {
     Guard l;
     DD2D9_TRACE("Blt %p[%s] <- %p[%s] flags=0x%lx%s fx=0x%lx fill=0x%lx", static_cast<void*>(this),
                RectText(dstRect).s, static_cast<void*>(src), RectText(srcRect).s, flags, isPrimary ? " (primary)" : "",
                fx ? fx->dwDDFX : 0, fx ? fx->dwFillColor : 0);
-    // Through IDirectDrawSurface 1-3, DDBLT_KEYDEST takes the key from the source surface.
-    return BltLocked(dstRect, src, srcRect, flags, fx, true, version < 4);
+    if (IsLost() || (src && src->IsLost(false))) return DDERR_SURFACELOST;
+    // 0x80000000 is the Direct3D 8/9 runtime's own flag (window clipping, with the
+    // destination-alpha bits); ddraw.dll takes it off first.
+    if (flags & 0x80000000) flags &= ~0x8000000Bu;
+    if (flags & DDBLT_LAST_PRESENTATION) return DDERR_INVALIDPARAMS;
+    if (version == 7 && (flags & DDBLT_WAIT) && (flags & DDBLT_DONOTWAIT)) return DDERR_INVALIDPARAMS;
+    if (lockCount || (src && src->lockCount)) return DDERR_SURFACEBUSY;  // locked, or a DC out
+    BumpUniqueness();  // as ddraw.dll: even if the blit fails from here on
+    // The flags that read the DDBLTFX (DEPTHFILL, the overrides, ROP, DDROPS, DDFX, COLORFILL, ...).
+    const DWORD kNeedFx = 0x02F75D4A;
+    if (fx ? fx->dwSize != sizeof(DDBLTFX) : (flags & kNeedFx)) return DDERR_INVALIDPARAMS;
+
+    // Color keys.
+    if ((flags & DDBLT_KEYSRC) && !src) return DDERR_INVALIDOBJECT;
+    if ((flags & DDBLT_KEYSRC) && ((flags & DDBLT_KEYSRCOVERRIDE) || !src->hasCk[kCkSrcBlt])) return DDERR_INVALIDPARAMS;
+    if ((flags & DDBLT_KEYDEST) && ((flags & DDBLT_KEYDESTOVERRIDE) || !hasCk[kCkDestBlt])) return DDERR_INVALIDPARAMS;
+    // The operation: the first of these flags decides.
+    const DWORD fills = DDBLT_COLORFILL | DDBLT_DEPTHFILL;
+    if (flags & DDBLT_ROP) {
+        if (flags & (fills | DDBLT_DDFX | DDBLT_DDROPS | DDBLT_ROTATIONANGLE)) return DDERR_INVALIDPARAMS;
+        const DWORD rop = fx->dwROP;
+        if (rop != SRCCOPY && rop != BLACKNESS && rop != WHITENESS) return DDERR_NORASTEROPHW;
+        if (rop == SRCCOPY && !src) return DDERR_INVALIDPARAMS;
+    } else if (flags & DDBLT_COLORFILL) {
+        if (src || buf->fmt.zbuf) return DDERR_INVALIDPARAMS;
+    } else if (flags & DDBLT_DEPTHFILL) {
+        if (src || !buf->fmt.zbuf) return DDERR_INVALIDPARAMS;
+    } else if (flags & DDBLT_DDROPS) {
+        if (flags & (DDBLT_ROTATIONANGLE | DDBLT_DDFX)) return DDERR_INVALIDPARAMS;
+        return DDERR_NODDROPSHW;
+    } else if (flags & DDBLT_DDFX) {
+        if (flags & DDBLT_ROTATIONANGLE) return DDERR_INVALIDPARAMS;
+        if (fx->dwDDFX & DDBLTFX_ARITHSTRETCHY) return DDERR_NOSTRETCHHW;
+        if (fx->dwDDFX & (DDBLTFX_ROTATE90 | DDBLTFX_ROTATE180 | DDBLTFX_ROTATE270)) return DDERR_NOROTATIONHW;
+        if (!src) return DDERR_INVALIDPARAMS;  // ddraw.dll's blitter faults on it
+    } else if (flags & DDBLT_ROTATIONANGLE) {
+        return DDERR_NOROTATIONHW;
+    } else if (!src) {
+        return DDERR_INVALIDPARAMS;
+    }
+
+    // Rectangles: the destination's bounds only without a clipper (the clip list does it).
+    const RECT d = dstRect ? *dstRect : RECT{0, 0, buf->w, buf->h};
+    if (d.right <= d.left || d.bottom <= d.top) return DDERR_INVALIDRECT;
+    if (!clipper && (d.left < 0 || d.top < 0 || d.right > buf->w || d.bottom > buf->h)) return DDERR_INVALIDRECT;
+    if (src) {
+        const RECT s = srcRect ? *srcRect : RECT{0, 0, src->W(), src->H()};
+        if (s.right <= s.left || s.bottom <= s.top || s.left < 0 || s.top < 0 || s.right > src->W() ||
+            s.bottom > src->H())
+            return DDERR_INVALIDRECT;
+    }
+    // A fill takes no source rectangle.
+    const bool usesSource = !(flags & (DDBLT_ROP | fills)) || ((flags & DDBLT_ROP) && fx->dwROP == SRCCOPY);
+    return BltLocked(dstRect, usesSource ? src : nullptr, srcRect, flags, fx, true, srcOldIface);
 }
 
-// Rectangle rules follow ddraw.dll: an empty rectangle, or a source rectangle
+// The drawing (callers have checked what ddraw.dll checks; the contents stamp is theirs
+// to change). Rectangle rules follow ddraw.dll: an empty rectangle, or a source rectangle
 // outside the source surface, is DDERR_INVALIDRECT. Without a clipper the
 // destination rectangle must lie inside the destination surface; with one, the
 // blit is clipped to the clipper's region.
@@ -258,16 +315,15 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         if (!fx) return DDERR_INVALIDPARAMS;
         const DWORD value = (flags & DDBLT_COLORFILL) ? fx->dwFillColor : fx->dwFillDepth;
         for (RECT& c : clips) FillCore(&c, value);
-        uniqueness++;
         MarkClipsDirty(this, clips);
         return DD_OK;
     }
     if (flags & DDBLT_ROP) {
         if (!fx) return DDERR_INVALIDPARAMS;
         if (fx->dwROP == BLACKNESS || fx->dwROP == WHITENESS) {
-            for (RECT& c : clips) FillCore(&c, fx->dwROP == BLACKNESS ? 0 : 0xFFFFFFFFu);
-            uniqueness++;
-            MarkClipsDirty(this, clips);
+            // As ddraw.dll's blitter: white leaves the top byte of a 32-bit pixel 0.
+            for (RECT& c : clips) FillCore(&c, fx->dwROP == BLACKNESS ? 0 : 0x00FFFFFFu);
+                MarkClipsDirty(this, clips);
             return DD_OK;
         }
         if (fx->dwROP != SRCCOPY) {
@@ -371,24 +427,27 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
             BlitGeneric(j);
         }
     }
-    uniqueness++;
     MarkClipsDirty(this, clips);
     return DD_OK;
 }
 
-// As in ddraw.dll, BltFast never clips: both rectangles must lie inside their
-// surfaces, and a requested color key must exist.
-HRESULT Surface::BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans) {
+// Checks in ddraw.dll's order (spec: re/spec/surface-blt.md, section 2). BltFast never
+// clips: both rectangles must lie inside their surfaces, and a dest with a clipper fails.
+HRESULT Surface::BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans, int version) {
     Guard l;
-    if (clipper) return DDERR_BLTFASTCANTCLIP;  // as ddraw.dll: BltFast never clips
-    const RECT s = srcRect ? *srcRect : RECT{0, 0, src->W(), src->H()};
     DD2D9_TRACE("BltFast %p (%lu,%lu) <- %p[%s] trans=0x%lx", static_cast<void*>(this), x, y, static_cast<void*>(src),
-               RectText(&s).s, trans);
+               RectText(srcRect).s, trans);
+    if (IsLost() || src->IsLost(false)) return DDERR_SURFACELOST;
+    if (trans & ~0x33u) return DDERR_INVALIDPARAMS;  // NO/SRC/DESTCOLORKEY, WAIT, DONOTWAIT
+    if (version == 7 && (trans & DDBLTFAST_WAIT) && (trans & DDBLTFAST_DONOTWAIT)) return DDERR_INVALIDPARAMS;
+    if (lockCount || src->lockCount) return DDERR_SURFACEBUSY;
+    BumpUniqueness();
+    const RECT s = srcRect ? *srcRect : RECT{0, 0, src->W(), src->H()};
     if (s.right <= s.left || s.bottom <= s.top || s.left < 0 || s.top < 0 || s.right > src->W() ||
         s.bottom > src->H())
         return DDERR_INVALIDRECT;
     const int64_t w = s.right - s.left, h = s.bottom - s.top;
-    if (int64_t(x) + w > W() || int64_t(y) + h > H()) return DDERR_INVALIDRECT;
+    if (LONG(x) < 0 || LONG(y) < 0 || int64_t(x) + w > W() || int64_t(y) + h > H()) return DDERR_INVALIDRECT;
     DWORD flags = 0;
     switch (trans & 0xF) {
     case DDBLTFAST_NOCOLORKEY:
@@ -397,13 +456,14 @@ HRESULT Surface::BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD tr
         if (!src->hasCk[kCkSrcBlt]) return DDERR_INVALIDPARAMS;
         flags = DDBLT_KEYSRC;
         break;
-    case DDBLTFAST_DESTCOLORKEY:
+    case DDBLTFAST_DESTCOLORKEY:  // the destination's own key, whatever the interface
         if (!hasCk[kCkDestBlt]) return DDERR_INVALIDPARAMS;
         flags = DDBLT_KEYDEST;
         break;
-    default:
+    default:  // both keys: what ddraw.dll's blitter makes of it wasn't determined
         return DDERR_INVALIDPARAMS;
     }
+    if (clipper) return DDERR_BLTFASTCANTCLIP;
     RECT d = {LONG(x), LONG(y), LONG(int64_t(x) + w), LONG(int64_t(y) + h)};
     RECT sr = s;
     return BltLocked(&d, src, &sr, flags, nullptr, false);

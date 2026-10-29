@@ -325,6 +325,47 @@ static int RunUnit() {
         if (unk) unk->Release();
     }
 
+    // Flip rings put together with AddAttachedSurface, as ddraw.dll builds them: through
+    // IDirectDrawSurface4 too, a surface attached to the front becomes the back buffer.
+    {
+        IDirectDrawSurface7* m7[3] = {Make32(dd, 8, 8), Make32(dd, 8, 8), Make32(dd, 8, 8)};
+        IDirectDrawSurface4* m[3] = {};
+        for (int i = 0; i < 3; i++) m7[i]->QueryInterface(IID_IDirectDrawSurface4, reinterpret_cast<void**>(&m[i]));
+        auto caps = [](IDirectDrawSurface4* x) {
+            DDSCAPS2 c = {};
+            x->GetCaps(&c);
+            return c.dwCaps & (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER);
+        };
+        hr = m[0]->AddAttachedSurface(m[1]);
+        CHECK(hr == DD_OK && caps(m[0]) == (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER) &&
+                  caps(m[1]) == (DDSCAPS_FLIP | DDSCAPS_BACKBUFFER),
+              "IDirectDrawSurface4 ring of two (0x%08lx)", hr);
+        hr = m[0]->AddAttachedSurface(m[2]);
+        CHECK(hr == DD_OK && caps(m[2]) == (DDSCAPS_FLIP | DDSCAPS_BACKBUFFER) && caps(m[1]) == DDSCAPS_FLIP,
+              "attached to the front: the new back buffer (0x%08lx)", hr);
+        DDSCAPS2 want = {DDSCAPS_BACKBUFFER};
+        IDirectDrawSurface4* got = nullptr;
+        hr = m[0]->GetAttachedSurface(&want, &got);
+        CHECK(hr == DD_OK && got == m[2], "GetAttachedSurface(BACKBUFFER) finds it (0x%08lx)", hr);
+        if (got) got->Release();
+        DDSCAPS2 none = {};
+        hr = m[0]->GetAttachedSurface(&none, &got);
+        CHECK(hr == DDERR_NOTFOUND, "GetAttachedSurface without caps -> DDERR_NOTFOUND (0x%08lx)", hr);
+        hr = m[0]->DeleteAttachedSurface(1, m[2]);
+        CHECK(hr == DDERR_INVALIDPARAMS, "DeleteAttachedSurface flags -> DDERR_INVALIDPARAMS (0x%08lx)", hr);
+        hr = m[1]->DeleteAttachedSurface(0, m[2]);
+        CHECK(hr == DDERR_SURFACENOTATTACHED, "not attached there -> DDERR_SURFACENOTATTACHED (0x%08lx)", hr);
+        hr = m[0]->DeleteAttachedSurface(0, nullptr);
+        CHECK(hr == DD_OK && caps(m[1]) == (DDSCAPS_FLIP | DDSCAPS_BACKBUFFER),
+              "DeleteAttachedSurface(NULL) detaches the newest (0x%08lx)", hr);
+        hr = m[0]->DeleteAttachedSurface(0, nullptr);
+        CHECK(hr == DD_OK && caps(m[0]) == 0 && caps(m[1]) == 0, "and the ring comes apart (0x%08lx)", hr);
+        for (int i = 0; i < 3; i++) {
+            if (m[i]) m[i]->Release();
+            m7[i]->Release();
+        }
+    }
+
     // Flip chain swaps memory
     IDirectDrawSurface7* prim = nullptr;
     {
@@ -338,12 +379,18 @@ static int RunUnit() {
             DDSURFACEDESC2 l = {};
             l.dwSize = sizeof(l);
             prim->Lock(nullptr, &l, 0, nullptr);
-            // As in ddraw.dll: the mode changes, the primary keeps its memory and is lost.
+            // As in ddraw.dll: no mode change while a video-memory surface is locked.
             hr = dd->SetDisplayMode(640, 480, 16, 0, 0);
-            CHECK(hr == DD_OK, "SetDisplayMode with the primary locked (0x%08lx)", hr);
-            CHECK(prim->IsLost() == DDERR_SURFACELOST, "primary lost after SetDisplayMode");
-            static_cast<volatile BYTE*>(l.lpSurface)[0] = 1;  // still writable
+            CHECK(hr == DDERR_SURFACEBUSY, "SetDisplayMode with the primary locked (0x%08lx)", hr);
             prim->Unlock(nullptr);
+            hr = dd->SetDisplayMode(640, 480, 16, 0, 0);
+            CHECK(hr == DD_OK, "SetDisplayMode once unlocked (0x%08lx)", hr);
+            CHECK(prim->IsLost() == DDERR_SURFACELOST, "primary lost after SetDisplayMode");
+            DDSURFACEDESC2 now = {};
+            now.dwSize = sizeof(now);
+            prim->GetSurfaceDesc(&now);
+            CHECK(now.ddpfPixelFormat.dwRGBBitCount == 16, "the lost primary reports the display's format (%lu bpp)",
+                  now.ddpfPixelFormat.dwRGBBitCount);
             hr = prim->Restore();
             CHECK(hr == DDERR_WRONGMODE, "primary not restorable in another mode (0x%08lx)", hr);
             dd->RestoreDisplayMode();

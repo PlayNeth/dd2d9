@@ -86,7 +86,7 @@
    "crash": false
   },
   "ddraw1:test_coop_level_mode_set": {
-   "nfail": 2,
+   "nfail": 5,
    "crash": false
   },
   "ddraw1:test_coop_level_mode_set_multi": {
@@ -250,7 +250,7 @@
    "crash": false
   },
   "ddraw1:test_redundant_mode_set": {
-   "nfail": 0,
+   "nfail": 1,
    "crash": false
   },
   "ddraw1:test_rt_caps": {
@@ -346,7 +346,7 @@
    "crash": false
   },
   "ddraw1:test_window_style": {
-   "nfail": 34,
+   "nfail": 6,
    "crash": false
   },
   "ddraw1:test_wndproc": {
@@ -442,7 +442,7 @@
    "crash": false
   },
   "ddraw2:test_coop_level_mode_set": {
-   "nfail": 5,
+   "nfail": 8,
    "crash": false
   },
   "ddraw2:test_coop_level_mode_set_multi": {
@@ -618,7 +618,7 @@
    "crash": false
   },
   "ddraw2:test_redundant_mode_set": {
-   "nfail": 0,
+   "nfail": 1,
    "crash": false
   },
   "ddraw2:test_rt_caps": {
@@ -718,7 +718,7 @@
    "crash": false
   },
   "ddraw2:test_window_style": {
-   "nfail": 22,
+   "nfail": 6,
    "crash": false
   },
   "ddraw2:test_wndproc": {
@@ -826,7 +826,7 @@
    "crash": false
   },
   "ddraw4:test_coop_level_mode_set": {
-   "nfail": 5,
+   "nfail": 8,
    "crash": false
   },
   "ddraw4:test_coop_level_mode_set_multi": {
@@ -1022,7 +1022,7 @@
    "crash": false
   },
   "ddraw4:test_redundant_mode_set": {
-   "nfail": 0,
+   "nfail": 1,
    "crash": false
   },
   "ddraw4:test_rt_caps": {
@@ -1158,7 +1158,7 @@
    "crash": false
   },
   "ddraw4:test_window_style": {
-   "nfail": 22,
+   "nfail": 6,
    "crash": false
   },
   "ddraw4:test_wndproc": {
@@ -1282,7 +1282,7 @@
    "crash": false
   },
   "ddraw7:test_coop_level_mode_set": {
-   "nfail": 5,
+   "nfail": 8,
    "crash": false
   },
   "ddraw7:test_coop_level_mode_set_multi": {
@@ -1502,7 +1502,7 @@
    "crash": false
   },
   "ddraw7:test_redundant_mode_set": {
-   "nfail": 0,
+   "nfail": 1,
    "crash": false
   },
   "ddraw7:test_resource_priority": {
@@ -1638,7 +1638,7 @@
    "crash": false
   },
   "ddraw7:test_window_style": {
-   "nfail": 22,
+   "nfail": 6,
    "crash": false
   },
   "ddraw7:test_wndproc": {

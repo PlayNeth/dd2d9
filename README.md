@@ -13,8 +13,9 @@ the 2D half (menus, movies, 2D games) that D7VK leaves to the system's DirectDra
   BLACKNESS, WHITENESS), stretch, left-right and up-down mirroring, source and
   destination color keys, overlapping copies, and conversion
   between 8/16/24/32-bit formats. Color-keyed copies (sprites) use SSE2.
-- **Flip chains** swap memory between surfaces, as the hardware does. DirectDraw 1
-  games can also put them together with `AddAttachedSurface`.
+- **Flip chains** swap memory between surfaces, as the hardware does. Games can also
+  put them together with `AddAttachedSurface` (IDirectDrawSurface 1-4), as `ddraw.dll`
+  allows.
 - **A presenter thread owns the D3D9 device.** It converts the primary surface to
   X8R8G8B8 (applying the palette and the gamma ramp), scales it into the game
   window with `StretchRect` and presents. Only the changed part of the image is
@@ -43,12 +44,14 @@ the 2D half (menus, movies, 2D games) that D7VK leaves to the system's DirectDra
   ones), a lost primary isn't shown, and a new primary may replace a lost one.
 - **Several DirectDraw objects**: a second one taking exclusive mode takes it over
   from the first (games that recreate their DirectDraw object without releasing the
-  old one), and only the exclusive object's primary is presented.
-- **Blit rules match ddraw.dll.** Without a clipper, `Blt` rejects destination
+  old one), and only the exclusive object's primary is presented. A primary made by the
+  exclusive object makes the others' lost.
+- **Calls behave as in XP SP3's ddraw.dll**: the checks, their order and the return
+  codes follow its decompiled code (`re/spec/`), from `Blt`'s rectangle and flag rules to
+  attachments, palettes and clippers. Without a clipper, `Blt` rejects destination
   rectangles that extend past the surface; with one, it clips to the clipper's
   window or clip list. `BltFast` never clips (with a clipper attached it fails
-  with `DDERR_BLTFASTCANTCLIP`), and it rejects a color key the surface doesn't have. These rules were checked against the decompiled XP SP3
-  `ddraw.dll`.
+  with `DDERR_BLTFASTCANTCLIP`).
 - **Windowed games** (`DDSCL_NORMAL`) get a desktop-sized primary surface, and
   the part under their window is shown.
 - **All interface versions are implemented**: IDirectDraw 1/2/4/7,
@@ -70,22 +73,36 @@ dd2d9 answers Direct3D queries with `E_NOINTERFACE`, so games fall back to their
 renderers. The `d3d=` ini key overrides this.
 
 ## Differences from ddraw.dll on purpose
-- **No window frame in fullscreen**: the frame is removed so the picture fills the
-  screen (`ddraw.dll` leaves the style alone and draws over it).
+- **The window's frame sits just off the screen in fullscreen.** `ddraw.dll` leaves the
+  window's style alone and draws over the whole screen, frame included. dd2d9 keeps the
+  style too (games that read it see the same value), but presents into the client area, so
+  it makes the window larger than the screen until the client area covers it exactly, the
+  frame just outside (and clipped, so it can't show on a neighbouring monitor). Only the
+  window's outer rectangle differs from Windows; leaving exclusive mode shrinks it back to
+  the screen, as `ddraw.dll` leaves it.
 - **8-bit to RGB blits use the palette** (`ddraw.dll` copies the index as grey).
 - **`display=window` doesn't lose surfaces on focus loss**: the game keeps running.
 - **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2
   keeps drawing to its old back buffer).
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).
-- **A display-mode change by another program while a game is windowed** doesn't lose
-  its surfaces.
+- **A second DirectDraw object takes exclusive mode over** from the first (as in Wine;
+  `ddraw.dll` refuses it with `DDERR_EXCLUSIVEMODEALREADYSET` while the first is active).
+  Type Wild relies on it.
+- **A primary surface a mode change made lost can be replaced** by a new one
+  (`ddraw.dll` refuses any second primary). Jazz Jackrabbit 2 relies on it.
+- **IDirectDrawSurface2/3's GetAttachedSurface and EnumAttachedSurfaces hand out the
+  interface they were called through** (`ddraw.dll` hands out IDirectDrawSurface), so the
+  v2/v3 methods work on the result.
+- **`DDPCAPS_PRIMARYSURFACE` is accepted in CreatePalette** (`ddraw.dll` refuses it), for
+  games made on Windows 9x.
 
 ## Not implemented (yet)
 - **Mouse coordinate scaling.** When the image is scaled (`display=borderless`,
   or the fallback when a mode switch fails), games that read the cursor with
   `GetCursorPos` or `WM_MOUSEMOVE` see unscaled coordinates.
-- **Overlays and `BltBatch`.** Overlay surfaces are refused with `DDERR_NOOVERLAYHW`
-  (the caps say there are none), so games fall back to blitting.
+- **Overlays.** Overlay surfaces are refused with `DDERR_NOOVERLAYHW`
+  (the caps say there are none), so games fall back to blitting. `BltBatch` checks its
+  arguments and fails with `DDERR_UNSUPPORTED`, as in `ddraw.dll`.
 - **Blits that convert RGB to an 8-bit surface** write index 0.
 - **FourCC surfaces** are limited to DXT1–5, YUY2 and UYVY. They can be locked
   but not blitted. Other FourCC codes are refused.
@@ -170,4 +187,5 @@ and GDI text on top, then flips. It's meant to run behind D7VK and writes `d3d7t
 
 ## Reverse-engineering notes
 `re/` has the vtable map of the XP SP3 `ddraw.dll` (5.3.2600.5512), along with
-naming scripts for Ghidra and IDA.
+naming scripts for Ghidra and IDA. `re/spec/` describes, from its decompiled code, what
+each method checks and in which order, with the differences from dd2d9 that remain.

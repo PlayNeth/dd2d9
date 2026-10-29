@@ -3,6 +3,55 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.7
+Matched to Windows XP SP3's `ddraw.dll` call for call (from its decompiled code; the
+specifications are in `re/spec/`), method by method for the surfaces, palettes, clippers,
+the exports and much of the DirectDraw object.
+- **Blt and BltFast report lost surfaces** (`DDERR_SURFACELOST`), so a game that blits
+  to the primary restores it after a mode change or Alt+Tab instead of drawing to a lost
+  one. They check in `ddraw.dll`'s order: locked surfaces (or a DC out) are busy, a
+  `DDBLTFX` needs its size, raster operations other than SRCCOPY, BLACKNESS and
+  WHITENESS fail with `DDERR_NORASTEROPHW` (they used to succeed and draw nothing; GetCaps
+  now lists those three), rotation and DDROPS are refused, fills check their surfaces.
+- **Flip chains put together with AddAttachedSurface** work through IDirectDrawSurface
+  1-4 for any two surfaces of a kind, as in `ddraw.dll`; a surface attached to the front
+  becomes the back buffer. AddAttachedSurface follows its size, one-per-kind and memory
+  rules (a Z buffer on any surface, not only primaries and 3D devices);
+  DeleteAttachedSurface(NULL) detaches everything; attachments are listed newest first.
+- **GetSurfaceDesc** builds its flags as `ddraw.dll` does; after a mode change the primary
+  reports the display's pixel format. SetSurfaceDesc, GetPixelFormat, the uniqueness
+  value, private data (`DDSPD_VOLATILE`), priority/LOD (managed textures only) and the
+  overlay methods return what `ddraw.dll` returns.
+- **Gamma ramps** belong to the primary and show only in exclusive mode;
+  `SetGammaRamp(NULL)` resets.
+- **Palettes and clippers**: CreatePalette's flag rules, entry ranges and flags,
+  GetCaps; a window clipper's GetClipList is its visible region on the screen,
+  IsClipListChanged says TRUE, SetClipList/SetHWnd validate, clippers made through
+  DirectDraw 4/7 reference it.
+- **DirectDraw object**: RestoreAllSurfaces returns the first failure;
+  TestCooperativeLevel out of exclusive mode reports another object's exclusive mode or a
+  changed display mode; Set/RestoreDisplayMode refuse while a video-memory surface is
+  locked; a primary can't be made while another object is exclusive, and the exclusive
+  object's new primary makes the others' lost; leaving exclusive mode flips back to the
+  GDI surface; the mouse stays on the game's monitor in exclusive mode; checks for
+  WaitForVerticalBlank, GetScanLine, GetAvailableVidMem, Compact, GetCaps,
+  GetDeviceIdentifier, EnumDisplayModes, DuplicateSurface and GetSurfaceFromDC.
+- Lock fills the DirectX 7 fields only for a whole DDSURFACEDESC2.
+- Looking for display changes made by others costs less per call (once per call, timed
+  with the processor's counter).
+
+## 0.7.6
+- **The window keeps its style in fullscreen.** Instead of removing the frame, dd2d9 grows
+  the window until its client area covers the monitor, the frame just off the screen (a
+  window region keeps it off neighbouring monitors; `WM_GETMINMAXINFO` lets the window be
+  that large). Games reading their style see Windows' value, and D7VK, which always draws
+  into the client area, still fills the screen. Leaving exclusive mode shrinks the window
+  back to the screen. (Wine `test_window_style`.)
+- **A hidden window stays hidden** when exclusive mode starts while another window is in
+  front, and isn't minimized on focus loss, as with `ddraw.dll`.
+- **DirectDraw 1 leaving exclusive mode drops the window's topmost state** (the display mode
+  stays, as before).
+
 ## 0.7.5
 - **Leaving exclusive mode after a focus loss loses the surfaces**, as in `ddraw.dll`
   (not with DirectDraw 1, or when the game never went to the background).
@@ -35,13 +84,13 @@ so a later change doesn't undo it without knowing why.
   messages, and every DirectDraw call that fails, with its error.
 
 ## 0.7.1
-- **A new primary surface can replace one a display-mode change made lost**, as in
-  `ddraw.dll`. (Jazz Jackrabbit 2 sets its mode again without releasing the old primary:
-  crash.)
+- **A new primary surface can replace one a display-mode change made lost.** (Jazz
+  Jackrabbit 2 sets its mode again without releasing the old primary: crash.) `ddraw.dll`
+  itself refuses a second primary; this is a dd2d9 workaround.
 - **A second DirectDraw object takes exclusive mode over from the first** instead of
-  getting `DDERR_EXCLUSIVEMODEALREADYSET`, as in `ddraw.dll` and Wine; the old object drops
-  to normal mode and hands over the saved window state. (Type Wild recreates its
-  DirectDraw object without releasing the old one: hang.)
+  getting `DDERR_EXCLUSIVEMODEALREADYSET`, as in Wine (`ddraw.dll` refuses it while the
+  first is active); the old object drops to normal mode and hands over the saved window
+  state. (Type Wild recreates its DirectDraw object without releasing the old one: hang.)
 - **Only one DirectDraw object presents**: one whose primary is lost, or while another
   object is exclusive, stays off the window. (Hydro Thunder around its videos, Nerf Arena
   Blast after Alt+Tab: two presenters on one window flickered.)
