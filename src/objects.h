@@ -456,6 +456,7 @@ public:
     Presenter* GetPresenter() { return presenter_; }
     void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
+    void CheckCover(HWND h);       // the window moved in exclusive mode; g_displayLock held
     void OnPrimaryReleased();
     // The primary's gamma ramp while this object is exclusive, as ddraw.dll applies it;
     // the identity otherwise. g_lock held.
@@ -538,6 +539,8 @@ private:
     bool backgrounded_ = false;  // lost focus at some point during this exclusive mode
     HWND coverHwnd_ = nullptr;   // window CoverMonitor grew past the screen (and gave a region)
     ULONG expectedMode_ = 0;  // NoteDisplayMode
+    DWORD recoverStart_ = 0;       // CheckCover: when its count started
+    int recoverCount_ = 0;
     bool cursorConfined_ = false;  // ConfineCursor
     SIZE coverSize_ = {};        // its size, frame included
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing

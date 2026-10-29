@@ -3,6 +3,13 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.9
+- **A game changing its window's frame in exclusive mode** gets its window fitted to the
+  screen again (the frame just off it). JJ2+ changes its window's style while starting
+  up, which left the client area off the screen's edges: a black bar at the top until the
+  next mode change.
+- `log=2` also traces style changes, with the window and client rectangles.
+
 ## 0.7.8
 - **Leaving exclusive mode loses the surfaces when the desktop's display mode comes
   back**, as in `ddraw.dll` (the game's mode is gone). The old fullscreen primary is then

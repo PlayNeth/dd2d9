@@ -436,6 +436,21 @@ static int RunFullscreen8(int modeW, int modeH) {
     SendMessageA(hwnd, WM_SYSCOMMAND, SC_SCREENSAVE, 0);
     CHECK(g_screensaverMsgs == 0, "screensaver blocked in exclusive mode");
     CHECK(SUCCEEDED(dd->SetDisplayMode(modeW, modeH, 8, 0, 0)), "SetDisplayMode %dx%dx8", modeW, modeH);
+    // A game changing its window's frame in exclusive mode (JJ2+ while starting up): the
+    // client area still covers the screen.
+    for (LONG style : {LONG(WS_OVERLAPPEDWINDOW), LONG(WS_POPUP)}) {
+        SetWindowLongA(hwnd, GWL_STYLE, style | WS_VISIBLE);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        Pump();
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+        CHECK(EqualRect(&cr, &mi.rcMonitor), "client area covers the screen after a frame change (%ld,%ld-%ld,%ld)",
+              cr.left, cr.top, cr.right, cr.bottom);
+    }
 
     DDSURFACEDESC2 d = {};
     d.dwSize = sizeof(d);

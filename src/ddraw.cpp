@@ -238,6 +238,11 @@ UINT DeferredActivateMsg() {
     return msg;
 }
 
+UINT CheckCoverMsg() {
+    static UINT msg = RegisterWindowMessageW(L"DD2D9_CheckCover");
+    return msg;
+}
+
 // Window messages that tell how the game's window and focus change (log=2).
 void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     const char* name = nullptr;
@@ -254,6 +259,7 @@ void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SYSCOMMAND: name = "WM_SYSCOMMAND"; break;
         case WM_SYSKEYDOWN: name = "WM_SYSKEYDOWN"; break;
         case WM_CLOSE: name = "WM_CLOSE"; break;
+        case WM_STYLECHANGED: name = "WM_STYLECHANGED"; break;
         default: return;
     }
     DEVMODEW dm = {};
@@ -262,11 +268,35 @@ void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     DD2D9_TRACE("window %p: %s wParam 0x%lx lParam 0x%lx (foreground %p, display %lux%lu)", static_cast<void*>(h),
                name, static_cast<unsigned long>(wp), static_cast<unsigned long>(lp),
                static_cast<void*>(GetForegroundWindow()), dm.dmPelsWidth, dm.dmPelsHeight);
+    if (msg == WM_WINDOWPOSCHANGED || msg == WM_STYLECHANGED) {
+        RECT w = {}, c = {};
+        GetWindowRect(h, &w);
+        GetClientRect(h, &c);
+        MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&c), 2);
+        DD2D9_TRACE("  window %ld,%ld-%ld,%ld, client %ld,%ld-%ld,%ld, style 0x%08lx", w.left, w.top, w.right,
+                   w.bottom, c.left, c.top, c.right, c.bottom, static_cast<unsigned long>(GetWindowLongW(h, GWL_STYLE)));
+    }
 }
 
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
     const UINT deferred = DeferredActivateMsg();
+    const UINT checkCover = CheckCoverMsg();
+    if (checkCover && msg == checkCover) {
+        if (TryEnterCriticalSection(&g_displayLock)) {
+            if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->CheckCover(h);
+            LeaveCriticalSection(&g_displayLock);
+        }
+        return 0;
+    }
+    // The game restyled its window (its frame changed): the client area covering the
+    // screen was worked out with the old frame. Checked once the game has handled the
+    // message (see CheckCover).
+    const bool frameChanged =
+        msg == WM_STYLECHANGED ||
+        (msg == WM_WINDOWPOSCHANGED && lp && (reinterpret_cast<const WINDOWPOS*>(lp)->flags & SWP_FRAMECHANGED));
+    if (checkCover && frameChanged && h == g_hook.hwnd && g_hook.owner && g_hook.owner->Exclusive())
+        PostMessageW(h, checkCover, 0, 0);
     if (msg == WM_ACTIVATEAPP || (deferred && msg == deferred)) {
         // Another thread may hold the display lock while it waits for this
         // thread (SetWindowPos on our window): never block here, retry later.
@@ -507,6 +537,35 @@ void DDraw::ConfineCursor(bool on) {
         ClipCursor(nullptr);
         cursorConfined_ = false;
     }
+}
+
+// The game changed its window's frame in exclusive mode (posted from the window procedure;
+// g_displayLock held). CoverMonitor fitted the client area to the screen for the old frame:
+// JJ2+ takes its frame away while starting up, which left the client area larger than the
+// screen and the image off-center (a black bar at the top). The window covers the screen
+// again for the new frame. A move or resize alone stays the game's (ddraw.dll leaves it
+// alone), and a game that keeps changing the frame wins after a few tries rather than the
+// two fighting.
+void DDraw::CheckCover(HWND h) {
+    if (!Exclusive() || !alive || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
+        (coop_ & DDSCL_NOWINDOWCHANGES) || IsIconic(h) || !IsWindowVisible(h))
+        return;
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi);
+    RECT c = {};
+    GetClientRect(h, &c);
+    MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&c), 2);
+    if (EqualRect(&c, &mi.rcMonitor)) return;
+    const DWORD now = GetTickCount();
+    if (now - recoverStart_ > 2000) {
+        recoverStart_ = now;
+        recoverCount_ = 0;
+    }
+    if (++recoverCount_ > 5) return;
+    DD2D9_LOG("the window no longer covers the screen (client %ld,%ld-%ld,%ld): covering it again", c.left, c.top,
+              c.right, c.bottom);
+    CoverMonitor(nullptr, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // For WM_GETMINMAXINFO: the window may grow past the screen by its frame.

@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.8"
+#define DD2D9_VERSION "0.7.9"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
