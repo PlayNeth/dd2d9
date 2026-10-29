@@ -1,0 +1,24 @@
+LIBRARY ddraw.dll
+EXPORTS
+    AcquireDDThreadLock = DD2D9_AcquireDDThreadLock@0 @1
+    CheckFullscreen = DD2D9_CheckFullscreen@0 @2
+    CompleteCreateSysmemSurface = DD2D9_CompleteCreateSysmemSurface@4 @3
+    D3DParseUnknownCommand = DD2D9_D3DParseUnknownCommand@8 @4
+    DDGetAttachedSurfaceLcl = DD2D9_DDGetAttachedSurfaceLcl@12 @5
+    DDInternalLock = DD2D9_DDInternalLock@8 @6
+    DDInternalUnlock = DD2D9_DDInternalUnlock@4 @7
+    DSoundHelp = DD2D9_DSoundHelp@12 @8
+    DirectDrawCreate = DD2D9_DirectDrawCreate@12 @9
+    DirectDrawCreateClipper = DD2D9_DirectDrawCreateClipper@12 @10
+    DirectDrawCreateEx = DD2D9_DirectDrawCreateEx@16 @11
+    DirectDrawEnumerateA = DD2D9_DirectDrawEnumerateA@8 @12
+    DirectDrawEnumerateExA = DD2D9_DirectDrawEnumerateExA@12 @13
+    DirectDrawEnumerateExW = DD2D9_DirectDrawEnumerateExW@12 @14
+    DirectDrawEnumerateW = DD2D9_DirectDrawEnumerateW@8 @15
+    DllCanUnloadNow = DD2D9_DllCanUnloadNow@0 @16 PRIVATE
+    DllGetClassObject = DD2D9_DllGetClassObject@12 @17 PRIVATE
+    GetDDSurfaceLocal = DD2D9_GetDDSurfaceLocal@12 @18
+    GetOLEThunkData = DD2D9_GetOLEThunkData@4 @19
+    GetSurfaceFromDC = DD2D9_GetSurfaceFromDC@12 @20
+    RegisterSpecialCase = DD2D9_RegisterSpecialCase@16 @21
+    ReleaseDDThreadLock = DD2D9_ReleaseDDThreadLock@0 @22

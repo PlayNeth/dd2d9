@@ -1,0 +1,53 @@
+; dd2d9 configuration
+; Global location: C:\windows\dd2d9.ini  (in a Wine prefix: drive_c/windows/dd2d9.ini)
+; Also read, in order (later wins): <ddraw.dll dir>\dd2d9.ini, <game dir>\dd2d9.ini,
+; and the file named by the DD2D9_INI environment variable. DD2D9_LOG overrides "log".
+;
+; Keys outside a section, in [dd2d9] and in [default] apply to every game; a [game.exe]
+; section overrides them for that executable only (case-insensitive).
+; The defaults behave like the original DirectDraw.
+
+[default]
+; What exclusive fullscreen games get:
+;   switch     - change the display mode, as DirectDraw does (default). If the monitor
+;                lacks the mode (320x200, 320x240...), falls back to borderless.
+;   window     - no mode change: a window the size of the game's mode, centered
+;   borderless - no mode change: a borderless window covering the monitor, image scaled
+display=switch
+
+; How the image reaches the screen after a real mode switch (display=switch):
+;   window    - a borderless window covering the screen (default). Other topmost
+;               windows (overlays, notifications) can appear over the game.
+;   exclusive - a Direct3D 9 exclusive-fullscreen swapchain, closer to what the game
+;               originally got: overlays can't cover it. Falls back to window if the
+;               driver refuses it.
+present=window
+
+; Scaling when the image doesn't fit 1:1 (window resized, borderless, windowed games):
+;   aspect (default), fill, integer
+stretch=aspect
+
+; Scaling filter: point (default, sharp pixels) or linear (smooth)
+filter=point
+
+; Vertical sync:
+;   auto - the game decides: Flip() waits for vblank unless the game passes DDFLIP_NOVSYNC,
+;          as DirectDraw does (default)
+;   on   - every Flip() waits for vblank
+;   off  - never wait (uncapped, may tear)
+vsync=auto
+
+; Logging: 0 off (default), 1 info, 2 trace (every blit, lock, flip and palette change -
+; very verbose, for diagnosing rendering problems).
+; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ..."), as are
+; Direct3D requests (which D7VK handles).
+log=0
+; Default log file: dd2d9.log next to the game's exe. If that folder isn't writable, dd2d9
+; falls back to the current directory, then %TEMP%. A relative path is relative to the
+; game's folder. The environment variable DD2D9_LOG=<path> also sets it.
+;logfile=Z:\tmp\dd2d9.log
+
+; Per-game example:
+;[claw.exe]
+;log=2
+;logfile=Z:\tmp\claw-dd2d9.log

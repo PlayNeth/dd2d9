@@ -1,0 +1,345 @@
+// Implementation objects. COM interface wrappers (one per interface version)
+// live in wrappers.h and forward to these.
+#pragma once
+#include "common.h"
+
+namespace dd2d9 {
+
+class DDraw;
+class Surface;
+class Palette;
+class Presenter;
+
+// ---------------------------------------------------------------- Buffer
+// Pixel memory of a surface. RGB / palettized buffers are GDI DIB sections so
+// GetDC() works natively; Flip() swaps buffers between the surfaces of a chain.
+struct Buffer {
+    LONG ref = 1;
+    int w = 0, h = 0;
+    LONG pitch = 0;
+    Format fmt;
+    uint8_t* bits = nullptr;
+    HBITMAP dib = nullptr;
+    HDC dc = nullptr;
+    bool ownsMemory = false;  // allocated with calloc (no DIB)
+    const Palette* dcPal = nullptr;  // palette last loaded into the DIB color table
+    DWORD dcPalVersion = 0;
+
+    static Buffer* Create(int w, int h, const Format& f);
+    static Buffer* CreateExternal(void* mem, int w, int h, LONG pitch, const Format& f);
+    void AddRef() { InterlockedIncrement(&ref); }
+    void Release();
+    HDC GetDC();
+    uint8_t* Row(int y) const { return bits + y * pitch; }
+};
+
+// ---------------------------------------------------------------- Palette
+class Palette final : public IDirectDrawPalette {
+public:
+    uint32_t magic = kMagic;
+    Palette* self = this;
+
+    Palette(DDraw* dd, DWORD caps, const PALETTEENTRY* entries);
+    static Palette* From(void* iface) { return static_cast<Palette*>(ImplFromIface(iface)); }
+
+    STDMETHOD(QueryInterface)(REFIID riid, void** out) override;
+    STDMETHOD_(ULONG, AddRef)() override;
+    STDMETHOD_(ULONG, Release)() override;
+    STDMETHOD(GetCaps)(LPDWORD caps) override;
+    STDMETHOD(GetEntries)(DWORD flags, DWORD base, DWORD count, LPPALETTEENTRY entries) override;
+    STDMETHOD(Initialize)(LPDIRECTDRAW dd, DWORD flags, LPPALETTEENTRY entries) override;
+    STDMETHOD(SetEntries)(DWORD flags, DWORD start, DWORD count, LPPALETTEENTRY entries) override;
+
+    int Count() const;
+    PALETTEENTRY entries[256] = {};
+    DWORD caps = 0;
+    DWORD version = 1;
+
+private:
+    ~Palette();
+    LONG ref_ = 1;
+    DDraw* dd_;
+};
+
+// ---------------------------------------------------------------- Clipper
+class Clipper final : public IDirectDrawClipper {
+public:
+    uint32_t magic = kMagic;
+    Clipper* self = this;
+
+    explicit Clipper(DDraw* dd);
+    static Clipper* From(void* iface) { return static_cast<Clipper*>(ImplFromIface(iface)); }
+
+    STDMETHOD(QueryInterface)(REFIID riid, void** out) override;
+    STDMETHOD_(ULONG, AddRef)() override;
+    STDMETHOD_(ULONG, Release)() override;
+    STDMETHOD(GetClipList)(LPRECT rect, LPRGNDATA data, LPDWORD size) override;
+    STDMETHOD(GetHWnd)(HWND* hwnd) override;
+    STDMETHOD(Initialize)(LPDIRECTDRAW dd, DWORD flags) override;
+    STDMETHOD(IsClipListChanged)(WINBOOL* changed) override;
+    STDMETHOD(SetClipList)(LPRGNDATA data, DWORD flags) override;
+    STDMETHOD(SetHWnd)(DWORD flags, HWND hwnd) override;
+
+    // Rectangles a blit to `target` may touch, in the target's coordinates.
+    std::vector<RECT> Region(const Surface* target) const;
+
+    HWND hwnd = nullptr;
+
+private:
+    ~Clipper();
+    LONG ref_ = 1;
+    DDraw* dd_;  // may be null for clippers from DirectDrawCreateClipper
+    std::vector<uint8_t> clipList_;
+};
+
+// ---------------------------------------------------------------- GammaControl
+class GammaControl final : public IDirectDrawGammaControl {
+public:
+    uint32_t magic = kMagic;
+    Surface* surface;
+
+    explicit GammaControl(Surface* s) : surface(s) {}
+    STDMETHOD(QueryInterface)(REFIID riid, void** out) override;
+    STDMETHOD_(ULONG, AddRef)() override;
+    STDMETHOD_(ULONG, Release)() override;
+    STDMETHOD(GetGammaRamp)(DWORD flags, LPDDGAMMARAMP ramp) override;
+    STDMETHOD(SetGammaRamp)(DWORD flags, LPDDGAMMARAMP ramp) override;
+};
+
+// ---------------------------------------------------------------- Surface
+enum { kCkDestBlt, kCkDestOverlay, kCkSrcBlt, kCkSrcOverlay };
+
+class Surface {
+public:
+    Surface(DDraw* dd, const DDSURFACEDESC2& desc, Buffer* buf, int version);
+    ~Surface();
+    static Surface* From(void* iface) { return static_cast<Surface*>(ImplFromIface(iface)); }
+    void* Iface(int version);
+
+    HRESULT QueryInterface(REFIID riid, void** out);
+    ULONG AddRef();
+    ULONG Release();
+
+    HRESULT AddAttachedSurface(Surface* s);
+    HRESULT DeleteAttachedSurface(DWORD flags, Surface* s);
+    HRESULT EnumAttachedSurfaces(int version, void* ctx, void* callback);
+    HRESULT GetAttachedSurface(const DDSCAPS2& caps, Surface** out);
+    HRESULT Blt(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx);
+    HRESULT BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans);
+    HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper);
+    HRESULT Flip(Surface* target, DWORD flags);
+    HRESULT GetCaps(DDSCAPS2* caps);
+    HRESULT GetClipper(IDirectDrawClipper** out);
+    HRESULT SetClipper(IDirectDrawClipper* c);
+    HRESULT GetColorKey(DWORD flags, DDCOLORKEY* key);
+    HRESULT SetColorKey(DWORD flags, DDCOLORKEY* key);
+    HRESULT GetDC(HDC* dc);
+    HRESULT ReleaseDC(HDC dc);
+    HRESULT GetPalette(IDirectDrawPalette** out);
+    HRESULT SetPalette(IDirectDrawPalette* p);
+    HRESULT GetPixelFormat(DDPIXELFORMAT* pf);
+    HRESULT GetSurfaceDesc(DDSURFACEDESC2* desc);
+    HRESULT SetSurfaceDesc(const DDSURFACEDESC2& desc, DWORD flags);
+    HRESULT Lock(RECT* rect, DDSURFACEDESC2* desc, DWORD flags);
+    HRESULT Unlock();
+    HRESULT GetDDInterface(void** out);
+    HRESULT SetPrivateData(REFGUID tag, void* data, DWORD size, DWORD flags);
+    HRESULT GetPrivateData(REFGUID tag, void* data, DWORD* size);
+    HRESULT FreePrivateData(REFGUID tag);
+
+    int W() const { return buf->w; }
+    int H() const { return buf->h; }
+    bool IsFront() const { return isPrimary; }
+    const PALETTEENTRY* EffectivePalette() const;
+    void MarkDirtyIfVisible();
+    void ReplaceBuffer(Buffer* b);  // takes ownership of b
+
+    DDraw* dd;
+    DDSURFACEDESC2 desc;  // creation description (size/format/caps); pitch & lpSurface filled on demand
+    Buffer* buf;
+    int version;          // interface version the surface was created through
+    Surface* root = nullptr;           // owner of a complex surface (flip chain / mipmaps)
+    std::vector<Surface*> children;    // complex children owned by this root
+    std::vector<Surface*> flipChain;   // on a flip-chain root: [front, back1, ..., backN]
+    Surface* chainNext = nullptr;      // next surface in the flip chain (for GetAttachedSurface)
+    std::vector<Surface*> attached;    // explicitly attached surfaces (AddRef'd), plus mip levels
+    Palette* palette = nullptr;
+    Clipper* clipper = nullptr;
+    DDCOLORKEY ck[4] = {};
+    bool hasCk[4] = {};
+    bool isPrimary = false;
+    LONG lockCount = 0;
+    HDC dcOut = nullptr;
+    DWORD uniqueness = 1, priority = 0, lod = 0;
+    GammaControl* gamma = nullptr;
+
+private:
+    struct PrivateData {
+        GUID tag;
+        std::vector<uint8_t> data;
+        IUnknown* unk;
+    };
+    void FillCore(RECT* dst, DWORD value);
+    LONG ref_ = 0;
+    void* wraps_[5] = {};
+    std::vector<PrivateData> priv_;
+};
+
+// ---------------------------------------------------------------- Presenter
+// Owns the Direct3D 9 device. A dedicated thread copies the primary surface
+// into a D3D9 surface (converting 8/16/24/32-bit to X8R8G8B8), scales it into
+// the game window and presents.
+class Presenter {
+public:
+    explicit Presenter(DDraw* dd);
+    ~Presenter();
+    void Start();
+    bool Stop();  // false if the thread did not exit in time (it then still uses this object)
+    void MarkDirty() { if (dirtyEvent_) SetEvent(dirtyEvent_); }
+    uint64_t ConvertSeq() const { return convertSeq_; }  // read under g_lock
+    bool WaitPresented(uint64_t afterSeq, DWORD timeoutMs);
+    bool Active() const { return active_; }
+    bool HasExclusiveDevice() const { return dev_ && devFullscreen_; }
+    // Releases the device on the presenter thread and waits for it (handling
+    // window messages meanwhile). Needed before the display mode is restored
+    // under an exclusive-fullscreen device.
+    void DropDevice();
+    void SetGamma(const DDGAMMARAMP& ramp);
+    void GetGamma(DDGAMMARAMP* ramp);
+
+private:
+    static DWORD WINAPI ThreadProc(void* self);
+    void Loop();
+    bool EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT refresh);
+    bool EnsureStaging(UINT w, UINT h);
+    void ReleaseDevice();
+    void Convert(Surface* primary, const RECT& src, const D3DLOCKED_RECT& lr);
+    void BuildLut16(const Format& f);
+    RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
+
+    DDraw* dd_;
+    HANDLE thread_ = nullptr;
+    HANDLE dirtyEvent_ = nullptr;
+    HANDLE dropDone_ = nullptr;          // signaled when a DropDevice() request was handled
+    volatile bool dropRequest_ = false;
+    volatile bool running_ = false;
+    volatile bool active_ = false;
+
+    IDirect3D9* d3d_ = nullptr;
+    IDirect3DDevice9* dev_ = nullptr;
+    IDirect3DSurface9* staging_ = nullptr;
+    HWND devHwnd_ = nullptr;
+    bool devFullscreen_ = false;   // the device is a D3D9 exclusive-fullscreen one
+    bool exclusiveFailed_ = false; // exclusive presentation failed once: stay windowed
+    UINT bbW_ = 0, bbH_ = 0, stW_ = 0, stH_ = 0;
+
+    uint64_t convertSeq_ = 0;
+    uint64_t presentedSeq_ = 0;
+    SRWLOCK seqLock_ = SRWLOCK_INIT;
+    CONDITION_VARIABLE seqCv_ = CONDITION_VARIABLE_INIT;
+
+    std::vector<uint32_t> lut16_;
+    Format lut16Fmt_;
+    DWORD lut16GammaVersion_ = 0;
+
+    CRITICAL_SECTION gammaLock_;
+    DDGAMMARAMP gammaRamp_;
+    uint8_t gammaLut_[3][256];
+    bool gammaActive_ = false;
+    DWORD gammaVersion_ = 1;
+};
+
+// ---------------------------------------------------------------- DDraw
+class DDraw {
+public:
+    DDraw();
+    static DDraw* From(void* iface) { return static_cast<DDraw*>(ImplFromIface(iface)); }
+    void* Iface(int version);
+
+    HRESULT QueryInterface(REFIID riid, void** out);
+    ULONG AddRef();
+    ULONG Release();
+    void IntAddRef() { InterlockedIncrement(&intRef_); }
+    void IntRelease();
+
+    HRESULT CreateSurface(const void* desc, void** out, IUnknown* outer, int version);
+    HRESULT CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer);
+    HRESULT CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* outer);
+    HRESULT DuplicateSurface(void* src, void** out, int version);
+    HRESULT EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void* callback, int descVersion);
+    HRESULT EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version);
+    HRESULT GetCaps(DDCAPS* drv, DDCAPS* hel);
+    HRESULT GetDisplayMode(void* desc);
+    HRESULT GetGDISurface(void** out, int version);
+    HRESULT GetMonitorFrequency(DWORD* freq);
+    HRESULT GetScanLine(DWORD* line);
+    HRESULT GetVerticalBlankStatus(BOOL* inVb);
+    HRESULT Initialize(GUID* guid);
+    HRESULT SetCooperativeLevel(HWND hwnd, DWORD flags);
+    HRESULT SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD refresh, DWORD flags);
+    HRESULT RestoreDisplayMode();
+    HRESULT WaitForVerticalBlank(DWORD flags, HANDLE event);
+    HRESULT GetAvailableVidMem(DWORD* total, DWORD* free);
+    HRESULT GetSurfaceFromDC(HDC dc, void** out, int version);
+    HRESULT GetDeviceIdentifier(void* id, DWORD flags, bool v2);
+
+    // Display state
+    void DisplayMode(DWORD* w, DWORD* h, DWORD* bpp) const;
+    DWORD RefreshRate() const { return refresh_; }
+    HWND PresentWindow() const;
+    RECT PresentSource(HWND hwnd) const;
+    // present=exclusive and the real display mode is switched: the presenter
+    // should use an exclusive-fullscreen device of this size and refresh rate.
+    bool ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const;
+    bool Exclusive() const { return (coop_ & DDSCL_EXCLUSIVE) != 0; }
+    void MarkDirty() { if (presenter_) presenter_->MarkDirty(); }
+    Presenter* GetPresenter() { return presenter_; }
+    void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
+    bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
+    void SleepUntilVBlank(int count);
+    void PaceFlip();  // never let Flip() run faster than the refresh rate
+    double VBlankPhase() const;  // 0..1 position inside the current refresh period
+
+    Surface* primary = nullptr;
+    std::vector<Surface*> surfaces;
+    PALETTEENTRY defaultPalette[256];
+    bool alive = true;
+    bool initialized = true;
+
+private:
+    ~DDraw();
+    void ApplyWindow();
+    void RestoreSavedWindow();
+    void DropExclusiveDevice();
+    bool PrimaryBusy() const;  // a primary-chain surface is locked or has a DC out
+    void HookWindow();
+    void UnhookWindow();
+    bool SwitchMode();
+    void RestoreDisplay();
+    void SaveWindow();
+    void UpdateRefreshRate();
+    void ResizePrimary();
+
+    LONG ref_ = 0;
+    LONG tornDown_ = 0;
+    LONG intRef_ = 1;  // released when the last external reference goes away
+    void* wraps_[4] = {};
+    HWND hwnd_ = nullptr;
+    DWORD coop_ = 0;
+    bool modeSet_ = false;
+    DWORD modeW_ = 0, modeH_ = 0, modeBpp_ = 0, modeRefresh_ = 0;
+    bool switched_ = false;     // the real display mode was changed
+    bool suspended_ = false;    // display setup undone because the game lost focus
+    bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
+    int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used
+    HWND savedHwnd_ = nullptr;  // window whose style / position are saved
+    bool windowSaved_ = false;  // window style / position saved before taking it over
+    LONG savedStyle_ = 0, savedExStyle_ = 0;
+    RECT savedRect_ = {};
+    DWORD refresh_ = 60;
+    LARGE_INTEGER qpcFreq_, qpcBase_;
+    int64_t lastFlip_ = 0;
+    Presenter* presenter_ = nullptr;
+};
+
+}  // namespace dd2d9

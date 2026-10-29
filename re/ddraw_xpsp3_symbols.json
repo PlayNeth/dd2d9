@@ -1,0 +1,1607 @@
+{
+ "module": "ddraw.dll 5.3.2600.5512 (XP SP3)",
+ "sha256": "3006f1c887a799091c31d1d50129108c36c20dbffd6a2c2ab9a8ff8689994425",
+ "image_base": "0x73730000",
+ "functions": [
+  {
+   "ea": "0x73732f28",
+   "name": "IDirectDrawSurface7_AddRef",
+   "also": [
+    "IDirectDrawColorControl_AddRef",
+    "IDirectDrawGammaControl_AddRef",
+    "IDirectDrawSurface2_AddRef",
+    "IDirectDrawSurface3_AddRef",
+    "IDirectDrawSurface4_AddRef",
+    "IDirectDrawSurfaceKernel_AddRef",
+    "IDirectDrawSurface_AddRef"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x73732fc4",
+   "name": "IDirectDrawSurface7_Release",
+   "also": [
+    "IDirectDrawColorControl_Release",
+    "IDirectDrawGammaControl_Release",
+    "IDirectDrawSurface2_Release",
+    "IDirectDrawSurface3_Release",
+    "IDirectDrawSurface4_Release",
+    "IDirectDrawSurfaceKernel_Release",
+    "IDirectDrawSurface_Release"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737332ad",
+   "name": "IDirectDrawSurface7_Unlock",
+   "also": [
+    "IDirectDrawSurface4_Unlock"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73733517",
+   "name": "IDirectDrawSurface7_Lock",
+   "also": [
+    "IDirectDrawSurface2_Lock",
+    "IDirectDrawSurface3_Lock",
+    "IDirectDrawSurface4_Lock",
+    "IDirectDrawSurface_Lock"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x7373399c",
+   "name": "IDirectDrawSurface7_Flip",
+   "also": [
+    "IDirectDrawSurface2_Flip",
+    "IDirectDrawSurface3_Flip",
+    "IDirectDrawSurface4_Flip",
+    "IDirectDrawSurface_Flip"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73733f11",
+   "name": "IDirectDrawClipper_Release",
+   "also": [
+    "IDirectDrawClipper_Uninit_Release"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7373411e",
+   "name": "IDirectDraw7_Release",
+   "also": [
+    "IDDVideoAcceleratorContainer_Release",
+    "IDDVideoPortContainer_Release",
+    "IDirectDraw2_Release",
+    "IDirectDraw4_Release",
+    "IDirectDrawKernel_Release",
+    "IDirectDrawX_UninitA_Release",
+    "IDirectDrawX_UninitB_Release",
+    "IDirectDrawX_UninitC_Release",
+    "IDirectDraw_Release",
+    "IDirectDraw_Uninit_Release"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737348d0",
+   "name": "IDDVideoAccelerator_Release",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x73734f59",
+   "name": "IDirectDrawSurface7_GetSurfaceDesc",
+   "also": [
+    "IDirectDrawSurface4_GetSurfaceDesc"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73735014",
+   "name": "IDirectDrawSurface7_QueryInterface",
+   "also": [
+    "IDirectDrawColorControl_QueryInterface",
+    "IDirectDrawGammaControl_QueryInterface",
+    "IDirectDrawSurface2_QueryInterface",
+    "IDirectDrawSurface3_QueryInterface",
+    "IDirectDrawSurface4_QueryInterface",
+    "IDirectDrawSurfaceKernel_QueryInterface",
+    "IDirectDrawSurface_QueryInterface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x737351c9",
+   "name": "IDirectDrawSurface7_GetAttachedSurface",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7373581b",
+   "name": "IDirectDrawSurface7_Blt",
+   "also": [
+    "IDirectDrawSurface2_Blt",
+    "IDirectDrawSurface3_Blt",
+    "IDirectDrawSurface4_Blt",
+    "IDirectDrawSurface_Blt"
+   ],
+   "stack_bytes": 24
+  },
+  {
+   "ea": "0x737366ec",
+   "name": "IDirectDrawClipper_SetHWnd",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73736791",
+   "name": "IDirectDrawSurface7_GetClipper",
+   "also": [
+    "IDirectDrawSurface2_GetClipper",
+    "IDirectDrawSurface3_GetClipper",
+    "IDirectDrawSurface4_GetClipper",
+    "IDirectDrawSurface_GetClipper"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73736839",
+   "name": "IDirectDrawClipper_AddRef",
+   "also": [
+    "IDirectDrawClipper_Uninit_AddRef"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737368c1",
+   "name": "IDDVideoPortContainer_QueryVideoPortStatus",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x737369e1",
+   "name": "IDirectDraw7_AddRef",
+   "also": [
+    "IDDVideoAcceleratorContainer_AddRef",
+    "IDDVideoPortContainer_AddRef",
+    "IDirectDraw2_AddRef",
+    "IDirectDraw4_AddRef",
+    "IDirectDrawKernel_AddRef",
+    "IDirectDrawX_UninitA_AddRef",
+    "IDirectDrawX_UninitB_AddRef",
+    "IDirectDrawX_UninitC_AddRef",
+    "IDirectDraw_AddRef",
+    "IDirectDraw_Uninit_AddRef"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x73736efc",
+   "name": "IDirectDraw7_CreateSurface",
+   "also": [
+    "IDirectDraw4_CreateSurface"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x73737c98",
+   "name": "IDirectDraw7_QueryInterface",
+   "also": [
+    "IDDVideoAcceleratorContainer_QueryInterface",
+    "IDDVideoPortContainer_QueryInterface",
+    "IDirectDraw2_QueryInterface",
+    "IDirectDraw4_QueryInterface",
+    "IDirectDrawKernel_QueryInterface",
+    "IDirectDrawX_UninitA_QueryInterface",
+    "IDirectDrawX_UninitB_QueryInterface",
+    "IDirectDrawX_UninitC_QueryInterface",
+    "IDirectDraw_QueryInterface",
+    "IDirectDraw_Uninit_QueryInterface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73738031",
+   "name": "IDirectDrawSurface7_GetDC",
+   "also": [
+    "IDirectDrawSurface2_GetDC",
+    "IDirectDrawSurface3_GetDC",
+    "IDirectDrawSurface4_GetDC",
+    "IDirectDrawSurface_GetDC"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73738224",
+   "name": "IDirectDrawSurface7_ReleaseDC",
+   "also": [
+    "IDirectDrawSurface2_ReleaseDC",
+    "IDirectDrawSurface3_ReleaseDC",
+    "IDirectDrawSurface4_ReleaseDC",
+    "IDirectDrawSurface_ReleaseDC"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737385d8",
+   "name": "IDirectDraw7_SetCooperativeLevel",
+   "also": [
+    "IDirectDraw2_SetCooperativeLevel",
+    "IDirectDraw4_SetCooperativeLevel",
+    "IDirectDraw_SetCooperativeLevel"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73738d07",
+   "name": "IDirectDrawSurface7_SetClipper",
+   "also": [
+    "IDirectDrawSurface2_SetClipper",
+    "IDirectDrawSurface3_SetClipper",
+    "IDirectDrawSurface4_SetClipper",
+    "IDirectDrawSurface_SetClipper"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73738ff6",
+   "name": "IDDVideoAccelerator_AddRef",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7373a953",
+   "name": "IDDVideoPortContainer_CreateVideoPort",
+   "also": [],
+   "stack_bytes": 28
+  },
+  {
+   "ea": "0x7373b50c",
+   "name": "IDirectDraw7_GetFourCCCodes",
+   "also": [
+    "IDirectDraw2_GetFourCCCodes",
+    "IDirectDraw4_GetFourCCCodes",
+    "IDirectDraw_GetFourCCCodes"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7373c277",
+   "name": "IDirectDraw7_GetCaps",
+   "also": [
+    "IDirectDraw2_GetCaps",
+    "IDirectDraw4_GetCaps",
+    "IDirectDraw_GetCaps"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7373c3b9",
+   "name": "IDirectDraw2_GetAvailableVidMem",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7373c469",
+   "name": "IDirectDraw7_GetAvailableVidMem",
+   "also": [
+    "IDirectDraw4_GetAvailableVidMem"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7373cd90",
+   "name": "IDirectDraw7_CreateClipper",
+   "also": [
+    "IDirectDraw2_CreateClipper",
+    "IDirectDraw4_CreateClipper",
+    "IDirectDraw_CreateClipper"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7373cf21",
+   "name": "IDirectDraw7_GetDisplayMode",
+   "also": [
+    "IDirectDraw2_GetDisplayMode",
+    "IDirectDraw4_GetDisplayMode",
+    "IDirectDraw_GetDisplayMode"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7373d318",
+   "name": "IDirectDrawSurface7_UpdateOverlay",
+   "also": [
+    "IDirectDrawSurface2_UpdateOverlay",
+    "IDirectDrawSurface3_UpdateOverlay",
+    "IDirectDrawSurface4_UpdateOverlay",
+    "IDirectDrawSurface_UpdateOverlay"
+   ],
+   "stack_bytes": 24
+  },
+  {
+   "ea": "0x7373ddbf",
+   "name": "IDirectDrawSurface7_SetColorKey",
+   "also": [
+    "IDirectDrawSurface2_SetColorKey",
+    "IDirectDrawSurface3_SetColorKey",
+    "IDirectDrawSurface4_SetColorKey",
+    "IDirectDrawSurface_SetColorKey"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7373e6c0",
+   "name": "IDirectDraw7_GetScanLine",
+   "also": [
+    "IDirectDraw2_GetScanLine",
+    "IDirectDraw4_GetScanLine",
+    "IDirectDraw_GetScanLine"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7373ea82",
+   "name": "IDirectDrawSurface7_AddAttachedSurface",
+   "also": [
+    "IDirectDrawSurface2_AddAttachedSurface",
+    "IDirectDrawSurface3_AddAttachedSurface",
+    "IDirectDrawSurface4_AddAttachedSurface",
+    "IDirectDrawSurface_AddAttachedSurface"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375a589",
+   "name": "IDirectDrawSurface3_Unlock",
+   "also": [
+    "IDirectDrawSurface2_Unlock",
+    "IDirectDrawSurface_Unlock"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375a662",
+   "name": "IDirectDraw7_GetVerticalBlankStatus",
+   "also": [
+    "IDirectDraw2_GetVerticalBlankStatus",
+    "IDirectDraw4_GetVerticalBlankStatus",
+    "IDirectDraw_GetVerticalBlankStatus"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375a791",
+   "name": "IDirectDraw7_WaitForVerticalBlank",
+   "also": [
+    "IDirectDraw2_WaitForVerticalBlank",
+    "IDirectDraw4_WaitForVerticalBlank",
+    "IDirectDraw_WaitForVerticalBlank"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375a8f1",
+   "name": "IDirectDraw7_GetMonitorFrequency",
+   "also": [
+    "IDirectDraw2_GetMonitorFrequency",
+    "IDirectDraw4_GetMonitorFrequency",
+    "IDirectDraw_GetMonitorFrequency"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375ad8c",
+   "name": "IDirectDraw7_DuplicateSurface",
+   "also": [
+    "IDirectDraw2_DuplicateSurface",
+    "IDirectDraw4_DuplicateSurface",
+    "IDirectDraw_DuplicateSurface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375af19",
+   "name": "IDirectDraw7_GetGDISurface",
+   "also": [
+    "IDirectDraw2_GetGDISurface",
+    "IDirectDraw4_GetGDISurface",
+    "IDirectDraw_GetGDISurface"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375b0b9",
+   "name": "IDirectDraw7_FlipToGDISurface",
+   "also": [
+    "IDirectDraw2_FlipToGDISurface",
+    "IDirectDraw4_FlipToGDISurface",
+    "IDirectDraw_FlipToGDISurface"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7375b199",
+   "name": "IDirectDraw7_Compact",
+   "also": [
+    "IDirectDraw2_Compact",
+    "IDirectDraw4_Compact",
+    "IDirectDraw_Compact"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7375b279",
+   "name": "IDirectDraw7_Initialize",
+   "also": [
+    "IDirectDraw2_Initialize",
+    "IDirectDraw4_Initialize",
+    "IDirectDrawX_UninitA_Initialize",
+    "IDirectDrawX_UninitB_Initialize",
+    "IDirectDrawX_UninitC_Initialize",
+    "IDirectDraw_Initialize",
+    "IDirectDraw_Uninit_Initialize"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375b4b7",
+   "name": "IDirectDraw7_TestCooperativeLevel",
+   "also": [
+    "IDirectDraw4_TestCooperativeLevel"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7375bb64",
+   "name": "IDirectDraw2_CreateSurface",
+   "also": [
+    "IDirectDraw_CreateSurface"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7375cd96",
+   "name": "IDirectDrawSurface7_EnumAttachedSurfaces",
+   "also": [
+    "IDirectDrawSurface2_EnumAttachedSurfaces",
+    "IDirectDrawSurface3_EnumAttachedSurfaces",
+    "IDirectDrawSurface4_EnumAttachedSurfaces",
+    "IDirectDrawSurface_EnumAttachedSurfaces"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375cfb6",
+   "name": "IDirectDrawSurface3_GetAttachedSurface",
+   "also": [
+    "IDirectDrawSurface2_GetAttachedSurface",
+    "IDirectDrawSurface_GetAttachedSurface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375d0b9",
+   "name": "IDirectDrawSurface4_GetAttachedSurface",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375d1c9",
+   "name": "IDirectDrawSurface7_DeleteAttachedSurface",
+   "also": [
+    "IDirectDrawSurface2_DeleteAttachedSurface",
+    "IDirectDrawSurface3_DeleteAttachedSurface",
+    "IDirectDrawSurface4_DeleteAttachedSurface",
+    "IDirectDrawSurface_DeleteAttachedSurface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375e4fa",
+   "name": "IDirectDrawClipper_GetHWnd",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375e5c1",
+   "name": "IDirectDrawClipper_GetClipList",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7375e6b9",
+   "name": "IDirectDrawClipper_SetClipList",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375e859",
+   "name": "IDirectDrawClipper_IsClipListChanged",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375e994",
+   "name": "IDirectDrawClipper_Initialize",
+   "also": [
+    "IDirectDrawClipper_Uninit_Initialize"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375ead1",
+   "name": "IDirectDrawClipper_QueryInterface",
+   "also": [
+    "IDirectDrawClipper_Uninit_QueryInterface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7375f3a8",
+   "name": "IDirectDrawSurface7_GetCaps",
+   "also": [
+    "IDirectDrawSurface4_GetCaps"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375f471",
+   "name": "IDirectDrawSurface7_GetFlipStatus",
+   "also": [
+    "IDirectDrawSurface2_GetFlipStatus",
+    "IDirectDrawSurface3_GetFlipStatus",
+    "IDirectDrawSurface4_GetFlipStatus",
+    "IDirectDrawSurface_GetFlipStatus"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375f65c",
+   "name": "IDirectDrawSurface7_GetBltStatus",
+   "also": [
+    "IDirectDrawSurface2_GetBltStatus",
+    "IDirectDrawSurface3_GetBltStatus",
+    "IDirectDrawSurface4_GetBltStatus",
+    "IDirectDrawSurface_GetBltStatus"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375fbeb",
+   "name": "IDirectDrawSurface7_GetPixelFormat",
+   "also": [
+    "IDirectDrawSurface2_GetPixelFormat",
+    "IDirectDrawSurface3_GetPixelFormat",
+    "IDirectDrawSurface4_GetPixelFormat",
+    "IDirectDrawSurface_GetPixelFormat"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375fcf1",
+   "name": "IDirectDrawSurface3_GetSurfaceDesc",
+   "also": [
+    "IDirectDrawSurface2_GetSurfaceDesc",
+    "IDirectDrawSurface_GetSurfaceDesc"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7375fdb9",
+   "name": "IDirectDrawSurface7_IsLost",
+   "also": [
+    "IDirectDrawSurface2_IsLost",
+    "IDirectDrawSurface3_IsLost",
+    "IDirectDrawSurface4_IsLost",
+    "IDirectDrawSurface_IsLost"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7375feb1",
+   "name": "IDirectDrawSurface7_Initialize",
+   "also": [
+    "IDirectDrawSurface2_Initialize",
+    "IDirectDrawSurface3_Initialize",
+    "IDirectDrawSurface4_Initialize",
+    "IDirectDrawSurface_Initialize"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376067a",
+   "name": "IDirectDrawSurface7_GetDDInterface",
+   "also": [
+    "IDirectDrawSurface2_GetDDInterface",
+    "IDirectDrawSurface3_GetDDInterface",
+    "IDirectDrawSurface4_GetDDInterface"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73760859",
+   "name": "IDirectDraw7_GetSurfaceFromDC",
+   "also": [
+    "IDirectDraw4_GetSurfaceFromDC"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x737608f8",
+   "name": "IDirectDrawSurface7_SetSurfaceDesc",
+   "also": [
+    "IDirectDrawSurface4_SetSurfaceDesc"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73760e29",
+   "name": "IDirectDrawSurface7_SetPriority",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73760eb7",
+   "name": "IDirectDrawSurface7_GetPriority",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73760fa9",
+   "name": "IDirectDrawSurface7_SetLOD",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737610a1",
+   "name": "IDirectDrawSurface7_GetLOD",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73761199",
+   "name": "IDirectDrawSurface3_GetCaps",
+   "also": [
+    "IDirectDrawSurface2_GetCaps",
+    "IDirectDrawSurface_GetCaps"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73761404",
+   "name": "IDirectDrawSurface7_Restore",
+   "also": [
+    "IDirectDrawSurface2_Restore",
+    "IDirectDrawSurface3_Restore",
+    "IDirectDrawSurface4_Restore",
+    "IDirectDrawSurface_Restore"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737616e9",
+   "name": "IDirectDrawSurface7_PageLock",
+   "also": [
+    "IDirectDrawSurface2_PageLock",
+    "IDirectDrawSurface2_PageUnlock",
+    "IDirectDrawSurface3_PageLock",
+    "IDirectDrawSurface3_PageUnlock",
+    "IDirectDrawSurface4_PageLock",
+    "IDirectDrawSurface4_PageUnlock",
+    "IDirectDrawSurface7_PageUnlock"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737617e9",
+   "name": "IDirectDrawSurface3_SetSurfaceDesc",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73761893",
+   "name": "IDirectDraw_Uninit_Compact",
+   "also": [
+    "IDirectDrawX_UninitA_Compact",
+    "IDirectDrawX_UninitA_FlipToGDISurface",
+    "IDirectDrawX_UninitA_RestoreDisplayMode",
+    "IDirectDrawX_UninitB_Compact",
+    "IDirectDrawX_UninitB_FlipToGDISurface",
+    "IDirectDrawX_UninitB_RestoreDisplayMode",
+    "IDirectDrawX_UninitC_Compact",
+    "IDirectDrawX_UninitC_FlipToGDISurface",
+    "IDirectDrawX_UninitC_RestoreDisplayMode",
+    "IDirectDraw_Uninit_FlipToGDISurface",
+    "IDirectDraw_Uninit_RestoreDisplayMode"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737618a0",
+   "name": "IDirectDrawClipper_Uninit_GetHWnd",
+   "also": [
+    "IDirectDrawClipper_Uninit_IsClipListChanged",
+    "IDirectDrawX_UninitA_GetDisplayMode",
+    "IDirectDrawX_UninitA_GetGDISurface",
+    "IDirectDrawX_UninitA_GetMonitorFrequency",
+    "IDirectDrawX_UninitA_GetScanLine",
+    "IDirectDrawX_UninitA_GetVerticalBlankStatus",
+    "IDirectDrawX_UninitB_GetDisplayMode",
+    "IDirectDrawX_UninitB_GetGDISurface",
+    "IDirectDrawX_UninitB_GetMonitorFrequency",
+    "IDirectDrawX_UninitB_GetScanLine",
+    "IDirectDrawX_UninitB_GetVerticalBlankStatus",
+    "IDirectDrawX_UninitC_GetDisplayMode",
+    "IDirectDrawX_UninitC_GetGDISurface",
+    "IDirectDrawX_UninitC_GetMonitorFrequency",
+    "IDirectDrawX_UninitC_GetScanLine",
+    "IDirectDrawX_UninitC_GetVerticalBlankStatus",
+    "IDirectDraw_Uninit_GetDisplayMode",
+    "IDirectDraw_Uninit_GetGDISurface",
+    "IDirectDraw_Uninit_GetMonitorFrequency",
+    "IDirectDraw_Uninit_GetScanLine",
+    "IDirectDraw_Uninit_GetVerticalBlankStatus"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737618ad",
+   "name": "IDirectDrawClipper_Uninit_SetClipList",
+   "also": [
+    "IDirectDrawClipper_Uninit_SetHWnd",
+    "IDirectDrawX_UninitA_DuplicateSurface",
+    "IDirectDrawX_UninitA_GetCaps",
+    "IDirectDrawX_UninitA_GetFourCCCodes",
+    "IDirectDrawX_UninitA_SetCooperativeLevel",
+    "IDirectDrawX_UninitA_WaitForVerticalBlank",
+    "IDirectDrawX_UninitB_DuplicateSurface",
+    "IDirectDrawX_UninitB_GetCaps",
+    "IDirectDrawX_UninitB_GetFourCCCodes",
+    "IDirectDrawX_UninitB_SetCooperativeLevel",
+    "IDirectDrawX_UninitB_WaitForVerticalBlank",
+    "IDirectDrawX_UninitC_DuplicateSurface",
+    "IDirectDrawX_UninitC_GetCaps",
+    "IDirectDrawX_UninitC_GetFourCCCodes",
+    "IDirectDrawX_UninitC_SetCooperativeLevel",
+    "IDirectDrawX_UninitC_WaitForVerticalBlank",
+    "IDirectDraw_Uninit_DuplicateSurface",
+    "IDirectDraw_Uninit_GetCaps",
+    "IDirectDraw_Uninit_GetFourCCCodes",
+    "IDirectDraw_Uninit_SetCooperativeLevel",
+    "IDirectDraw_Uninit_WaitForVerticalBlank"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x737618ba",
+   "name": "IDirectDrawClipper_Uninit_GetClipList",
+   "also": [
+    "IDirectDrawX_UninitA_CreateClipper",
+    "IDirectDrawX_UninitA_CreateSurface",
+    "IDirectDrawX_UninitB_CreateClipper",
+    "IDirectDrawX_UninitB_CreateSurface",
+    "IDirectDrawX_UninitC_CreateClipper",
+    "IDirectDrawX_UninitC_CreateSurface",
+    "IDirectDraw_Uninit_CreateClipper",
+    "IDirectDraw_Uninit_CreateSurface",
+    "IDirectDraw_Uninit_SetDisplayMode"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x737618c7",
+   "name": "IDirectDraw_Uninit_CreatePalette",
+   "also": [
+    "IDirectDrawX_UninitA_CreatePalette",
+    "IDirectDrawX_UninitA_EnumDisplayModes",
+    "IDirectDrawX_UninitA_EnumSurfaces",
+    "IDirectDrawX_UninitB_CreatePalette",
+    "IDirectDrawX_UninitB_EnumDisplayModes",
+    "IDirectDrawX_UninitB_EnumSurfaces",
+    "IDirectDrawX_UninitC_CreatePalette",
+    "IDirectDrawX_UninitC_EnumDisplayModes",
+    "IDirectDrawX_UninitC_EnumSurfaces",
+    "IDirectDraw_Uninit_EnumDisplayModes",
+    "IDirectDraw_Uninit_EnumSurfaces"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x737618d4",
+   "name": "IDirectDrawX_UninitA_SetDisplayMode",
+   "also": [
+    "IDirectDrawX_UninitB_SetDisplayMode",
+    "IDirectDrawX_UninitC_SetDisplayMode"
+   ],
+   "stack_bytes": 24
+  },
+  {
+   "ea": "0x73761c7c",
+   "name": "IDirectDraw7_SetDisplayMode",
+   "also": [
+    "IDirectDraw2_SetDisplayMode",
+    "IDirectDraw4_SetDisplayMode"
+   ],
+   "stack_bytes": 24
+  },
+  {
+   "ea": "0x73761e29",
+   "name": "IDirectDraw7_RestoreDisplayMode",
+   "also": [
+    "IDirectDraw2_RestoreDisplayMode",
+    "IDirectDraw4_RestoreDisplayMode",
+    "IDirectDraw_RestoreDisplayMode"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7376203f",
+   "name": "IDirectDraw7_EnumDisplayModes",
+   "also": [
+    "IDirectDraw4_EnumDisplayModes"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x737624f1",
+   "name": "IDirectDraw_SetDisplayMode",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x73762514",
+   "name": "IDirectDraw2_EnumDisplayModes",
+   "also": [
+    "IDirectDraw_EnumDisplayModes"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73762a4f",
+   "name": "IDirectDrawSurface7_BltBatch",
+   "also": [
+    "IDirectDrawSurface2_BltBatch",
+    "IDirectDrawSurface3_BltBatch",
+    "IDirectDrawSurface4_BltBatch",
+    "IDirectDrawSurface_BltBatch"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x73762c01",
+   "name": "IDirectDrawSurface7_BltFast",
+   "also": [
+    "IDirectDrawSurface2_BltFast",
+    "IDirectDrawSurface3_BltFast",
+    "IDirectDrawSurface4_BltFast",
+    "IDirectDrawSurface_BltFast"
+   ],
+   "stack_bytes": 24
+  },
+  {
+   "ea": "0x7376390f",
+   "name": "IDirectDraw7_EnumSurfaces",
+   "also": [
+    "IDirectDraw4_EnumSurfaces"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73764231",
+   "name": "IDirectDraw2_EnumSurfaces",
+   "also": [
+    "IDirectDraw_EnumSurfaces"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73764323",
+   "name": "IDirectDrawGammaControl_GetGammaRamp",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x737644a0",
+   "name": "IDirectDrawGammaControl_SetGammaRamp",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73764955",
+   "name": "IDirectDrawSurface7_GetColorKey",
+   "also": [
+    "IDirectDrawSurface2_GetColorKey",
+    "IDirectDrawSurface3_GetColorKey",
+    "IDirectDrawSurface4_GetColorKey",
+    "IDirectDrawSurface_GetColorKey"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73765869",
+   "name": "IDirectDraw7_GetDeviceIdentifier",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376588a",
+   "name": "IDirectDraw4_GetDeviceIdentifier",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73765c79",
+   "name": "IDirectDrawSurfaceKernel_ReleaseKernelHandle",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x73765e0a",
+   "name": "IDirectDrawKernel_GetCaps",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73765f09",
+   "name": "IDirectDrawKernel_GetKernelHandle",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73766009",
+   "name": "IDirectDrawKernel_ReleaseKernelHandle",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737660f1",
+   "name": "IDirectDrawSurfaceKernel_GetKernelHandle",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73766315",
+   "name": "IDirectDrawPalette_AddRef",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737663e1",
+   "name": "IDirectDrawPalette_Release",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x737664b9",
+   "name": "IDirectDrawPalette_GetCaps",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737665e1",
+   "name": "IDirectDrawPalette_Initialize",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x737665ee",
+   "name": "IDirectDrawPalette_SetEntries",
+   "also": [],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73766811",
+   "name": "IDirectDrawPalette_GetEntries",
+   "also": [],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73766949",
+   "name": "IDirectDrawSurface7_SetPalette",
+   "also": [
+    "IDirectDrawSurface2_SetPalette",
+    "IDirectDrawSurface3_SetPalette",
+    "IDirectDrawSurface4_SetPalette",
+    "IDirectDrawSurface_SetPalette"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73766dd6",
+   "name": "IDirectDraw7_CreatePalette",
+   "also": [
+    "IDirectDraw2_CreatePalette",
+    "IDirectDraw4_CreatePalette",
+    "IDirectDraw_CreatePalette"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73767161",
+   "name": "IDirectDrawPalette_QueryInterface",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x73767443",
+   "name": "IDirectDrawSurface7_GetPalette",
+   "also": [
+    "IDirectDrawSurface2_GetPalette",
+    "IDirectDrawSurface3_GetPalette",
+    "IDirectDrawSurface4_GetPalette",
+    "IDirectDrawSurface_GetPalette"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73767955",
+   "name": "IDDVideoAcceleratorContainer_GetCompBufferInfo",
+   "also": [],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73767bd9",
+   "name": "IDDVideoAcceleratorContainer_GetUncompressedFormats",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x73767db9",
+   "name": "IDDVideoAcceleratorContainer_GetVideoAcceleratorGUIDs",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376824f",
+   "name": "IDirectDrawVideoPortNotify_AddRef",
+   "also": [
+    "IDirectDrawVideoPort_AddRef"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x73768329",
+   "name": "IDirectDrawVideoPort_Flip",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376857a",
+   "name": "IDirectDrawVideoPort_GetBandwidthInfo",
+   "also": [],
+   "stack_bytes": 24
+  },
+  {
+   "ea": "0x737686d1",
+   "name": "IDirectDrawVideoPort_GetInputFormats",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x737688d1",
+   "name": "IDirectDrawVideoPort_GetOutputFormats",
+   "also": [],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73768ae9",
+   "name": "IDirectDrawVideoPort_GetFieldPolarity",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73768c19",
+   "name": "IDirectDrawVideoPort_GetVideoLine",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73768e60",
+   "name": "IDirectDrawVideoPort_WaitForSync",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x73768fa9",
+   "name": "IDirectDrawVideoPort_GetVideoSignalStatus",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737690e1",
+   "name": "IDirectDrawVideoPort_GetColorControls",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73769231",
+   "name": "IDirectDrawVideoPort_SetColorControls",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x737694a8",
+   "name": "IDirectDrawVideoPortNotify_AcquireNotification",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x737695a9",
+   "name": "IDirectDrawVideoPortNotify_ReleaseNotification",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x73769671",
+   "name": "IDDVideoAcceleratorContainer_CreateVideoAccelerator",
+   "also": [],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x73769c79",
+   "name": "IDirectDrawVideoPortNotify_QueryInterface",
+   "also": [
+    "IDirectDrawVideoPort_QueryInterface"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376aca1",
+   "name": "IDirectDrawVideoPort_StartVideo",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376af21",
+   "name": "IDirectDrawVideoPort_StopVideo",
+   "also": [],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7376b0d1",
+   "name": "IDirectDrawVideoPort_UpdateVideo",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376b3a9",
+   "name": "IDirectDrawVideoPortNotify_Release",
+   "also": [
+    "IDirectDrawVideoPort_Release"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7376b619",
+   "name": "IDirectDrawVideoPort_SetTargetSurface",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376b8c1",
+   "name": "IDDVideoAccelerator_QueryInterface",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376bb89",
+   "name": "IDDVideoPortContainer_EnumVideoPorts",
+   "also": [],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x7376bd61",
+   "name": "IDDVideoPortContainer_GetVideoPortConnectInfo",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7376beb1",
+   "name": "IDDVideoAccelerator_Method3",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376c021",
+   "name": "IDDVideoAccelerator_Method4",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376c151",
+   "name": "IDDVideoAccelerator_Method6",
+   "also": [],
+   "stack_bytes": 32
+  },
+  {
+   "ea": "0x7376c341",
+   "name": "IDDVideoAccelerator_Method5",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376c469",
+   "name": "IDirectDrawColorControl_GetColorControls",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376c599",
+   "name": "IDirectDrawColorControl_SetColorControls",
+   "also": [],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376c965",
+   "name": "IDirectDrawSurface7_SetPrivateData",
+   "also": [
+    "IDirectDrawSurface4_SetPrivateData"
+   ],
+   "stack_bytes": 20
+  },
+  {
+   "ea": "0x7376ca41",
+   "name": "IDirectDrawSurface7_GetPrivateData",
+   "also": [
+    "IDirectDrawSurface4_GetPrivateData"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7376cb19",
+   "name": "IDirectDrawSurface7_FreePrivateData",
+   "also": [
+    "IDirectDrawSurface4_FreePrivateData"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376cbe1",
+   "name": "IDirectDrawSurface7_GetUniquenessValue",
+   "also": [
+    "IDirectDrawSurface4_GetUniquenessValue"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376cca1",
+   "name": "IDirectDrawSurface7_ChangeUniquenessValue",
+   "also": [
+    "IDirectDrawSurface4_ChangeUniquenessValue"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7376cd81",
+   "name": "IDirectDrawSurface7_GetOverlayPosition",
+   "also": [
+    "IDirectDrawSurface2_GetOverlayPosition",
+    "IDirectDrawSurface3_GetOverlayPosition",
+    "IDirectDrawSurface4_GetOverlayPosition",
+    "IDirectDrawSurface_GetOverlayPosition"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376ceb1",
+   "name": "IDirectDrawSurface7_SetOverlayPosition",
+   "also": [
+    "IDirectDrawSurface2_SetOverlayPosition",
+    "IDirectDrawSurface3_SetOverlayPosition",
+    "IDirectDrawSurface4_SetOverlayPosition",
+    "IDirectDrawSurface_SetOverlayPosition"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376d0f1",
+   "name": "IDirectDrawSurface7_EnumOverlayZOrders",
+   "also": [
+    "IDirectDrawSurface2_EnumOverlayZOrders",
+    "IDirectDrawSurface3_EnumOverlayZOrders",
+    "IDirectDrawSurface4_EnumOverlayZOrders",
+    "IDirectDrawSurface_EnumOverlayZOrders"
+   ],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7376d309",
+   "name": "IDirectDrawSurface7_AddOverlayDirtyRect",
+   "also": [
+    "IDirectDrawSurface2_AddOverlayDirtyRect",
+    "IDirectDrawSurface3_AddOverlayDirtyRect",
+    "IDirectDrawSurface4_AddOverlayDirtyRect",
+    "IDirectDrawSurface_AddOverlayDirtyRect"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376d4d9",
+   "name": "IDirectDrawSurface7_UpdateOverlayDisplay",
+   "also": [
+    "IDirectDrawSurface2_UpdateOverlayDisplay",
+    "IDirectDrawSurface3_UpdateOverlayDisplay",
+    "IDirectDrawSurface4_UpdateOverlayDisplay",
+    "IDirectDrawSurface_UpdateOverlayDisplay"
+   ],
+   "stack_bytes": 8
+  },
+  {
+   "ea": "0x7376d679",
+   "name": "IDirectDrawSurface7_UpdateOverlayZOrder",
+   "also": [
+    "IDirectDrawSurface2_UpdateOverlayZOrder",
+    "IDirectDrawSurface3_UpdateOverlayZOrder",
+    "IDirectDrawSurface4_UpdateOverlayZOrder",
+    "IDirectDrawSurface_UpdateOverlayZOrder"
+   ],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376d939",
+   "name": "IDirectDraw7_StartModeTest",
+   "also": [],
+   "stack_bytes": 16
+  },
+  {
+   "ea": "0x7376d946",
+   "name": "IDirectDraw7_EvaluateMode",
+   "also": [],
+   "stack_bytes": 12
+  },
+  {
+   "ea": "0x7376d9a1",
+   "name": "IDirectDraw7_RestoreAllSurfaces",
+   "also": [
+    "IDirectDraw4_RestoreAllSurfaces"
+   ],
+   "stack_bytes": 4
+  },
+  {
+   "ea": "0x7373475a",
+   "name": "AcquireDDThreadLock",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375a9d9",
+   "name": "CheckFullscreen",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375b960",
+   "name": "CompleteCreateSysmemSurface",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375c8da",
+   "name": "D3DParseUnknownCommand",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375cf19",
+   "name": "DDGetAttachedSurfaceLcl",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375a63f",
+   "name": "DDInternalLock",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375a5f4",
+   "name": "DDInternalUnlock",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375e4b6",
+   "name": "DSoundHelp",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375cca3",
+   "name": "DirectDrawCreate",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375e921",
+   "name": "DirectDrawCreateClipper",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7373ccf6",
+   "name": "DirectDrawCreateEx",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375cb1b",
+   "name": "DirectDrawEnumerateA",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x73731a57",
+   "name": "DirectDrawEnumerateExA",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375c629",
+   "name": "DirectDrawEnumerateExW",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375caf6",
+   "name": "DirectDrawEnumerateW",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375f32d",
+   "name": "DllCanUnloadNow",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375f1bf",
+   "name": "DllGetClassObject",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375b7e9",
+   "name": "GetDDSurfaceLocal",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375b619",
+   "name": "GetOLEThunkData",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7376089f",
+   "name": "GetSurfaceFromDC",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x7375009c",
+   "name": "RegisterSpecialCase",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x73734789",
+   "name": "ReleaseDDThreadLock",
+   "also": [],
+   "stack_bytes": null
+  },
+  {
+   "ea": "0x73731cd2",
+   "name": "InitInterfaceVtables",
+   "also": [],
+   "stack_bytes": null
+  }
+ ],
+ "vtables": [
+  {
+   "ea": "0x7376f020",
+   "name": "vtbl_IDirectDrawSurface7"
+  },
+  {
+   "ea": "0x7376f100",
+   "name": "vtbl_IDirectDrawSurface"
+  },
+  {
+   "ea": "0x7376f1a0",
+   "name": "vtbl_IDirectDrawSurface4"
+  },
+  {
+   "ea": "0x7376f260",
+   "name": "vtbl_IDirectDrawSurface3"
+  },
+  {
+   "ea": "0x7376f300",
+   "name": "vtbl_IDirectDrawSurface2"
+  },
+  {
+   "ea": "0x7376f3c0",
+   "name": "vtbl_IDirectDrawClipper"
+  },
+  {
+   "ea": "0x7376f420",
+   "name": "vtbl_IDirectDraw4"
+  },
+  {
+   "ea": "0x7376f4a0",
+   "name": "vtbl_IDirectDraw2"
+  },
+  {
+   "ea": "0x7376f500",
+   "name": "vtbl_IDirectDraw"
+  },
+  {
+   "ea": "0x7376f560",
+   "name": "vtbl_IDDVideoPortContainer"
+  },
+  {
+   "ea": "0x7376f5c0",
+   "name": "vtbl_IDDVideoAccelerator"
+  },
+  {
+   "ea": "0x7376f5e0",
+   "name": "vtbl_IDirectDrawSurfaceKernel"
+  },
+  {
+   "ea": "0x7376f600",
+   "name": "vtbl_IDirectDrawKernel"
+  },
+  {
+   "ea": "0x7376f620",
+   "name": "vtbl_IDirectDrawGammaControl"
+  },
+  {
+   "ea": "0x7376f640",
+   "name": "vtbl_IDirectDrawColorControl"
+  },
+  {
+   "ea": "0x7376f660",
+   "name": "vtbl_IDirectDrawVideoPortNotify"
+  },
+  {
+   "ea": "0x7376f680",
+   "name": "vtbl_IDirectDrawVideoPort"
+  },
+  {
+   "ea": "0x7376f6e0",
+   "name": "vtbl_IDDVideoAcceleratorContainer"
+  },
+  {
+   "ea": "0x7376f700",
+   "name": "vtbl_IDirectDrawClipper_Uninit"
+  },
+  {
+   "ea": "0x7376f740",
+   "name": "vtbl_IDirectDrawPalette"
+  },
+  {
+   "ea": "0x7376f760",
+   "name": "vtbl_IDirectDraw7"
+  },
+  {
+   "ea": "0x7376f940",
+   "name": "vtbl_IDirectDraw_Uninit"
+  },
+  {
+   "ea": "0x7376f7e0",
+   "name": "vtbl_IDirectDrawX_UninitA"
+  },
+  {
+   "ea": "0x7376f860",
+   "name": "vtbl_IDirectDrawX_UninitB"
+  },
+  {
+   "ea": "0x7376f8e0",
+   "name": "vtbl_IDirectDrawX_UninitC"
+  }
+ ]
+}
