@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.3"
+#define DD2D9_VERSION "0.7.4"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -32,6 +32,7 @@ struct Config {
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int present = kPresentWindow;  // after a real mode switch: borderless window / D3D9 exclusive fullscreen
     int d3d = kD3DAuto;            // Direct3D objects for a wrapper (D7VK): auto = when loaded behind one
+    bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
     int log = 0;                   // 0 off, 1 info, 2 trace (every blit, lock, flip and palette change)
     std::wstring logFile;          // empty: dd2d9.log next to the game's executable
 };

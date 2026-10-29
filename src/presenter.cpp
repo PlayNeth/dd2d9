@@ -7,6 +7,39 @@
 
 namespace dd2d9 {
 
+// Direct3D 9 for presenting. By default Windows' own d3d9.dll, loaded by its full path:
+// next to a wrapper such as D7VK the game folder holds DXVK's d3d9.dll, whose Vulkan
+// presentation lets some drivers take the display over in a window that covers it
+// (AMD switches the display mode back to the desktop's when it lets go).
+static IDirect3D9* CreateD3D9() {
+    using Create = IDirect3D9*(WINAPI*)(UINT);
+    static const Create create = [] {
+        Create fn = &Direct3DCreate9;  // whichever d3d9.dll the process loaded
+        HMODULE m = GetModuleHandleW(L"d3d9.dll");
+        if (g_config.systemD3D9) {
+            bool loaded = false;
+            wchar_t path[MAX_PATH];
+            const UINT n = GetSystemDirectoryW(path, MAX_PATH);  // SysWOW64 for a 32-bit game on 64-bit Windows
+            if (n && n < MAX_PATH - 10) {
+                lstrcatW(path, L"\\d3d9.dll");
+                if (HMODULE sys = LoadLibraryW(path)) {
+                    if (auto f = reinterpret_cast<Create>(reinterpret_cast<void*>(GetProcAddress(sys, "Direct3DCreate9")))) {
+                        fn = f;
+                        m = sys;
+                        loaded = true;
+                    }
+                }
+            }
+            if (!loaded) DD2D9_LOG("Windows' d3d9.dll could not be loaded: using the game's");
+        }
+        char name[MAX_PATH] = "?";
+        if (m) GetModuleFileNameA(m, name, MAX_PATH);
+        DD2D9_LOG("presenting through %s", name);
+        return fn;
+    }();
+    return create(D3D_SDK_VERSION);
+}
+
 // The display adapter as Direct3D 9 describes it, for GetDeviceIdentifier (ddraw.dll
 // reports the real one too). Looked up once.
 bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out) {
@@ -14,7 +47,7 @@ bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out) {
     static int state;  // 0 not looked up, 1 found, 2 failed
     if (!state) {
         state = 2;
-        if (IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION)) {
+        if (IDirect3D9* d3d = CreateD3D9()) {
             D3DADAPTER_IDENTIFIER9 id = {};
             if (SUCCEEDED(d3d->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id))) {
                 DDDEVICEIDENTIFIER2 d = {};
@@ -165,17 +198,10 @@ bool Presenter::EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT re
     pp.PresentationInterval = g_config.vsync == kVSyncOff ? D3DPRESENT_INTERVAL_IMMEDIATE : D3DPRESENT_INTERVAL_ONE;
 
     if (!dev_) {
-        if (!d3d_) d3d_ = Direct3DCreate9(D3D_SDK_VERSION);
+        if (!d3d_) d3d_ = CreateD3D9();
         if (!d3d_) {
             DD2D9_LOG("Direct3DCreate9 failed");
             return false;
-        }
-        static bool named;  // which d3d9.dll presents: the system's, or one in the game folder (DXVK)
-        if (!named) {
-            named = true;
-            char path[MAX_PATH] = "?";
-            if (HMODULE m = GetModuleHandleW(L"d3d9.dll")) GetModuleFileNameA(m, path, MAX_PATH);
-            DD2D9_LOG("presenting through %s", path);
         }
         HRESULT hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
                                         D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE |
