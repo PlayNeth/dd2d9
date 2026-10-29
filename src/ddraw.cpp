@@ -238,6 +238,16 @@ void DDraw::HookWindow() {
     g_hook.orig = reinterpret_cast<WNDPROC>(prev);
     g_hook.hwnd = hwnd_;
     g_hook.owner = this;
+    // HookProc may stay in the window's chain for good (see UnhookWindow), and
+    // wrappers such as D7VK free and reload this DLL (Direct3D <-> software
+    // switches): keep the code loaded for the rest of the process.
+    static bool pinned;
+    if (!pinned) {
+        HMODULE self = nullptr;
+        pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                    reinterpret_cast<LPCWSTR>(&HookProc), &self) != FALSE;
+        if (!pinned) DD2D9_LOG("could not keep the DLL loaded (%lu): unloading it may crash", GetLastError());
+    }
 }
 
 void DDraw::UnhookWindow() {

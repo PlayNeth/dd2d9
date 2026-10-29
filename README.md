@@ -125,6 +125,9 @@ throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window`
 updates to a windowed primary). With `log=1`, the presenter logs every 10 seconds how much of
 the frame it converted and how long the game had to wait for it.
 
+`build/reloadtest.exe [dll]` frees and reloads dd2d9 (default `ddraw_.dll`) while the game window
+stays subclassed by a wrapper, as D7VK does when a game switches between Direct3D and software.
+
 `build/d3d7test.exe [w h [bpp]]` renders a Direct3D 7 triangle with DirectDraw fills
 and GDI text on top, then flips. It's meant to run behind D7VK and writes `d3d7test.txt`.
 
