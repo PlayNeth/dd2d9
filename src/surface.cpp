@@ -138,7 +138,10 @@ Surface::~Surface() {
     delete static_cast<SurfaceWrap<4>*>(wraps_[3]);
     delete static_cast<SurfaceWrap<7>*>(wraps_[4]);
     delete gamma;
-    if (dd->primary == this) dd->primary = nullptr;
+    if (dd->primary == this) {
+        dd->primary = nullptr;
+        dd->MarkDirty();
+    }
     for (size_t i = 0; i < dd->surfaces.size(); i++) {
         if (dd->surfaces[i] == this) {
             dd->surfaces.erase(dd->surfaces.begin() + i);
@@ -474,6 +477,14 @@ HRESULT Surface::Lock(RECT* r, DDSURFACEDESC2* out, DWORD flags) {
     }
     out->dwFlags |= DDSD_LPSURFACE;
     out->lpSurface = p;
+    // While locked, the presenter treats this area as changing (see Presenter::Loop).
+    const RECT area = r && !buf->fmt.BlockCompressed() ? *r : RECT{0, 0, buf->w, buf->h};
+    if (lockCount == 0) {
+        lockArea = area;
+    } else {
+        lockArea = {std::min(lockArea.left, area.left), std::min(lockArea.top, area.top),
+                    std::max(lockArea.right, area.right), std::max(lockArea.bottom, area.bottom)};
+    }
     lockCount++;
     DD2D9_TRACE("Lock %p%s rect=%s%ld,%ld-%ld,%ld flags=0x%lx -> %p pitch=%ld", static_cast<void*>(this),
                isPrimary ? " (primary)" : "", r ? "" : "full ", r ? r->left : 0L, r ? r->top : 0L,
@@ -487,7 +498,7 @@ HRESULT Surface::Unlock() {
     if (lockCount <= 0) return DDERR_NOTLOCKED;
     lockCount--;
     uniqueness++;
-    MarkDirtyIfVisible();
+    MarkDirtyIfVisible(&lockArea);
     return DD_OK;
 }
 
@@ -549,7 +560,7 @@ void Surface::FillRect(const RECT& r, DWORD value) {
     if (buf->fmt.BlockCompressed() || !IntersectRect(&c, &r, &bounds)) return;
     FillCore(&c, value);
     uniqueness++;
-    MarkDirtyIfVisible();
+    MarkDirtyIfVisible(&c);
 }
 
 Surface* Surface::NextMipLevel() const {
@@ -559,8 +570,10 @@ Surface* Surface::NextMipLevel() const {
     return nullptr;
 }
 
-void Surface::MarkDirtyIfVisible() {
-    if (isPrimary) dd->MarkDirty();
+void Surface::MarkDirtyIfVisible(const RECT* area) {
+    if (!isPrimary) return;
+    if (area) dd->MarkDirtyRect(*area);
+    else dd->MarkDirty();
 }
 
 HRESULT Surface::Flip(Surface* target, DWORD flags) {

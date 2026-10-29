@@ -197,6 +197,7 @@ bool Presenter::EnsureStaging(UINT w, UINT h) {
     }
     stW_ = w;
     stH_ = h;
+    stagingStale_ = true;
     return true;
 }
 
@@ -211,8 +212,40 @@ RECT Presenter::FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const {
     return RECT{x, y, x + w, y + h};
 }
 
+static double Seconds() {
+    static const double period = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return 1.0 / double(f.QuadPart);
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return double(c.QuadPart) * period;
+}
+
+// lockSeconds: time g_lock was held (the game's Blt / Flip / Lock wait for it);
+// convertSeconds: time spent converting pixels; fraction: share of the frame converted.
+void Presenter::CountPresent(double lockSeconds, double convertSeconds, double fraction) {
+    const double now = Seconds();
+    if (statsPresents_ == 0) statsStart_ = now;
+    statsPresents_++;
+    statsLock_ += lockSeconds;
+    statsLockMax_ = std::max(statsLockMax_, lockSeconds);
+    statsConvert_ += convertSeconds;
+    statsFraction_ += fraction;
+    if (now - statsStart_ < 10.0) return;
+    const double n = statsPresents_;
+    DD2D9_LOG("presenter: %u presents in %.1f s; converted %.1f%% of the frame, in %.2f ms; game lock held "
+              "%.2f ms on average, %.2f ms at most",
+              statsPresents_, now - statsStart_, statsFraction_ / n * 100.0, statsConvert_ / n * 1e3,
+              statsLock_ / n * 1e3, statsLockMax_ * 1e3);
+    statsPresents_ = 0;
+    statsLock_ = statsLockMax_ = statsConvert_ = statsFraction_ = 0;
+}
+
 // ---------------------------------------------------------------- conversion
 
+// Called with gammaLock_ held.
 void Presenter::BuildLut16(const Format& f) {
     lut16_.resize(65536);
     for (uint32_t v = 0; v < 65536; v++) {
@@ -224,59 +257,62 @@ void Presenter::BuildLut16(const Format& f) {
     lut16GammaVersion_ = gammaVersion_;
 }
 
-// Called with g_lock held: copies the visible part of the primary surface.
-void Presenter::Convert(Surface* p, const RECT& src, void* bits, int pitch) {
-    Buffer* b = p->buf;
-    const Format& f = b->fmt;
-    const int sw = src.right - src.left, sh = src.bottom - src.top;
-    const int x0 = std::max<int>(src.left, 0), x1 = std::min<int>(src.right, b->w);
+// Converts `area` of the snapshot (primary surface coordinates; parts outside
+// the surface are black) to X8R8G8B8 at `bits`, the staging surface at the
+// area's top-left corner. Runs without g_lock: if the game draws on this
+// buffer meanwhile, the frame may tear, and the next present shows it whole.
+void Presenter::Convert(const Snapshot& s, const RECT& area, void* bits, int pitch) {
+    const Buffer* b = s.buf;
+    const Format& f = s.fmt;
+    const int aw = area.right - area.left, ah = area.bottom - area.top;
+    const int x0 = std::max<int>(area.left, 0), x1 = std::min<int>(area.right, b->w);
 
+    uint8_t gamma[3][256];
     EnterCriticalSection(&gammaLock_);
+    memcpy(gamma, gammaLut_, sizeof(gamma));
+    const bool gammaOn = gammaActive_;
+    if (f.bpp == 16 && (lut16_.empty() || lut16Fmt_ != f || lut16GammaVersion_ != gammaVersion_)) BuildLut16(f);
+    LeaveCriticalSection(&gammaLock_);
     uint32_t lut8[256];
     if (f.pal8) {
-        const PALETTEENTRY* pal = p->palette ? p->palette->entries : dd_->defaultPalette;
         for (int i = 0; i < 256; i++)
-            lut8[i] = (uint32_t(gammaLut_[0][pal[i].peRed]) << 16) | (uint32_t(gammaLut_[1][pal[i].peGreen]) << 8) |
-                      gammaLut_[2][pal[i].peBlue];
-    } else if (f.bpp == 16 && (lut16_.empty() || lut16Fmt_ != f || lut16GammaVersion_ != gammaVersion_)) {
-        BuildLut16(f);
+            lut8[i] = (uint32_t(gamma[0][s.pal[i].peRed]) << 16) | (uint32_t(gamma[1][s.pal[i].peGreen]) << 8) |
+                      gamma[2][s.pal[i].peBlue];
     }
-    const bool gamma = gammaActive_;
-    const bool fastCopy = f.IsStandardX8R8G8B8() && !gamma;
+    const bool fastCopy = f.IsStandardX8R8G8B8() && !gammaOn;
 
-    for (int y = 0; y < sh; y++) {
+    for (int y = 0; y < ah; y++) {
         auto* out = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(bits) + size_t(y) * pitch);
-        const int py = src.top + y;
+        const int py = area.top + y;
         if (py < 0 || py >= b->h || x0 >= x1) {
-            memset(out, 0, size_t(sw) * 4);
+            memset(out, 0, size_t(aw) * 4);
             continue;
         }
-        if (x0 > src.left) memset(out, 0, size_t(x0 - src.left) * 4);
-        if (x1 < src.right) memset(out + (x1 - src.left), 0, size_t(src.right - x1) * 4);
-        uint32_t* o = out + (x0 - src.left);
+        if (x0 > area.left) memset(out, 0, size_t(x0 - area.left) * 4);
+        if (x1 < area.right) memset(out + (x1 - area.left), 0, size_t(area.right - x1) * 4);
+        uint32_t* o = out + (x0 - area.left);
         const uint8_t* row = b->Row(py);
         const int n = x1 - x0;
         if (f.pal8) {
-            const uint8_t* s = row + x0;
-            for (int i = 0; i < n; i++) o[i] = lut8[s[i]];
+            const uint8_t* src = row + x0;
+            for (int i = 0; i < n; i++) o[i] = lut8[src[i]];
         } else if (f.bpp == 16) {
-            const uint16_t* s = reinterpret_cast<const uint16_t*>(row) + x0;
-            for (int i = 0; i < n; i++) o[i] = lut16_[s[i]];
+            const uint16_t* src = reinterpret_cast<const uint16_t*>(row) + x0;
+            for (int i = 0; i < n; i++) o[i] = lut16_[src[i]];
         } else if (fastCopy) {
             memcpy(o, reinterpret_cast<const uint32_t*>(row) + x0, size_t(n) * 4);
         } else {
             const int bytes = int(f.Bytes());
-            const uint8_t* s = row + x0 * bytes;
-            for (int i = 0; i < n; i++, s += bytes) {
-                uint32_t v = bytes == 3 ? (uint32_t(s[0]) | (uint32_t(s[1]) << 8) | (uint32_t(s[2]) << 16))
-                                        : *reinterpret_cast<const uint32_t*>(s);
+            const uint8_t* src = row + x0 * bytes;
+            for (int i = 0; i < n; i++, src += bytes) {
+                uint32_t v = bytes == 3 ? (uint32_t(src[0]) | (uint32_t(src[1]) << 8) | (uint32_t(src[2]) << 16))
+                                        : *reinterpret_cast<const uint32_t*>(src);
                 uint32_t c = PixelToARGB(f, v, nullptr);
-                o[i] = (uint32_t(gammaLut_[0][(c >> 16) & 0xFF]) << 16) |
-                       (uint32_t(gammaLut_[1][(c >> 8) & 0xFF]) << 8) | gammaLut_[2][c & 0xFF];
+                o[i] = (uint32_t(gamma[0][(c >> 16) & 0xFF]) << 16) | (uint32_t(gamma[1][(c >> 8) & 0xFF]) << 8) |
+                       gamma[2][c & 0xFF];
             }
         }
     }
-    LeaveCriticalSection(&gammaLock_);
 }
 
 // ---------------------------------------------------------------- render loop
@@ -316,6 +352,7 @@ void Presenter::Loop() {
         }
         if (!havePrimary || !hwnd || !IsWindow(hwnd) || IsIconic(hwnd)) {
             active_ = false;
+            stagingStale_ = true;  // the device may go meanwhile: start over with a full frame
             // After a wrapper's 3D device, the screen shows its last frame, which
             // the primary surface never held: wait for the game to draw again
             // instead of refreshing with stale content.
@@ -350,25 +387,65 @@ void Presenter::Loop() {
             continue;
         }
 
-        // Lock the D3D surface before taking g_lock: the lock may wait for the
-        // GPU, and the game must not wait for that in every Blt and Flip.
-        D3DLOCKED_RECT lr;
-        if (FAILED(staging_->LockRect(&lr, nullptr, 0))) continue;
+        // Under g_lock, only find out what changed and take a reference to the
+        // pixels: they are converted without it, so the game's Blt, Lock and Flip
+        // never wait for the conversion.
+        Snapshot snap;
+        RECT area = {0, 0, 0, 0};  // what to convert, in primary surface coordinates
         uint64_t seq = 0;
-        bool converted = false;
+        bool primaryExists = false;
+        double lockTime;
         {
             Guard l;
-            if (dd_->primary) {
-                Convert(dd_->primary, src, lr.pBits, lr.Pitch);
+            const double t0 = Seconds();
+            Surface* p = dd_->primary;
+            if (p) {
+                primaryExists = true;
                 seq = ++convertSeq_;
-                converted = true;
-                DD2D9_TRACE("present #%llu: primary %p, palette %p v%lu", static_cast<unsigned long long>(seq),
-                           static_cast<void*>(dd_->primary), static_cast<void*>(dd_->primary->palette),
-                           dd_->primary->palette ? dd_->primary->palette->version : 0);
+                RECT changed;
+                bool all = dd_->TakeDirty(&changed);
+                // The staging surface holds the last converted frame: a partial update
+                // needs it to show this very surface and buffer, at the same position.
+                all = all || stagingStale_ || !EqualRect(&src, &lastSrc_) || p != lastPrimary_ || p->buf != lastBuf_;
+                if (p->dcOut) all = true;  // GDI may be drawing anywhere
+                else if (p->lockCount) UnionRect(&changed, &changed, &p->lockArea);  // being written right now
+                if (all) area = src;
+                else if (!IntersectRect(&area, &changed, &src)) SetRectEmpty(&area);
+                if (!IsRectEmpty(&area)) {
+                    snap.buf = p->buf;
+                    snap.buf->AddRef();
+                    snap.fmt = snap.buf->fmt;
+                    if (snap.fmt.pal8)
+                        memcpy(snap.pal, p->palette ? p->palette->entries : dd_->defaultPalette, sizeof(snap.pal));
+                }
+                lastSrc_ = src;
+                lastPrimary_ = p;
+                lastBuf_ = p->buf;
+                stagingStale_ = false;
+                DD2D9_TRACE("present #%llu: primary %p, area %ld,%ld-%ld,%ld, palette %p v%lu",
+                           static_cast<unsigned long long>(seq), static_cast<void*>(p), area.left, area.top,
+                           area.right, area.bottom, static_cast<void*>(p->palette),
+                           p->palette ? p->palette->version : 0);
             }
+            lockTime = Seconds() - t0;
         }
-        staging_->UnlockRect();
-        if (!converted) continue;
+        if (!primaryExists) continue;
+        double convertTime = 0;
+        if (snap.buf) {
+            RECT dst = {area.left - src.left, area.top - src.top, area.right - src.left, area.bottom - src.top};
+            D3DLOCKED_RECT lr;
+            if (SUCCEEDED(staging_->LockRect(&lr, &dst, 0))) {
+                const double t0 = Seconds();  // the lock itself may wait for the GPU: not counted
+                Convert(snap, area, lr.pBits, lr.Pitch);
+                convertTime = Seconds() - t0;
+                staging_->UnlockRect();
+            } else {
+                stagingStale_ = true;  // convert everything next time
+            }
+            snap.buf->Release();
+        }
+        CountPresent(lockTime, convertTime,
+                     double(area.right - area.left) * (area.bottom - area.top) / (double(sw) * sh));
 
         IDirect3DSurface9* bb = nullptr;
         if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) {

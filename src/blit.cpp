@@ -1,6 +1,8 @@
 // Software blitter: Blt / BltFast / color fill.
 #include "objects.h"
 
+#include <emmintrin.h>
+
 #include <cstdio>
 
 namespace dd2d9 {
@@ -69,17 +71,23 @@ struct BlitJob {
     const PALETTEENTRY* spal;
 };
 
+// Scratch buffers reused from blit to blit; every blit runs with g_lock held.
+std::vector<RECT> g_clips;
+std::vector<int> g_xmap;
+std::vector<uint8_t> g_temp;
+
 // Maps each clipped destination column to a source column.
 // Destination rectangles can be huge when a clipper is attached (only the
 // clipped part is drawn), so the mapping is done in 64-bit arithmetic.
-static void BuildXMap(const BlitJob& j, std::vector<int>& xmap) {
+static const int* BuildXMap(const BlitJob& j) {
     const int64_t dw = int64_t(j.d0.right) - j.d0.left, sw = int64_t(j.s0.right) - j.s0.left;
-    xmap.resize(size_t(j.dc.right - j.dc.left));
+    g_xmap.resize(size_t(j.dc.right - j.dc.left));
     for (int x = j.dc.left; x < j.dc.right; x++) {
         int64_t rx = int64_t(x) - j.d0.left;
         if (j.mirrorX) rx = dw - 1 - rx;
-        xmap[size_t(x - j.dc.left)] = int(j.s0.left + rx * sw / dw);
+        g_xmap[size_t(x - j.dc.left)] = int(j.s0.left + rx * sw / dw);
     }
+    return g_xmap.data();
 }
 
 static inline int MapY(const BlitJob& j, int y) {
@@ -89,53 +97,106 @@ static inline int MapY(const BlitJob& j, int y) {
     return int(j.s0.top + ry * sh / dh);
 }
 
+// In-range test for color keys: lo <= k <= hi in one unsigned comparison.
+static inline bool InKey(uint32_t k, uint32_t lo, uint32_t hi) { return k - lo <= hi - lo; }
+
+// SSE2 helpers per pixel size.
+template <typename T> struct Simd;
+template <> struct Simd<uint8_t> {
+    static __m128i Set(uint32_t v) { return _mm_set1_epi8(char(v)); }
+    static __m128i Eq(__m128i a, __m128i b) { return _mm_cmpeq_epi8(a, b); }
+};
+template <> struct Simd<uint16_t> {
+    static __m128i Set(uint32_t v) { return _mm_set1_epi16(short(v)); }
+    static __m128i Eq(__m128i a, __m128i b) { return _mm_cmpeq_epi16(a, b); }
+};
+template <> struct Simd<uint32_t> {
+    static __m128i Set(uint32_t v) { return _mm_set1_epi32(int(v)); }
+    static __m128i Eq(__m128i a, __m128i b) { return _mm_cmpeq_epi32(a, b); }
+};
+
+// One row of a 1:1 copy with a single-color source key (the usual sprite blit):
+// pixels whose masked value equals `key` are left alone.
 template <typename T>
-static void BlitSameFormat(const BlitJob& j) {
-    const int dw = j.d0.right - j.d0.left, sw = j.s0.right - j.s0.left;
-    const bool rowCopy = !j.mirrorX && dw == sw && !j.srcKey && !j.dstKey;
-    std::vector<int> xmap;
-    if (!rowCopy) BuildXMap(j, xmap);
+static void KeyRow(T* d, const T* s, int n, uint32_t mask, uint32_t key) {
+    constexpr int kPerVector = 16 / sizeof(T);
+    const __m128i vmask = Simd<T>::Set(mask), vkey = Simd<T>::Set(key);
+    int i = 0;
+    for (; i + kPerVector <= n; i += kPerVector) {
+        const __m128i sv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + i));
+        const __m128i keyed = Simd<T>::Eq(_mm_and_si128(sv, vmask), vkey);
+        const int bits = _mm_movemask_epi8(keyed);
+        if (bits == 0xFFFF) continue;  // all transparent
+        __m128i* dp = reinterpret_cast<__m128i*>(d + i);
+        if (bits == 0) {  // all opaque
+            _mm_storeu_si128(dp, sv);
+            continue;
+        }
+        const __m128i dv = _mm_loadu_si128(dp);
+        _mm_storeu_si128(dp, _mm_or_si128(_mm_and_si128(keyed, dv), _mm_andnot_si128(keyed, sv)));
+    }
+    for (; i < n; i++) {
+        const uint32_t v = s[i];
+        if ((v & mask) != key) d[i] = T(v);
+    }
+}
+
+// Any combination of keys, 1:1 (Direct) or stretched / mirrored columns.
+template <typename T, bool Direct, bool SrcKey, bool DstKey>
+static void KeyRows(const BlitJob& j, const int* xmap) {
     const int n = j.dc.right - j.dc.left;
+    const int sx = j.s0.left + (j.dc.left - j.d0.left);  // first source column when Direct
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
         const T* srow = reinterpret_cast<const T*>(j.src + MapY(j, y) * j.spitch);
-        if (rowCopy) {
-            memcpy(drow, srow + j.s0.left + (j.dc.left - j.d0.left), size_t(n) * sizeof(T));
-            continue;
-        }
         for (int i = 0; i < n; i++) {
-            uint32_t v = srow[xmap[size_t(i)]];
-            if (j.srcKey) {
-                uint32_t k = v & j.skMask;
-                if (k >= j.skLo && k <= j.skHi) continue;
-            }
-            if (j.dstKey) {
-                uint32_t k = uint32_t(drow[i]) & j.dkMask;
-                if (k < j.dkLo || k > j.dkHi) continue;
-            }
+            const uint32_t v = Direct ? srow[sx + i] : srow[xmap[i]];
+            if (SrcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
+            if (DstKey && !InKey(uint32_t(drow[i]) & j.dkMask, j.dkLo, j.dkHi)) continue;
             drow[i] = T(v);
         }
     }
 }
 
+template <typename T, bool Direct>
+static void KeyRowsDispatch(const BlitJob& j, const int* xmap) {
+    if (j.srcKey && j.dstKey) KeyRows<T, Direct, true, true>(j, xmap);
+    else if (j.srcKey) KeyRows<T, Direct, true, false>(j, xmap);
+    else if (j.dstKey) KeyRows<T, Direct, false, true>(j, xmap);
+    else KeyRows<T, Direct, false, false>(j, xmap);
+}
+
+template <typename T>
+static void BlitSameFormat(const BlitJob& j) {
+    const int dw = j.d0.right - j.d0.left, sw = j.s0.right - j.s0.left;
+    const bool direct = !j.mirrorX && dw == sw;
+    const int n = j.dc.right - j.dc.left;
+    if (direct && !j.dstKey && (!j.srcKey || j.skLo == j.skHi)) {
+        const int sx = j.s0.left + (j.dc.left - j.d0.left);
+        for (int y = j.dc.top; y < j.dc.bottom; y++) {
+            T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
+            const T* srow = reinterpret_cast<const T*>(j.src + MapY(j, y) * j.spitch) + sx;
+            if (j.srcKey) KeyRow(drow, srow, n, j.skMask, j.skLo);
+            else memcpy(drow, srow, size_t(n) * sizeof(T));
+        }
+    } else if (direct) {
+        KeyRowsDispatch<T, true>(j, nullptr);
+    } else {
+        KeyRowsDispatch<T, false>(j, BuildXMap(j));
+    }
+}
+
 static void BlitGeneric(const BlitJob& j) {
-    std::vector<int> xmap;
-    BuildXMap(j, xmap);
+    const int* xmap = BuildXMap(j);
     const int n = j.dc.right - j.dc.left;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         uint8_t* drow = j.dst + y * j.dpitch + j.dc.left * j.dbytes;
         const uint8_t* srow = j.src + MapY(j, y) * j.spitch;
         for (int i = 0; i < n; i++) {
-            uint32_t v = ReadPx(srow + xmap[size_t(i)] * j.sbytes, j.sbytes);
-            if (j.srcKey) {
-                uint32_t k = v & j.skMask;
-                if (k >= j.skLo && k <= j.skHi) continue;
-            }
+            uint32_t v = ReadPx(srow + xmap[i] * j.sbytes, j.sbytes);
+            if (j.srcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
             uint8_t* dp = drow + i * j.dbytes;
-            if (j.dstKey) {
-                uint32_t k = ReadPx(dp, j.dbytes) & j.dkMask;
-                if (k < j.dkLo || k > j.dkHi) continue;
-            }
+            if (j.dstKey && !InKey(ReadPx(dp, j.dbytes) & j.dkMask, j.dkLo, j.dkHi)) continue;
             if (j.convert) v = ARGBToPixel(*j.df, PixelToARGB(*j.sf, v, j.spal));
             WritePx(dp, j.dbytes, v);
         }
@@ -146,6 +207,13 @@ static bool SameLayout(const Format& a, const Format& b) {
     if (a.bpp != b.bpp || a.pal8 != b.pal8 || a.zbuf != b.zbuf) return false;
     if (a.pal8 || a.zbuf) return true;
     return a.r == b.r && a.g == b.g && a.b == b.b;  // alpha vs. X bits copy unchanged
+}
+
+// Reports the union of the drawn rectangles to the presenter (primary surface only).
+template <class Clips>
+static void MarkClipsDirty(Surface* s, const Clips& clips) {
+    if (!s->isPrimary) return;
+    for (const RECT& c : clips) s->MarkDirtyIfVisible(&c);
 }
 
 }  // namespace
@@ -163,13 +231,15 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
 // destination rectangle must lie inside the destination surface; with one, the
 // blit is clipped to the clipper's region.
 HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper) {
-    GdiFlush();
+    // GDI may still be drawing on a surface whose DC is out (ReleaseDC flushes).
+    if (dcOut || (src && src->dcOut)) GdiFlush();
     if (buf->fmt.fourcc) return DDERR_UNSUPPORTED;
     const RECT bounds = {0, 0, buf->w, buf->h};
     RECT d = dstRect ? *dstRect : bounds;
     if (d.right <= d.left || d.bottom <= d.top) return DDERR_INVALIDRECT;
 
-    std::vector<RECT> clips;
+    std::vector<RECT>& clips = g_clips;
+    clips.clear();
     if (useClipper && clipper) {
         for (const RECT& c : clipper->Region(this)) {
             RECT r;
@@ -185,7 +255,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         const DWORD value = (flags & DDBLT_COLORFILL) ? fx->dwFillColor : fx->dwFillDepth;
         for (RECT& c : clips) FillCore(&c, value);
         uniqueness++;
-        MarkDirtyIfVisible();
+        MarkClipsDirty(this, clips);
         return DD_OK;
     }
     if (flags & DDBLT_ROP) {
@@ -193,7 +263,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         if (fx->dwROP == BLACKNESS || fx->dwROP == WHITENESS) {
             for (RECT& c : clips) FillCore(&c, fx->dwROP == BLACKNESS ? 0 : 0xFFFFFFFFu);
             uniqueness++;
-            MarkDirtyIfVisible();
+            MarkClipsDirty(this, clips);
             return DD_OK;
         }
         if (fx->dwROP != SRCCOPY) {
@@ -262,11 +332,11 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     }
 
     // Copy the source first when it overlaps the destination in the same memory.
-    std::vector<uint8_t> temp;
     if (sb == buf) {
         RECT ov;
         if (IntersectRect(&ov, &s, &d)) {
             const int sh = s.bottom - s.top;
+            std::vector<uint8_t>& temp = g_temp;
             temp.resize(size_t(sh) * size_t(sb->pitch));
             memcpy(temp.data(), sb->Row(s.top), temp.size());
             j.src = temp.data();
@@ -289,7 +359,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         }
     }
     uniqueness++;
-    MarkDirtyIfVisible();
+    MarkClipsDirty(this, clips);
     return DD_OK;
 }
 

@@ -2,13 +2,18 @@
 //   ddtest unit     - pixel-exact checks of blits, keys, conversion, GDI, flipping
 //   ddtest fs8      - exclusive 640x480x8 flip-chain animation with palette and GDI text
 //   ddtest win      - windowed (DDSCL_NORMAL) 32-bit desktop, blits to the primary through a clipper
+//   ddtest fuzz     - random same-format blits (keys, ranges, mirroring, stretching, overlap)
+//                     compared with a reference implementation, for 8/16/32-bit formats
 // Results are printed to ddtest.txt next to the executable.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ddraw.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 static FILE* g_out;
 static int g_fail;
@@ -528,6 +533,202 @@ static int RunWindowed() {
     return 0;
 }
 
+// ---------------------------------------------------------------- fuzz
+
+// A surface and a model of what it should contain.
+struct FuzzSurface {
+    IDirectDrawSurface7* s = nullptr;
+    int w = 0, h = 0, bytes = 0;
+    std::vector<uint32_t> px;  // expected pixels, row-major
+
+    void Read(std::vector<uint32_t>& out) const {
+        DDSURFACEDESC2 d = {};
+        d.dwSize = sizeof(d);
+        out.assign(size_t(w) * h, 0);
+        if (FAILED(s->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) return;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                memcpy(&out[size_t(y) * w + x], static_cast<uint8_t*>(d.lpSurface) + y * d.lPitch + x * bytes,
+                       size_t(bytes));
+        s->Unlock(nullptr);
+    }
+    void Write() {
+        DDSURFACEDESC2 d = {};
+        d.dwSize = sizeof(d);
+        if (FAILED(s->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) return;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                memcpy(static_cast<uint8_t*>(d.lpSurface) + y * d.lPitch + x * bytes, &px[size_t(y) * w + x],
+                       size_t(bytes));
+        s->Unlock(nullptr);
+    }
+};
+
+static uint32_t g_rng = 12345;
+static uint32_t Rand() {
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 17;
+    g_rng ^= g_rng << 5;
+    return g_rng;
+}
+static int RandIn(int lo, int hi) { return lo + int(Rand() % uint32_t(hi - lo + 1)); }
+
+// Runs of key-range values and of random values, so that 16-byte chunks are
+// sometimes all transparent, all opaque, or mixed.
+// Bits outside the key mask (alpha, the top bit of 555) are random everywhere.
+static void FuzzFill(FuzzSurface& f, uint32_t valueMask, uint32_t keyMask, uint32_t keyLo, uint32_t keyHi) {
+    size_t i = 0;
+    while (i < f.px.size()) {
+        const int run = RandIn(1, 48);
+        const bool key = Rand() % 2;
+        for (int k = 0; k < run && i < f.px.size(); k++, i++) {
+            uint32_t v = Rand() & valueMask;
+            if (key) v = (v & ~keyMask) | (keyLo + Rand() % (keyHi - keyLo + 1));
+            f.px[i] = v & valueMask;
+        }
+    }
+    f.Write();
+}
+
+static int RunFuzz() {
+    IDirectDraw7* dd = nullptr;
+    HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    CHECK(SUCCEEDED(hr), "DirectDrawCreateEx -> 0x%08lx", hr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+
+    struct Fmt {
+        const char* name;
+        DWORD bpp, flags, r, g, b;
+        uint32_t keyMask;  // bits compared by color keys (no alpha / unused bits)
+    };
+    const Fmt fmts[] = {
+        {"8-bit", 8, DDPF_RGB | DDPF_PALETTEINDEXED8, 0, 0, 0, 0xFF},
+        {"16-bit 565", 16, DDPF_RGB, 0xF800, 0x07E0, 0x001F, 0xFFFF},
+        {"16-bit 555", 16, DDPF_RGB, 0x7C00, 0x03E0, 0x001F, 0x7FFF},
+        {"32-bit", 32, DDPF_RGB, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF},
+    };
+    for (const Fmt& fm : fmts) {
+        const uint32_t valueMask = fm.bpp == 32 ? 0xFFFFFFFFu : ((1u << fm.bpp) - 1);
+        FuzzSurface surf[2];
+        const int sizes[2][2] = {{83, 41}, {97, 53}};
+        for (int k = 0; k < 2; k++) {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+            d.dwWidth = DWORD(sizes[k][0]);
+            d.dwHeight = DWORD(sizes[k][1]);
+            d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            d.ddpfPixelFormat.dwFlags = fm.flags;
+            d.ddpfPixelFormat.dwRGBBitCount = fm.bpp;
+            d.ddpfPixelFormat.dwRBitMask = fm.r;
+            d.ddpfPixelFormat.dwGBitMask = fm.g;
+            d.ddpfPixelFormat.dwBBitMask = fm.b;
+            hr = dd->CreateSurface(&d, &surf[k].s, nullptr);
+            if (FAILED(hr)) {
+                CHECK(false, "%s: CreateSurface -> 0x%08lx", fm.name, hr);
+                return 1;
+            }
+            surf[k].w = sizes[k][0];
+            surf[k].h = sizes[k][1];
+            surf[k].bytes = int(fm.bpp / 8);
+            surf[k].px.assign(size_t(surf[k].w) * surf[k].h, 0);
+        }
+        int mismatches = 0, blits = 0;
+        char firstBad[200] = "";
+        std::vector<uint32_t> got;
+        for (int iter = 0; iter < 3000; iter++) {
+            // Keys: a single color, or a range (DDCKEY_COLORSPACE).
+            uint32_t skLo = Rand() & fm.keyMask, skHi = skLo;
+            if (Rand() % 4 == 0) skHi = std::min<uint32_t>(fm.keyMask, skLo + Rand() % 300);
+            uint32_t dkLo = Rand() & fm.keyMask, dkHi = dkLo;
+            if (Rand() % 3 == 0) dkHi = std::min<uint32_t>(fm.keyMask, dkLo + Rand() % 5000);
+            if (iter % 40 == 0) {  // new contents now and then
+                FuzzFill(surf[0], valueMask, fm.keyMask, skLo, skHi);
+                FuzzFill(surf[1], valueMask, fm.keyMask, dkLo, dkHi);
+            }
+            const bool same = Rand() % 8 == 0;  // within one surface (overlapping copies)
+            FuzzSurface& src = surf[same ? 1 : 0];
+            FuzzSurface& dst = surf[1];
+            DDCOLORKEY sk = {skLo, skHi}, dk = {dkLo, dkHi};
+            src.s->SetColorKey(DDCKEY_SRCBLT | (skHi != skLo ? DDCKEY_COLORSPACE : 0), &sk);
+            dst.s->SetColorKey(DDCKEY_DESTBLT | (dkHi != dkLo ? DDCKEY_COLORSPACE : 0), &dk);
+
+            const int sw = RandIn(1, std::min(src.w, 70)), sh = RandIn(1, std::min(src.h, 30));
+            const bool stretch = Rand() % 4 == 0;
+            const int dw = stretch ? RandIn(1, std::min(dst.w, 90)) : sw, dh = stretch ? RandIn(1, dst.h) : sh;
+            RECT sr = {0, 0, sw, sh};
+            OffsetRect(&sr, RandIn(0, src.w - sw), RandIn(0, src.h - sh));
+            RECT dr = {0, 0, dw, dh};
+            OffsetRect(&dr, RandIn(0, dst.w - dw), RandIn(0, dst.h - dh));
+
+            const int keyMode = RandIn(0, 4);  // none, src, src override, dest, src + dest
+            DWORD flags = DDBLT_WAIT;
+            DDBLTFX fx = {};
+            fx.dwSize = sizeof(fx);
+            bool useSrc = false, useDst = false;
+            uint32_t eLo = skLo, eHi = skHi;
+            if (keyMode == 1 || keyMode == 4) {
+                flags |= DDBLT_KEYSRC;
+                useSrc = true;
+            }
+            if (keyMode == 2) {
+                // An override key is one color: the high value is ignored.
+                flags |= DDBLT_KEYSRCOVERRIDE;
+                fx.ddckSrcColorkey.dwColorSpaceLowValue = Rand() % 2 ? skLo : (Rand() & valueMask);
+                fx.ddckSrcColorkey.dwColorSpaceHighValue = Rand();
+                eLo = eHi = fx.ddckSrcColorkey.dwColorSpaceLowValue & fm.keyMask;
+                useSrc = true;
+            }
+            if (keyMode == 3 || keyMode == 4) {
+                flags |= DDBLT_KEYDEST;
+                useDst = true;
+            }
+            const bool mirrorX = Rand() % 5 == 0, mirrorY = Rand() % 5 == 0;
+            if (mirrorX || mirrorY) {
+                flags |= DDBLT_DDFX;
+                fx.dwDDFX = (mirrorX ? DDBLTFX_MIRRORLEFTRIGHT : 0) | (mirrorY ? DDBLTFX_MIRRORUPDOWN : 0);
+            }
+
+            // Reference, reading the source as it was before the blit.
+            const std::vector<uint32_t> srcBefore = src.px;
+            for (int y = dr.top; y < dr.bottom; y++) {
+                int64_t ry = y - dr.top;
+                if (mirrorY) ry = dh - 1 - ry;
+                const int sy = int(sr.top + ry * sh / dh);
+                for (int x = dr.left; x < dr.right; x++) {
+                    int64_t rx = x - dr.left;
+                    if (mirrorX) rx = dw - 1 - rx;
+                    const int sx = int(sr.left + rx * sw / dw);
+                    const uint32_t v = srcBefore[size_t(sy) * src.w + sx];
+                    if (useSrc && (v & fm.keyMask) >= eLo && (v & fm.keyMask) <= eHi) continue;
+                    const uint32_t d = dst.px[size_t(y) * dst.w + x] & fm.keyMask;
+                    if (useDst && (d < dkLo || d > dkHi)) continue;
+                    dst.px[size_t(y) * dst.w + x] = v;
+                }
+            }
+            hr = dst.s->Blt(&dr, src.s, &sr, flags, &fx);
+            blits++;
+            dst.Read(got);
+            if (FAILED(hr) || got != dst.px) {
+                if (!mismatches)
+                    sprintf(firstBad, "hr 0x%08lx, %ldx%ld -> %ldx%ld, keys %d, mirror %d%d, same %d", hr,
+                            sr.right - sr.left, sr.bottom - sr.top, dr.right - dr.left, dr.bottom - dr.top, keyMode,
+                            mirrorX, mirrorY, same);
+                mismatches++;
+                dst.px = got;  // continue from what is there
+            }
+        }
+        CHECK(mismatches == 0, "%s: %d random blits match the reference (%d mismatches%s%s)", fm.name, blits,
+              mismatches, mismatches ? "; first: " : "", firstBad);
+        surf[0].s->Release();
+        surf[1].s->Release();
+    }
+    dd->Release();
+    return 0;
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
@@ -542,6 +743,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
         r = RunFullscreen8(w, h);
     }
     else if (strstr(cmd, "win")) r = RunWindowed();
+    else if (strstr(cmd, "fuzz")) r = RunFuzz();
     else r = RunUnit();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);

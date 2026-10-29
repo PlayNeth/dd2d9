@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '0.5.0',
+  version : '0.6.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -27,6 +27,13 @@ ddraw = shared_library('ddraw',
 # Test program; links against the system ddraw.dll import library, so it runs
 # with whichever ddraw.dll sits next to it.
 executable('ddtest', 'tests/ddtest.cpp',
+  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
+                  cpp.find_library('user32')],
+  link_args : static_link + ['-mwindows'],
+  install : false)
+
+# Performance benchmark (blitter throughput, flip loop, windowed updates).
+executable('ddbench', 'tests/ddbench.cpp',
   dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
                   cpp.find_library('user32')],
   link_args : static_link + ['-mwindows'],

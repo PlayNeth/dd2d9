@@ -156,7 +156,9 @@ public:
     int H() const { return buf->h; }
     bool IsFront() const { return isPrimary; }
     const PALETTEENTRY* EffectivePalette() const;
-    void MarkDirtyIfVisible();
+    // Tells the presenter that `area` of the primary surface changed (g_lock
+    // held), or with null, the whole image (any thread).
+    void MarkDirtyIfVisible(const RECT* area = nullptr);
     void ReplaceBuffer(Buffer* b);  // takes ownership of b
     void FillRect(const RECT& r, DWORD value);  // raw pixel value, clipped to the surface; g_lock held
     Surface* NextMipLevel() const;              // next smaller level of a mipmap chain, or null
@@ -176,6 +178,7 @@ public:
     bool hasCk[4] = {};
     bool isPrimary = false;
     LONG lockCount = 0;
+    RECT lockArea = {0, 0, 0, 0};  // union of the rectangles locked now (with lockCount > 0)
     HDC dcOut = nullptr;
     DWORD uniqueness = 1, priority = 0, lod = 0;
     GammaControl* gamma = nullptr;
@@ -221,9 +224,17 @@ private:
     bool EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT refresh);
     bool EnsureStaging(UINT w, UINT h);
     void ReleaseDevice();
-    void Convert(Surface* primary, const RECT& src, void* bits, int pitch);
+    // What the presenter copies from the primary surface under g_lock; the
+    // pixels themselves are converted afterwards, without it.
+    struct Snapshot {
+        Buffer* buf = nullptr;  // referenced: the game may flip or release it meanwhile
+        Format fmt;
+        PALETTEENTRY pal[256];  // 8-bit formats
+    };
+    void Convert(const Snapshot& s, const RECT& area, void* bits, int pitch);
     void BuildLut16(const Format& f);
     RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
+    void CountPresent(double lockSeconds, double convertSeconds, double fraction);
 
     DDraw* dd_;
     HANDLE thread_ = nullptr;
@@ -242,10 +253,21 @@ private:
     bool exclusiveFailed_ = false; // exclusive presentation failed once: stay windowed
     UINT bbW_ = 0, bbH_ = 0, stW_ = 0, stH_ = 0;
 
+    // What the staging surface holds (presenter thread only): a partial update
+    // is only possible while these match the primary surface.
+    bool stagingStale_ = true;  // new staging surface, failed update, or content not shown for a while
+    RECT lastSrc_ = {0, 0, 0, 0};
+    const Surface* lastPrimary_ = nullptr;
+    const Buffer* lastBuf_ = nullptr;
+
     uint64_t convertSeq_ = 0;
     uint64_t presentedSeq_ = 0;
     SRWLOCK seqLock_ = SRWLOCK_INIT;
     CONDITION_VARIABLE seqCv_ = CONDITION_VARIABLE_INIT;
+
+    // Statistics, logged every 10 s while presenting (presenter thread only).
+    double statsStart_ = 0, statsLock_ = 0, statsLockMax_ = 0, statsConvert_ = 0, statsFraction_ = 0;
+    unsigned statsPresents_ = 0;
 
     std::vector<uint32_t> lut16_;
     Format lut16Fmt_;
@@ -301,7 +323,31 @@ public:
     // should use an exclusive-fullscreen device of this size and refresh rate.
     bool ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const;
     bool Exclusive() const { return (coop_ & DDSCL_EXCLUSIVE) != 0; }
-    void MarkDirty() { if (presenter_) presenter_->MarkDirty(); }
+    // The whole visible image changed (flip, palette, window...). Any thread.
+    void MarkDirty() {
+        InterlockedExchange(&dirtyAll_, 1);
+        if (presenter_) presenter_->MarkDirty();
+    }
+    // Part of the primary surface changed. Called with g_lock held.
+    void MarkDirtyRect(const RECT& r) {
+        if (r.right <= r.left || r.bottom <= r.top) return;
+        if (dirtyRect_.right <= dirtyRect_.left || dirtyRect_.bottom <= dirtyRect_.top) {
+            dirtyRect_ = r;
+        } else {
+            dirtyRect_.left = std::min(dirtyRect_.left, r.left);
+            dirtyRect_.top = std::min(dirtyRect_.top, r.top);
+            dirtyRect_.right = std::max(dirtyRect_.right, r.right);
+            dirtyRect_.bottom = std::max(dirtyRect_.bottom, r.bottom);
+        }
+        if (presenter_) presenter_->MarkDirty();
+    }
+    // What changed since the last call, for the presenter (g_lock held). Returns
+    // true if everything did; otherwise *r is the changed area (maybe empty).
+    bool TakeDirty(RECT* r) {
+        *r = dirtyRect_;
+        SetRectEmpty(&dirtyRect_);
+        return InterlockedExchange(&dirtyAll_, 0) != 0;
+    }
     Presenter* GetPresenter() { return presenter_; }
     void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
     bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
@@ -338,6 +384,8 @@ private:
     LONG ref_ = 0;
     LONG tornDown_ = 0;
     LONG devices3D_ = 0;
+    volatile LONG dirtyAll_ = 1;
+    RECT dirtyRect_ = {0, 0, 0, 0};  // guarded by g_lock
     LONG intRef_ = 1;  // released when the last external reference goes away
     void* wraps_[4] = {};
     HWND hwnd_ = nullptr;

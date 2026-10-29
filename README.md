@@ -9,11 +9,13 @@ turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
 - **All blitting is done in software**: color fill, raster ops (SRCCOPY,
   BLACKNESS, WHITENESS), stretch, left-right and up-down mirroring, source and
   destination color keys (including ranges), overlapping copies, and conversion
-  between 8/16/24/32-bit formats.
+  between 8/16/24/32-bit formats. Color-keyed copies (sprites) use SSE2.
 - **Flip chains** swap memory between surfaces, as the hardware does.
 - **A presenter thread owns the D3D9 device.** It converts the primary surface to
   X8R8G8B8 (applying the palette and the gamma ramp), scales it into the game
-  window with `StretchRect` and presents.
+  window with `StretchRect` and presents. Only the changed part of the image is
+  converted, and the conversion runs without blocking the game: it holds the
+  DirectDraw lock only long enough to see what changed.
 - **The game decides vsync by default.** `Flip` waits until its frame is
   presented unless the game passes `DDFLIP_NOVSYNC`, and a limiter caps it at
   the refresh rate when the driver doesn't block on vsync. `vsync=on` and
@@ -113,8 +115,15 @@ install DXVK's `d3d9.dll` into the prefix, or put it next to the game.
 - `ddtest fs8` runs a 640×480×8 exclusive-mode flip-chain animation and checks
   the pacing.
 - `ddtest win` runs a windowed primary with a clipper.
+- `ddtest fuzz` runs thousands of random blits (8/16/32-bit, color keys and key
+  ranges, mirroring, stretching, overlapping copies) against a reference implementation.
 
-All 55 checks pass under Wine 11 (wined3d, Xvfb).
+All 60 checks pass under Wine 11 (wined3d, Xvfb).
+
+`build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter
+throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small
+updates to a windowed primary). With `log=1`, the presenter logs every 10 seconds how much of
+the frame it converted and how long the game had to wait for it.
 
 `build/d3d7test.exe [w h [bpp]]` renders a Direct3D 7 triangle with DirectDraw fills
 and GDI text on top, then flips. It's meant to run behind D7VK and writes `d3d7test.txt`.
