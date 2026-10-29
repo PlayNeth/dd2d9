@@ -486,6 +486,7 @@ public:
     void NoteDisplayMode();
     void PollDisplayChange();     // the display mode changed behind dd2d9's back: surfaces lost
     bool InOwnMode() const;  // the display is in the mode this object set and switched to
+    bool EmulatedMode() const;  // exclusive, in a mode set but not switched to (scaled or windowed)
     bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
     // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which

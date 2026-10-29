@@ -367,9 +367,14 @@ static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep) {
     case EXCEPTION_PRIV_INSTRUCTION: what = "privileged instruction"; break;
     case EXCEPTION_INT_DIVIDE_BY_ZERO: what = "integer division by zero"; break;
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: what = "array bounds exceeded"; break;
+    // Visual C++'s throw: a game's own error handling (Unreal engine games throw one for a
+    // "critical error" and then show their error box), usually caught. Counted apart, so
+    // a game that throws them routinely can't use up the crashes' log lines.
+    case 0xE06D7363: what = "C++ exception"; break;
     default: return EXCEPTION_CONTINUE_SEARCH;  // not a crash (or, for stack overflows, no stack left to log with)
     }
-    if (InterlockedIncrement(&logged) > 5) return EXCEPTION_CONTINUE_SEARCH;
+    static LONG loggedThrows;
+    if (InterlockedIncrement(code == 0xE06D7363 ? &loggedThrows : &logged) > 5) return EXCEPTION_CONTINUE_SEARCH;
     char at[300];
     DescribeAddress(ep->ExceptionRecord->ExceptionAddress, at, sizeof(at));
     char detail[64] = "";

@@ -79,6 +79,12 @@ presents 2D the rest of the time (menus, movies, 2D-only games). Loaded on its o
 dd2d9 answers Direct3D queries with `E_NOINTERFACE`, so games fall back to their other
 renderers. The `d3d=` ini key overrides this.
 
+D7VK presents its 3D frames itself, through its own swap chain filling the game's
+window, so `stretch` and `filter` don't apply to them: with `display=borderless`, a 4:3
+mode is stretched over a wide screen. For 3D games keep `display=switch` (the default):
+the display really changes mode, and the graphics driver's scaling setting (keep aspect
+ratio, or centered) decides how it fills the screen.
+
 ## Differences from ddraw.dll on purpose
 - **The window's frame sits just off the screen in fullscreen.** `ddraw.dll` leaves the
   window's style alone and draws over the whole screen, frame included. dd2d9 keeps the

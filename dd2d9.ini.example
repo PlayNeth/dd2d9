@@ -13,6 +13,8 @@
 ;                lacks the mode (320x200, 320x240...), falls back to borderless.
 ;   window     - no mode change: a window the size of the game's mode, centered
 ;   borderless - no mode change: a borderless window covering the monitor, image scaled
+;                Behind D7VK, 3D frames are D7VK's and fill the screen whatever the
+;                stretch and filter: keep switch for 3D games.
 display=switch
 
 ; How the image reaches the screen after a real mode switch (display=switch):

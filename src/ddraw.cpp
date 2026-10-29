@@ -401,6 +401,10 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (TryEnterCriticalSection(&g_displayLock)) {
             if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->CheckCover(h);
             LeaveCriticalSection(&g_displayLock);
+        } else if (wp < 500) {
+            // Another thread has the display (the presenter setting a device up or down):
+            // later, rather than never.
+            PostMessageW(h, checkCover, wp + 1, 0);
         }
         return 0;
     }
@@ -431,7 +435,8 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // already lost those of the old mode.
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner) {
-            if (!owner->InOwnMode()) owner->InvalidateSurfaces();
+            if (owner->EmulatedMode()) DD2D9_LOG("display changed: the game's mode is dd2d9's own, its surfaces stay");
+            else if (!owner->InOwnMode()) owner->InvalidateSurfaces();
             if (TryEnterCriticalSection(&g_displayLock)) {
                 if (g_hook.owner == owner) owner->OnDisplayChange();
                 LeaveCriticalSection(&g_displayLock);
@@ -1128,11 +1133,21 @@ void DDraw::PollDisplayChange() {
         lastQpc = now.QuadPart;
     }
     lastTsc = t;
+    // Not this object's change to notice: the value stays for other objects to compare.
+    if (EmulatedMode()) return;
     const LONG u = LONG(DisplayUniqueness());
     if (!u) return;  // not available
     const LONG before = InterlockedExchange(&g_displayUniqueness, u);
     if (before && before != u) InvalidateSurfaces();
 }
+
+// The game's display mode is shown scaled or in a window (borderless, window, or a mode
+// the monitor lacks), the real display left alone: a change of the desktop's mode (by
+// another program, or a laptop changing its refresh rate on its own) isn't a change of
+// the game's, and doesn't lose its surfaces. ddraw.dll's loss frees video memory a new
+// mode needs; dd2d9's surfaces need none. Nerf ArenaBlast (Unreal) quits with "Failed
+// blt" when a texture upload finds them lost. Read without a lock, as InOwnMode.
+bool DDraw::EmulatedMode() const { return Exclusive() && modeSet_ && !switched_; }
 
 bool DDraw::OtherExclusive() const {
     const DDraw* x = g_exclusiveDD;
