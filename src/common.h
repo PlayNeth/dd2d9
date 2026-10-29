@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.1"
+#define DD2D9_VERSION "0.7.2"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -50,6 +50,11 @@ const char* GuidName(REFIID riid);
 
 #define DD2D9_LOG(...) do { if (::dd2d9::LogLevel() >= 1) ::dd2d9::Log(1, __VA_ARGS__); } while (0)
 #define DD2D9_TRACE(...) do { if (::dd2d9::LogLevel() >= 2) ::dd2d9::Log(2, __VA_ARGS__); } while (0)
+// A call's failure, traced (log=2) with what it was called on.
+inline HRESULT TraceFail(const char* what, const void* obj, HRESULT hr) {
+    if (FAILED(hr)) DD2D9_TRACE("%s %p failed: 0x%08lx", what, obj, static_cast<unsigned long>(hr));
+    return hr;
+}
 // Logs the first call of an unimplemented or partially implemented path.
 #define DD2D9_STUB(what) do { static bool once_; if (!once_) { once_ = true; DD2D9_LOG("stub: %s", what); } } while (0)
 

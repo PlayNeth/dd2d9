@@ -40,13 +40,13 @@ public:
     STDMETHOD(Blt)(LPRECT d, I* src, LPRECT sr, DWORD f, LPDDBLTFX fx) {
         Surface* ss = S(src);
         if (src && !ss) return DDERR_INVALIDPARAMS;
-        return s->Blt(d, ss, sr, f, fx, V);
+        return TraceFail("Blt", s, s->Blt(d, ss, sr, f, fx, V));
     }
     STDMETHOD(BltBatch)(LPDDBLTBATCH, DWORD, DWORD) { DD2D9_STUB("BltBatch"); return DDERR_UNSUPPORTED; }
     STDMETHOD(BltFast)(DWORD x, DWORD y, I* src, LPRECT sr, DWORD t) {
         Surface* ss = S(src);
         if (!ss) return DDERR_INVALIDPARAMS;
-        return s->BltFast(x, y, ss, sr, t);
+        return TraceFail("BltFast", s, s->BltFast(x, y, ss, sr, t));
     }
     STDMETHOD(DeleteAttachedSurface)(DWORD f, I* a) { Guard l; return s->DeleteAttachedSurface(f, S(a), V); }
     STDMETHOD(EnumAttachedSurfaces)(LPVOID ctx, typename T::CB cb) {
@@ -56,7 +56,7 @@ public:
     STDMETHOD(Flip)(I* target, DWORD f) {
         Surface* t = S(target);
         if (target && !t) return DDERR_INVALIDPARAMS;
-        return s->Flip(t, f);
+        return TraceFail("Flip", s, s->Flip(t, f));
     }
     STDMETHOD(GetAttachedSurface)(typename T::Caps* caps, I** out) {
         if (!caps || !out) return DDERR_INVALIDPARAMS;
@@ -78,7 +78,7 @@ public:
     }
     STDMETHOD(GetClipper)(LPDIRECTDRAWCLIPPER* c) { Guard l; return s->GetClipper(c); }
     STDMETHOD(GetColorKey)(DWORD f, LPDDCOLORKEY k) { Guard l; return s->GetColorKey(f, k); }
-    STDMETHOD(GetDC)(HDC* dc) { return s->GetDC(dc); }
+    STDMETHOD(GetDC)(HDC* dc) { return TraceFail("GetDC", s, s->GetDC(dc)); }
     STDMETHOD(GetFlipStatus)(DWORD) { return DD_OK; }
     STDMETHOD(GetOverlayPosition)(LPLONG, LPLONG) { return DDERR_NOTAOVERLAYSURFACE; }
     STDMETHOD(GetPalette)(LPDIRECTDRAWPALETTE* p) { Guard l; return s->GetPalette(p); }
@@ -93,7 +93,7 @@ public:
         return DD_OK;
     }
     STDMETHOD(Initialize)(LPDIRECTDRAW, typename T::Desc*) { return DDERR_ALREADYINITIALIZED; }
-    STDMETHOD(IsLost)() { Guard l; return s->IsLost() ? DDERR_SURFACELOST : DD_OK; }
+    STDMETHOD(IsLost)() { Guard l; return TraceFail("IsLost", s, s->IsLost() ? DDERR_SURFACELOST : DD_OK); }
     STDMETHOD(Lock)(LPRECT r, typename T::Desc* d, DWORD f, HANDLE) {
         // Either description size, on any interface version. System-memory textures
         // made through IDirectDraw7 take any size (filled as far as it goes, as one of
@@ -107,13 +107,13 @@ public:
             d->dwSize = size >= sizeof(DDSURFACEDESC2) ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
         }
         DDSURFACEDESC2 t;
-        HRESULT hr = s->Lock(r, &t, f);
+        HRESULT hr = TraceFail("Lock", s, s->Lock(r, &t, f));
         if (SUCCEEDED(hr)) DescOut(t, d);
         d->dwSize = size;
         return hr;
     }
     STDMETHOD(ReleaseDC)(HDC dc) { return s->ReleaseDC(dc); }
-    STDMETHOD(Restore)() { Guard l; return s->Restore(); }
+    STDMETHOD(Restore)() { Guard l; return TraceFail("Restore", s, s->Restore()); }
     STDMETHOD(SetClipper)(LPDIRECTDRAWCLIPPER c) { Guard l; return s->SetClipper(c); }
     STDMETHOD(SetColorKey)(DWORD f, LPDDCOLORKEY k) { Guard l; return s->SetColorKey(f, k); }
     STDMETHOD(SetOverlayPosition)(LONG, LONG) { return DDERR_NOTAOVERLAYSURFACE; }
@@ -184,7 +184,7 @@ public:
         return d->CreatePalette(f, e, p, o, V);
     }
     STDMETHOD(CreateSurface)(typename T::Desc* desc, SI** out, IUnknown* o) {
-        return d->CreateSurface(desc, reinterpret_cast<void**>(out), o, V);
+        return TraceFail("CreateSurface", d, d->CreateSurface(desc, reinterpret_cast<void**>(out), o, V));
     }
     STDMETHOD(DuplicateSurface)(SI* src, SI** out) { return d->DuplicateSurface(src, reinterpret_cast<void**>(out), V); }
     STDMETHOD(EnumDisplayModes)(DWORD f, typename T::Desc* desc, LPVOID ctx, typename T::ModesCB cb) {
@@ -207,9 +207,9 @@ public:
     STDMETHOD(GetVerticalBlankStatus)(WINBOOL* b) { return d->GetVerticalBlankStatus(b); }
     STDMETHOD(Initialize)(GUID* g) { return d->Initialize(g); }
     STDMETHOD(RestoreDisplayMode)() { return d->RestoreDisplayMode(); }
-    STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { return d->SetCooperativeLevel(h, f, V); }
-    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp) { return d->SetDisplayMode(w, h, bpp, 0, 0); }
-    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD f) { return d->SetDisplayMode(w, h, bpp, rr, f); }
+    STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { return TraceFail("SetCooperativeLevel", d, d->SetCooperativeLevel(h, f, V)); }
+    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp) { return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, 0, 0)); }
+    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD f) { return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, rr, f)); }
     STDMETHOD(WaitForVerticalBlank)(DWORD f, HANDLE e) { return d->WaitForVerticalBlank(f, e); }
     // IDirectDraw2+
     STDMETHOD(GetAvailableVidMem)(typename T::Caps*, LPDWORD total, LPDWORD free) { return d->GetAvailableVidMem(total, free); }
@@ -218,8 +218,8 @@ public:
     STDMETHOD(GetSurfaceFromDC)(HDC dc, SI** out) {
         return d->GetSurfaceFromDC(dc, reinterpret_cast<void**>(out), V == 4 ? 1 : T::SV);
     }
-    STDMETHOD(RestoreAllSurfaces)() { return d->RestoreAllSurfaces(); }
-    STDMETHOD(TestCooperativeLevel)() { return d->TestCooperativeLevel(); }
+    STDMETHOD(RestoreAllSurfaces)() { return TraceFail("RestoreAllSurfaces", d, d->RestoreAllSurfaces()); }
+    STDMETHOD(TestCooperativeLevel)() { return TraceFail("TestCooperativeLevel", d, d->TestCooperativeLevel()); }
     STDMETHOD(GetDeviceIdentifier)(typename T::DevId* id, DWORD f) { return d->GetDeviceIdentifier(id, f, V == 7); }
     // IDirectDraw7
     STDMETHOD(StartModeTest)(LPSIZE, DWORD, DWORD) { return DDERR_TESTFINISHED; }

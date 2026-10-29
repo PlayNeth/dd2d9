@@ -208,7 +208,30 @@ UINT DeferredActivateMsg() {
     return msg;
 }
 
+// Window messages that tell how the game's window and focus change (log=2).
+void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    const char* name = nullptr;
+    switch (msg) {
+        case WM_ACTIVATEAPP: name = "WM_ACTIVATEAPP"; break;
+        case WM_ACTIVATE: name = "WM_ACTIVATE"; break;
+        case WM_NCACTIVATE: name = "WM_NCACTIVATE"; break;
+        case WM_SETFOCUS: name = "WM_SETFOCUS"; break;
+        case WM_KILLFOCUS: name = "WM_KILLFOCUS"; break;
+        case WM_SIZE: name = "WM_SIZE"; break;
+        case WM_SHOWWINDOW: name = "WM_SHOWWINDOW"; break;
+        case WM_WINDOWPOSCHANGED: name = "WM_WINDOWPOSCHANGED"; break;
+        case WM_DISPLAYCHANGE: name = "WM_DISPLAYCHANGE"; break;
+        case WM_SYSCOMMAND: name = "WM_SYSCOMMAND"; break;
+        case WM_SYSKEYDOWN: name = "WM_SYSKEYDOWN"; break;
+        case WM_CLOSE: name = "WM_CLOSE"; break;
+        default: return;
+    }
+    DD2D9_TRACE("window %p: %s wParam 0x%lx lParam 0x%lx (foreground %p)", static_cast<void*>(h), name,
+               static_cast<unsigned long>(wp), static_cast<unsigned long>(lp), static_cast<void*>(GetForegroundWindow()));
+}
+
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
     const UINT deferred = DeferredActivateMsg();
     if (msg == WM_ACTIVATEAPP || (deferred && msg == deferred)) {
         // Another thread may hold the display lock while it waits for this
@@ -222,10 +245,12 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == deferred) return 0;
     } else if (msg == WM_DISPLAYCHANGE) {
         // Before the game sees it, as ddraw.dll: the surfaces are lost and the window
-        // covers the screen in the new mode.
+        // covers the screen in the new mode. Windows may deliver the notice of the mode
+        // the game set itself late, after ChangeDisplaySettings returned and the game
+        // made its new surfaces: SetDisplayMode already lost the old ones, the new stay.
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner) {
-            owner->InvalidateSurfaces();
+            if (!owner->IsOwnMode(LOWORD(lp), HIWORD(lp))) owner->InvalidateSurfaces();
             if (TryEnterCriticalSection(&g_displayLock)) {
                 if (g_hook.owner == owner) owner->OnDisplayChange();
                 LeaveCriticalSection(&g_displayLock);
@@ -686,6 +711,12 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
 // window repainted. g_lock held.
 void DDraw::OnPrimaryReleased() {
     if (modeSet_ && hwnd_ && IsWindow(hwnd_)) RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+}
+
+// The display mode the game set and dd2d9 switched to (read without a lock: a stale
+// answer only means one more or one less loss of surfaces).
+bool DDraw::IsOwnMode(DWORD w, DWORD h) const {
+    return switched_ && modeSet_ && w == modeW_ && h == modeH_;
 }
 
 // g_lock held (the other object's primary is read).

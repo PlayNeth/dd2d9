@@ -421,6 +421,7 @@ public:
     bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
     // Another DirectDraw object has exclusive mode: this one's primary isn't shown.
     bool Superseded() const;
+    bool IsOwnMode(DWORD w, DWORD h) const;  // the display mode this object set and switched to
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
     // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which
     // then presents itself): while any exist, dd2d9 doesn't present.
