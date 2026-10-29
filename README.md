@@ -52,6 +52,13 @@ the 2D half (menus, movies, 2D games) that D7VK leaves to the system's DirectDra
   rectangles that extend past the surface; with one, it clips to the clipper's
   window or clip list. `BltFast` never clips (with a clipper attached it fails
   with `DDERR_BLTFASTCANTCLIP`).
+- **The mouse follows the game's display mode** when it is shown scaled or in a window
+  (`display=borderless` or `window`, or a mode the monitor lacks): the game's imports of
+  the cursor functions (`GetCursorPos`, `SetCursorPos`, `ClipCursor`, `GetMessagePos`,
+  `GetSystemMetrics`' screen size, the window's rectangles and coordinate conversions) and
+  its window's mouse messages are translated, so the game sees its mode's coordinates
+  with its window as the screen, as after a real mode switch. Graphics and input DLLs in
+  the game folder (D7VK, DXVK...) keep the real ones. `mouse=raw` turns it off.
 - **Windowed games** (`DDSCL_NORMAL`) get a desktop-sized primary surface, and
   the part under their window is shown.
 - **All interface versions are implemented**: IDirectDraw 1/2/4/7,
@@ -97,9 +104,6 @@ renderers. The `d3d=` ini key overrides this.
   games made on Windows 9x.
 
 ## Not implemented (yet)
-- **Mouse coordinate scaling.** When the image is scaled (`display=borderless`,
-  or the fallback when a mode switch fails), games that read the cursor with
-  `GetCursorPos` or `WM_MOUSEMOVE` see unscaled coordinates.
 - **Overlays.** Overlay surfaces are refused with `DDERR_NOOVERLAYHW`
   (the caps say there are none), so games fall back to blitting. `BltBatch` checks its
   arguments and fails with `DDERR_UNSUPPORTED`, as in `ddraw.dll`.

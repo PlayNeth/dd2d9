@@ -3,6 +3,16 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.12
+- **The mouse in scaled and windowed display modes** (`display=borderless` or `window`, or
+  a mode the monitor lacks): the game sees the cursor in its own mode's coordinates, its
+  window as its screen at 0,0, as after a real mode switch. dd2d9 points the game's
+  imports of the cursor functions at its own (`GetCursorPos`, `SetCursorPos`,
+  `ClipCursor`, `GetClipCursor`, `GetMessagePos`, `GetSystemMetrics` for the screen size,
+  `GetClientRect`/`GetWindowRect`/`ScreenToClient`/`ClientToScreen`/`MapWindowPoints`
+  for its window) and translates its window's mouse messages. Clicks used to land where
+  the unscaled coordinates pointed. `mouse=raw` turns it off.
+
 ## 0.7.11
 More of XP SP3's `ddraw.dll`:
 - **CreateSurface** checks descriptions as `ddraw.dll` does, in its order: its caps rules

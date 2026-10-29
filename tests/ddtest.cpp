@@ -33,8 +33,11 @@ static int g_fail;
 
 static int g_userMsgs, g_screensaverMsgs;
 
+static LPARAM g_lastMouseMove = -1;
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_USER + 1) g_userMsgs++;
+    if (m == WM_MOUSEMOVE) g_lastMouseMove = l;
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_SCREENSAVE) {
         g_screensaverMsgs++;
         return 0;
@@ -442,9 +445,15 @@ static int RunFullscreen8(int modeW, int modeH) {
         SetWindowLongA(hwnd, GWL_STYLE, style | WS_VISIBLE);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         Pump();
+        // The real window (dd2d9 shows a scaled mode's window to the game as its screen).
+        using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+        using MapFn = int(WINAPI*)(HWND, HWND, POINT*, UINT);
+        HMODULE user32 = GetModuleHandleA("user32.dll");
+        const auto realClientRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(user32, "GetClientRect")));
+        const auto realMap = reinterpret_cast<MapFn>(reinterpret_cast<void*>(GetProcAddress(user32, "MapWindowPoints")));
         RECT cr;
-        GetClientRect(hwnd, &cr);
-        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
+        realClientRect(hwnd, &cr);
+        realMap(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
         GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
@@ -995,6 +1004,63 @@ static int RunFuzz() {
     return 0;
 }
 
+// Through the import table each time (gcc would keep the function's address in a
+// register across the whole test, from before dd2d9 translated the import).
+__attribute__((noinline)) static int ScreenMetric(int i) { return GetSystemMetrics(i); }
+
+// The mouse with the display mode shown scaled (run with display=borderless): the game
+// sees its own mode's coordinates, its window as its screen.
+static int RunMouse() {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);  // the real screen, before
+    HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
+    CHECK(hwnd != nullptr, "test window created");
+    if (!hwnd) return 1;
+    IDirectDraw7* dd = nullptr;
+    HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    CHECK(SUCCEEDED(hr) && dd, "DirectDrawCreateEx");
+    if (!dd) return 1;
+    hr = dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    CHECK(SUCCEEDED(hr), "exclusive mode (0x%08lx)", hr);
+    hr = dd->SetDisplayMode(640, 480, 32, 0, 0);
+    CHECK(SUCCEEDED(hr), "SetDisplayMode 640x480 (0x%08lx)", hr);
+    Pump();
+    CHECK(ScreenMetric(SM_CXSCREEN) == 640 && ScreenMetric(SM_CYSCREEN) == 480, "the screen is the game's mode (%d x %d)",
+          ScreenMetric(SM_CXSCREEN), ScreenMetric(SM_CYSCREEN));
+    RECT cr = {};
+    GetClientRect(hwnd, &cr);
+    CHECK(cr.right == 640 && cr.bottom == 480, "the window's client area is the mode (%ld x %ld)", cr.right, cr.bottom);
+    RECT wr = {};
+    GetWindowRect(hwnd, &wr);
+    CHECK(wr.left == 0 && wr.top == 0 && wr.right == 640 && wr.bottom == 480, "the window is the game's screen");
+    POINT pt = {100, 50};
+    ScreenToClient(hwnd, &pt);
+    CHECK(pt.x == 100 && pt.y == 50, "client and screen coordinates are the same (%ld,%ld)", pt.x, pt.y);
+    SetCursorPos(320, 240);
+    POINT c = {};
+    GetCursorPos(&c);
+    CHECK(c.x == 320 && c.y == 240, "SetCursorPos/GetCursorPos in the mode's coordinates (%ld,%ld)", c.x, c.y);
+    SetCursorPos(639, 479);
+    GetCursorPos(&c);
+    CHECK(c.x == 639 && c.y == 479, "the far corner (%ld,%ld)", c.x, c.y);
+    RECT clip = {0, 0, 640, 480};
+    ClipCursor(&clip);
+    RECT got = {};
+    GetClipCursor(&got);
+    CHECK(got.left == 0 && got.top == 0 && got.right == 640 && got.bottom == 480, "ClipCursor/GetClipCursor (%ld,%ld-%ld,%ld)",
+          got.left, got.top, got.right, got.bottom);
+    ClipCursor(nullptr);
+    // A mouse message at the real middle of the screen arrives at the mode's middle.
+    g_lastMouseMove = -1;
+    SendMessageA(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(sw / 2, sh / 2));
+    CHECK(LOWORD(g_lastMouseMove) == 320 && HIWORD(g_lastMouseMove) == 240, "WM_MOUSEMOVE in the mode's coordinates (%d,%d)",
+          LOWORD(g_lastMouseMove), HIWORD(g_lastMouseMove));
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    CHECK(ScreenMetric(SM_CXSCREEN) == sw, "the real screen again out of exclusive mode");
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
@@ -1008,6 +1074,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
         sscanf(strstr(cmd, "fs8") + 3, "%d %d", &w, &h);
         r = RunFullscreen8(w, h);
     }
+    else if (strstr(cmd, "mouse")) r = RunMouse();
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
     else r = RunUnit() | RunLifetime() | RunCoopModes();

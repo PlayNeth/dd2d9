@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '0.7.11',
+  version : '0.7.12',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -17,7 +17,7 @@ endforeach
 static_link = ['-static', '-static-libgcc', '-static-libstdc++']
 
 ddraw = shared_library('ddraw',
-  'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp', 'src/d3dproxy.cpp',
+  'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp', 'src/d3dproxy.cpp', 'src/input.cpp',
   name_prefix : '',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,

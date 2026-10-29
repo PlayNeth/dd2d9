@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.11"
+#define DD2D9_VERSION "0.7.12"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -32,6 +32,7 @@ struct Config {
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int present = kPresentWindow;  // after a real mode switch: borderless window / D3D9 exclusive fullscreen
     int d3d = kD3DAuto;            // Direct3D objects for a wrapper (D7VK): auto = when loaded behind one
+    bool mouseScale = true;        // map the mouse to the game's display mode when it is scaled or windowed
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
     int log = 0;                   // 0 off, 1 info, 2 trace (every blit, lock, flip and palette change)
     std::wstring logFile;          // empty: dd2d9.log next to the game's executable
@@ -162,5 +163,18 @@ uint32_t ARGBToPixel(const Format& f, uint32_t argb);
 bool DescSizeOk(const void* desc);
 bool DescIn(const void* in, DDSURFACEDESC2* out);
 void DescOut(const DDSURFACEDESC2& in, void* out);
+
+// ---------------------------------------------------------------- mouse (input.cpp)
+// The game's user32 imports of the cursor functions point at dd2d9's, which translate
+// between the real screen and the game's display mode while it is shown scaled or in a
+// window. Installed in every module loaded so far (each time exclusive mode starts).
+void InstallMouseHooks();
+void RemoveMouseHooks();  // the DLL is unloaded while the process goes on
+// The game's view of a point on the real screen and back; false when 1:1.
+bool MouseToGame(POINT* p);
+bool MouseFromGame(POINT* p);
+// Where the game's display mode is on the real screen, and the window showing it; false
+// when 1:1 (or mapping is off).
+bool GameImage(RECT* image, SIZE* mode, HWND* window = nullptr);
 
 }  // namespace dd2d9

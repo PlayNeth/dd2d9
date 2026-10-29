@@ -4,6 +4,7 @@
 #include "d3dproxy.h"
 
 #include <mmsystem.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <intrin.h>
@@ -185,6 +186,55 @@ RECT DDraw::PresentTarget(HWND hwnd) const {
     return IntersectRect(&t, &m, &c) ? t : c;
 }
 
+bool DDraw::ImageOnScreen(RECT* image, SIZE* mode) const {
+    // After a real mode switch the screen is the game's mode: nothing to translate (also
+    // not while the display is between two modes).
+    if (!Exclusive() || !modeSet_ || activeDisplay_ == kDisplaySwitch || suspended_ || Has3D() || !hwnd_ ||
+        !IsWindow(hwnd_) || IsIconic(hwnd_))
+        return false;
+    const RECT t = PresentTarget(hwnd_);
+    RECT r = presenter_->FitRect(modeW_, modeH_, UINT(t.right - t.left), UINT(t.bottom - t.top));
+    OffsetRect(&r, t.left, t.top);
+    MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&r), 2);
+    if (r.left == 0 && r.top == 0 && r.right == LONG(modeW_) && r.bottom == LONG(modeH_)) return false;  // 1:1
+    *image = r;
+    *mode = SIZE{LONG(modeW_), LONG(modeH_)};
+    return true;
+}
+
+// The exclusive object's image, for the mouse (see input.cpp).
+bool GameImage(RECT* image, SIZE* mode, HWND* window) {
+    if (!g_config.mouseScale) return false;
+    Guard l;
+    const DDraw* d = g_exclusiveDD;
+    if (!d || !d->ImageOnScreen(image, mode)) return false;
+    if (window) *window = d->Window();
+    return true;
+}
+
+// The real screen to the game's display mode (its screen as the game sees it, at 0,0):
+// scaled, and kept on the game's screen as the real cursor is kept on the real one.
+bool MouseToGame(POINT* p) {
+    RECT r;
+    SIZE m;
+    if (!GameImage(&r, &m)) return false;
+    const LONG w = std::max<LONG>(r.right - r.left, 1), h = std::max<LONG>(r.bottom - r.top, 1);
+    p->x = std::clamp<LONG>(LONG(int64_t(p->x - r.left) * m.cx / w), 0, m.cx - 1);
+    p->y = std::clamp<LONG>(LONG(int64_t(p->y - r.top) * m.cy / h), 0, m.cy - 1);
+    return true;
+}
+
+// The game's display mode to the real screen (the middle of the pixels a game pixel covers).
+bool MouseFromGame(POINT* p) {
+    RECT r;
+    SIZE m;
+    if (!GameImage(&r, &m)) return false;
+    const LONG w = r.right - r.left, h = r.bottom - r.top;
+    p->x = r.left + LONG((int64_t(p->x) * w + w / 2) / std::max<LONG>(m.cx, 1));
+    p->y = r.top + LONG((int64_t(p->y) * h + h / 2) / std::max<LONG>(m.cy, 1));
+    return true;
+}
+
 bool DDraw::ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const {
     if (g_config.present != kPresentExclusive || !Exclusive() || !switched_ || suspended_ || !primary) return false;
     *w = modeW_;
@@ -356,6 +406,13 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             mmi->ptMaxTrackSize.y = std::max<LONG>(mmi->ptMaxTrackSize.y, s.cy);
         }
         return r;
+    } else if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) {
+        // A display mode shown scaled or in a window: the game's window is its screen, at
+        // 0,0 and the mode's size (see input.cpp). The wheel messages carry screen
+        // coordinates, the others the client area's.
+        POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL) ClientToScreen(h, &p);
+        if (MouseToGame(&p)) lp = MAKELPARAM(p.x, p.y);
     } else if (msg == WM_SYSCOMMAND && ((wp & 0xFFF0) == SC_SCREENSAVE || (wp & 0xFFF0) == SC_MONITORPOWER)) {
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner && owner->Exclusive()) return 0;
@@ -378,6 +435,7 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc) {
 
 void DDraw::HookWindow() {
     if (!hwnd_ || !IsWindow(hwnd_)) return;
+    InstallMouseHooks();  // modules the game loaded since the last time too
     if (g_hook.hwnd == hwnd_) {  // already in this window's chain (maybe from an earlier DirectDraw object)
         g_hook.owner = this;
         return;

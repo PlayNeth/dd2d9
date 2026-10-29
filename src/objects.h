@@ -314,6 +314,8 @@ public:
     void DropDevice();
     void SetGamma(const DDGAMMARAMP& ramp);
     void GetGamma(DDGAMMARAMP* ramp);
+    // Where an sw x sh image goes in a bw x bh area, as the stretch setting says.
+    RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
 
 private:
     static DWORD WINAPI ThreadProc(void* self);
@@ -330,7 +332,6 @@ private:
     };
     void Convert(const Snapshot& s, const RECT& area, void* bits, int pitch);
     void BuildLut16(const Format& f);
-    RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
     void CountPresent(double lockSeconds, double convertSeconds, double fraction);
 
     DDraw* dd_;
@@ -425,6 +426,10 @@ public:
     HWND PresentWindow() const;
     RECT PresentSource(HWND hwnd) const;
     RECT PresentTarget(HWND hwnd) const;  // g_lock held
+    // Where the game's display mode is shown on the real screen, when that isn't 1:1 at the
+    // screen's origin (a scaled or windowed mode). g_lock held. See input.cpp.
+    bool ImageOnScreen(RECT* image, SIZE* mode) const;
+    HWND Window() const { return hwnd_; }
     // present=exclusive and the real display mode is switched: the presenter
     // should use an exclusive-fullscreen device of this size and refresh rate.
     bool ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const;
