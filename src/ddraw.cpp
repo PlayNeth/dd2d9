@@ -904,6 +904,7 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
                                 (i == 0 ? DDSCAPS_BACKBUFFER : 0);
             FinishCaps(&bd);
             auto* back = new Surface(this, bd, bb, version);
+            back->AddRef();  // the root's reference
             back->root = front;
             front->children.push_back(back);
             front->flipChain.push_back(back);
@@ -929,6 +930,7 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
             md.ddsCaps.dwCaps2 |= DDSCAPS2_MIPMAPSUBLEVEL;
             FinishCaps(&md);
             auto* level = new Surface(this, md, mb, version);
+            level->AddRef();  // the root's reference
             level->root = front;
             front->children.push_back(level);
             prev->attached.push_back(level);

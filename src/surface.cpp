@@ -3,6 +3,7 @@
 
 #include "d3dproxy.h"
 
+#include <algorithm>
 #include <new>
 
 namespace dd2d9 {
@@ -125,7 +126,18 @@ Surface::~Surface() {
         // Members of the same complex surface (mip levels) are owned by the root.
         if (a != family && a->root != family) a->Release();
     }
-    for (Surface* c : children) delete c;
+    // The members of a complex surface (back buffers, mip levels) go with it, as
+    // in ddraw. ddraw destroys them even if the game still holds references, leaving
+    // it dangling pointers; here such a member stays alive as a standalone surface
+    // until it is released. Members link to each other without references: those
+    // links go first, so that no member's destructor releases a detached one.
+    for (Surface* c : children) c->ForgetMembers(this);
+    std::vector<Surface*> doomed;
+    for (Surface* c : children) {
+        if (InterlockedDecrement(&c->ref_) > 0) c->Detach(this);  // drop the root's own reference
+        else doomed.push_back(c);
+    }
+    for (Surface* c : doomed) delete c;
     if (palette) palette->Release();
     if (clipper) clipper->Release();
     for (auto& p : priv_)
@@ -189,19 +201,39 @@ HRESULT Surface::QueryInterface(REFIID r, void** out) {
     return E_NOINTERFACE;
 }
 
-ULONG Surface::AddRef() {
-    if (root) return root->AddRef();
-    return ULONG(InterlockedIncrement(&ref_));
-}
+// Every surface counts its own references. A member of a complex surface also
+// holds one from its root, and lives until the root is destroyed.
+ULONG Surface::AddRef() { return ULONG(InterlockedIncrement(&ref_)); }
 
 ULONG Surface::Release() {
-    if (root) return root->Release();
     LONG r = InterlockedDecrement(&ref_);
-    if (r == 0) {
+    if (r <= 0) {
         Guard l;
-        delete this;
+        if (root) {
+            // Released more often than referenced: ddraw ignores that for members.
+            if (r < 0) InterlockedExchange(&ref_, 0);
+            return 0;
+        }
+        if (r == 0) delete this;
     }
     return ULONG(r < 0 ? 0 : r);
+}
+
+void Surface::ForgetMembers(const Surface* oldRoot) {
+    auto member = [oldRoot](const Surface* a) {
+        return a == oldRoot ||
+               std::find(oldRoot->children.begin(), oldRoot->children.end(), a) != oldRoot->children.end();
+    };
+    attached.erase(std::remove_if(attached.begin(), attached.end(), member), attached.end());
+    chainNext = nullptr;
+}
+
+void Surface::Detach(const Surface* oldRoot) {
+    root = nullptr;
+    desc.ddsCaps.dwCaps &= ~(DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER | DDSCAPS_FLIP | DDSCAPS_COMPLEX);
+    desc.ddsCaps.dwCaps2 &= ~DDSCAPS2_MIPMAPSUBLEVEL;
+    DD2D9_LOG("surface %p outlives its complex surface %p (still referenced): kept as a standalone surface",
+              static_cast<void*>(this), static_cast<const void*>(oldRoot));
 }
 
 HRESULT Surface::AddAttachedSurface(Surface* s) {

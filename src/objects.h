@@ -168,6 +168,10 @@ public:
     Buffer* buf;
     int version;          // interface version the surface was created through
     Surface* root = nullptr;           // owner of a complex surface (flip chain / mipmaps)
+    // While oldRoot (this surface's root) is destroyed, with g_lock held: drop the
+    // unreferenced links to the other members; then, if still referenced, live on alone.
+    void ForgetMembers(const Surface* oldRoot);
+    void Detach(const Surface* oldRoot);
     std::vector<Surface*> children;    // complex children owned by this root
     std::vector<Surface*> flipChain;   // on a flip-chain root: [front, back1, ..., backN]
     Surface* chainNext = nullptr;      // next surface in the flip chain (for GetAttachedSurface)

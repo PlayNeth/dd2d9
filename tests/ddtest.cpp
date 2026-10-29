@@ -1,5 +1,5 @@
 // DD2D9 test program.
-//   ddtest unit     - pixel-exact checks of blits, keys, conversion, GDI, flipping
+//   ddtest unit     - pixel-exact checks of blits, keys, conversion, GDI, flipping, surface lifetimes
 //   ddtest fs8      - exclusive 640x480x8 flip-chain animation with palette and GDI text
 //   ddtest win      - windowed (DDSCL_NORMAL) 32-bit desktop, blits to the primary through a clipper
 //   ddtest fuzz     - random same-format blits (keys, ranges, mirroring, stretching, overlap)
@@ -533,6 +533,87 @@ static int RunWindowed() {
     return 0;
 }
 
+// Lifetimes of complex surfaces, as in ddraw: each member counts its own
+// references, and releasing the root destroys the structure. A member the game
+// still references stays usable on its own until released.
+static int RunLifetime() {
+    IDirectDraw7* dd = nullptr;
+    HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    HWND hwnd = MakeWindow(WS_POPUP, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    hr = dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    CHECK(SUCCEEDED(hr), "lifetime: exclusive mode -> 0x%08lx", hr);
+
+    // Flip chain: release the front buffer while holding the back buffer (Jazz Jackrabbit 2).
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    d.dwBackBufferCount = 2;
+    IDirectDrawSurface7* front = nullptr;
+    hr = dd->CreateSurface(&d, &front, nullptr);
+    CHECK(SUCCEEDED(hr) && front, "lifetime: flip chain -> 0x%08lx", hr);
+    if (!front) return 1;
+    DDSCAPS2 caps = {DDSCAPS_BACKBUFFER, 0, 0, {0}};
+    IDirectDrawSurface7* back = nullptr;
+    front->GetAttachedSurface(&caps, &back);
+    const ULONG backRef = back ? back->AddRef() - 1 : 0;
+    if (back) back->Release();
+    CHECK(backRef == 2, "lifetime: back buffer counts its own references (%lu: the root's and ours)", backRef);
+    ULONG r = front->Release();
+    CHECK(r == 0, "lifetime: front buffer released (refcount %lu)", r);
+    IDirectDrawSurface7* front2 = nullptr;
+    hr = dd->CreateSurface(&d, &front2, nullptr);
+    CHECK(SUCCEEDED(hr), "lifetime: new primary while the old back buffer is still referenced -> 0x%08lx", hr);
+    DDSURFACEDESC2 l = {};
+    l.dwSize = sizeof(l);
+    hr = back ? back->Lock(nullptr, &l, DDLOCK_WAIT, nullptr) : E_FAIL;
+    CHECK(SUCCEEDED(hr), "lifetime: old back buffer still usable -> 0x%08lx", hr);
+    if (SUCCEEDED(hr)) back->Unlock(nullptr);
+    r = back ? back->Release() : 1;
+    CHECK(r == 0, "lifetime: old back buffer released (refcount %lu)", r);
+    if (front2) front2->Release();
+
+    // Mipmaps: hold only the smallest level, release the others and the root.
+    DDSURFACEDESC2 m = {};
+    m.dwSize = sizeof(m);
+    m.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_MIPMAPCOUNT | DDSD_PIXELFORMAT;
+    m.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | DDSCAPS_SYSTEMMEMORY;
+    m.dwWidth = m.dwHeight = 16;
+    m.dwMipMapCount = 3;
+    m.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    m.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    m.ddpfPixelFormat.dwRGBBitCount = 32;
+    m.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    m.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    m.ddpfPixelFormat.dwBBitMask = 0xFF;
+    IDirectDrawSurface7* tex = nullptr;
+    hr = dd->CreateSurface(&m, &tex, nullptr);
+    CHECK(SUCCEEDED(hr) && tex, "lifetime: mipmapped texture -> 0x%08lx", hr);
+    if (tex) {
+        DDSCAPS2 mc = {DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, DDSCAPS2_MIPMAPSUBLEVEL, 0, {0}};
+        IDirectDrawSurface7 *l1 = nullptr, *l2 = nullptr;
+        tex->GetAttachedSurface(&mc, &l1);
+        if (l1) l1->GetAttachedSurface(&mc, &l2);
+        CHECK(l1 && l2, "lifetime: mip levels 1 and 2 found");
+        if (l1) l1->Release();
+        r = tex->Release();
+        CHECK(r == 0, "lifetime: texture released with level 2 still referenced (refcount %lu)", r);
+        DDSURFACEDESC2 ld = {};
+        ld.dwSize = sizeof(ld);
+        hr = l2 ? l2->Lock(nullptr, &ld, DDLOCK_WAIT, nullptr) : E_FAIL;
+        CHECK(SUCCEEDED(hr) && ld.dwWidth == 4, "lifetime: level 2 still usable (0x%08lx, %lux%lu)", hr, ld.dwWidth,
+              ld.dwHeight);
+        if (SUCCEEDED(hr)) l2->Unlock(nullptr);
+        r = l2 ? l2->Release() : 1;
+        CHECK(r == 0, "lifetime: level 2 released (refcount %lu)", r);
+    }
+    r = dd->Release();
+    CHECK(r == 0, "lifetime: DirectDraw released (refcount %lu)", r);
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 // ---------------------------------------------------------------- fuzz
 
 // A surface and a model of what it should contain.
@@ -744,7 +825,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     }
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
-    else r = RunUnit();
+    else r = RunUnit() | RunLifetime();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);
