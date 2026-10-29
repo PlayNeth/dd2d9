@@ -225,47 +225,61 @@ public:
     uint32_t magic = kMagic;
     DDraw* d;
     explicit DDWrap(DDraw* impl) : d(impl) { WritableVtbl(this); }
+    // An object made by CoCreateInstance answers only Initialize until it gets it, as in
+    // ddraw.dll.
+#define DD2D9_READY()                                   \
+    do {                                                \
+        if (!d->initialized) return DDERR_NOTINITIALIZED; \
+    } while (0)
 
     STDMETHOD(QueryInterface)(REFIID r, void** p) override { return d->QueryInterface(r, p); }
     STDMETHOD_(ULONG, AddRef)() override { return d->AddRef(V); }
     STDMETHOD_(ULONG, Release)() override { return d->Release(V); }
     STDMETHOD(Compact)() { return d->Exclusive() ? DD_OK : DDERR_NOEXCLUSIVEMODE; }  // as ddraw.dll
-    STDMETHOD(CreateClipper)(DWORD f, LPDIRECTDRAWCLIPPER* c, IUnknown* o) { return d->CreateClipper(f, c, o, V); }
+    STDMETHOD(CreateClipper)(DWORD f, LPDIRECTDRAWCLIPPER* c, IUnknown* o) { DD2D9_READY(); return d->CreateClipper(f, c, o, V); }
     STDMETHOD(CreatePalette)(DWORD f, LPPALETTEENTRY e, LPDIRECTDRAWPALETTE* p, IUnknown* o) {
+        DD2D9_READY();
         return d->CreatePalette(f, e, p, o, V);
     }
     STDMETHOD(CreateSurface)(typename T::Desc* desc, SI** out, IUnknown* o) {
+        DD2D9_READY();
         return TraceFail("CreateSurface", d, d->CreateSurface(desc, reinterpret_cast<void**>(out), o, V));
     }
-    STDMETHOD(DuplicateSurface)(SI* src, SI** out) { return d->DuplicateSurface(src, reinterpret_cast<void**>(out), V); }
+    STDMETHOD(DuplicateSurface)(SI* src, SI** out) { DD2D9_READY(); return d->DuplicateSurface(src, reinterpret_cast<void**>(out), V); }
     STDMETHOD(EnumDisplayModes)(DWORD f, typename T::Desc* desc, LPVOID ctx, typename T::ModesCB cb) {
+        DD2D9_READY();
         // A filter of this interface version's size only, as in ddraw.dll.
         if (desc && desc->dwSize != sizeof(typename T::Desc)) return DDERR_INVALIDPARAMS;
         return d->EnumDisplayModes(f, desc, ctx, reinterpret_cast<void*>(cb), V >= 4 ? 2 : 1);
     }
     STDMETHOD(EnumSurfaces)(DWORD f, typename T::Desc* desc, LPVOID ctx, typename T::SurfCB cb) {
+        DD2D9_READY();
+        // A filter of this interface version's size only, as in ddraw.dll.
+        if (desc && desc->dwSize != sizeof(typename T::Desc)) return DDERR_INVALIDPARAMS;
         return d->EnumSurfaces(f, desc, ctx, reinterpret_cast<void*>(cb), T::SV);
     }
-    STDMETHOD(FlipToGDISurface)() { return d->FlipToGDISurface(); }
-    STDMETHOD(GetCaps)(LPDDCAPS drv, LPDDCAPS hel) { return d->GetCaps(drv, hel); }
-    STDMETHOD(GetDisplayMode)(typename T::Desc* desc) { return d->GetDisplayMode(desc, V); }
+    STDMETHOD(FlipToGDISurface)() { DD2D9_READY(); return d->FlipToGDISurface(); }
+    STDMETHOD(GetCaps)(LPDDCAPS drv, LPDDCAPS hel) { DD2D9_READY(); return d->GetCaps(drv, hel); }
+    STDMETHOD(GetDisplayMode)(typename T::Desc* desc) { DD2D9_READY(); return d->GetDisplayMode(desc, V); }
     STDMETHOD(GetFourCCCodes)(LPDWORD n, LPDWORD) {
+        DD2D9_READY();
         if (!n) return DDERR_INVALIDPARAMS;
         *n = 0;
         return DD_OK;
     }
-    STDMETHOD(GetGDISurface)(SI** out) { return d->GetGDISurface(reinterpret_cast<void**>(out), T::SV); }
-    STDMETHOD(GetMonitorFrequency)(LPDWORD f) { return d->GetMonitorFrequency(f); }
-    STDMETHOD(GetScanLine)(LPDWORD l) { return d->GetScanLine(l); }
-    STDMETHOD(GetVerticalBlankStatus)(WINBOOL* b) { return d->GetVerticalBlankStatus(b); }
+    STDMETHOD(GetGDISurface)(SI** out) { DD2D9_READY(); return d->GetGDISurface(reinterpret_cast<void**>(out), T::SV); }
+    STDMETHOD(GetMonitorFrequency)(LPDWORD f) { DD2D9_READY(); return d->GetMonitorFrequency(f); }
+    STDMETHOD(GetScanLine)(LPDWORD l) { DD2D9_READY(); return d->GetScanLine(l); }
+    STDMETHOD(GetVerticalBlankStatus)(WINBOOL* b) { DD2D9_READY(); return d->GetVerticalBlankStatus(b); }
     STDMETHOD(Initialize)(GUID* g) { return d->Initialize(g); }
-    STDMETHOD(RestoreDisplayMode)() { return d->RestoreDisplayMode(); }
-    STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { return TraceFail("SetCooperativeLevel", d, d->SetCooperativeLevel(h, f, V)); }
-    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp) { return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, 0, 0)); }
-    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD f) { return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, rr, f)); }
-    STDMETHOD(WaitForVerticalBlank)(DWORD f, HANDLE e) { return d->WaitForVerticalBlank(f, e); }
+    STDMETHOD(RestoreDisplayMode)() { DD2D9_READY(); return d->RestoreDisplayMode(); }
+    STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { DD2D9_READY(); return TraceFail("SetCooperativeLevel", d, d->SetCooperativeLevel(h, f, V)); }
+    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp) { DD2D9_READY(); return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, 0, 0)); }
+    STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD f) { DD2D9_READY(); return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, rr, f)); }
+    STDMETHOD(WaitForVerticalBlank)(DWORD f, HANDLE e) { DD2D9_READY(); return d->WaitForVerticalBlank(f, e); }
     // IDirectDraw2+
     STDMETHOD(GetAvailableVidMem)(typename T::Caps* c, LPDWORD total, LPDWORD free) {
+        DD2D9_READY();
         if (!c) return DDERR_INVALIDPARAMS;
         const DDSCAPS2 caps = ToCaps2(*c);
         return d->GetAvailableVidMem(&caps, total, free);
@@ -273,14 +287,17 @@ public:
     // IDirectDraw4+
     // IDirectDraw4's hands out the IDirectDrawSurface interface (as ddraw.dll does).
     STDMETHOD(GetSurfaceFromDC)(HDC dc, SI** out) {
+        DD2D9_READY();
         return d->GetSurfaceFromDC(dc, reinterpret_cast<void**>(out), V == 4 ? 1 : T::SV);
     }
-    STDMETHOD(RestoreAllSurfaces)() { return TraceFail("RestoreAllSurfaces", d, d->RestoreAllSurfaces()); }
-    STDMETHOD(TestCooperativeLevel)() { return TraceFail("TestCooperativeLevel", d, d->TestCooperativeLevel()); }
-    STDMETHOD(GetDeviceIdentifier)(typename T::DevId* id, DWORD f) { return d->GetDeviceIdentifier(id, f, V == 7); }
+    STDMETHOD(RestoreAllSurfaces)() { DD2D9_READY(); return TraceFail("RestoreAllSurfaces", d, d->RestoreAllSurfaces()); }
+    STDMETHOD(TestCooperativeLevel)() { DD2D9_READY(); return TraceFail("TestCooperativeLevel", d, d->TestCooperativeLevel()); }
+    STDMETHOD(GetDeviceIdentifier)(typename T::DevId* id, DWORD f) { DD2D9_READY(); return d->GetDeviceIdentifier(id, f, V == 7); }
     // IDirectDraw7
-    STDMETHOD(StartModeTest)(LPSIZE, DWORD, DWORD) { return DDERR_TESTFINISHED; }
+    STDMETHOD(StartModeTest)(LPSIZE, DWORD, DWORD) { DD2D9_READY(); return DDERR_TESTFINISHED; }
     STDMETHOD(EvaluateMode)(DWORD, DWORD*) { return DDERR_INVALIDPARAMS; }  // as ddraw.dll (no mode test running)
 };
+
+#undef DD2D9_READY
 
 }  // namespace dd2d9

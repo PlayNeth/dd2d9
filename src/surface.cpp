@@ -711,6 +711,7 @@ HRESULT Surface::GetClipper(IDirectDrawClipper** out) {
 }
 
 static bool LiveClipper(const Clipper* c);
+bool LivePalette(const Palette* p);
 
 HRESULT Surface::SetClipper(IDirectDrawClipper* c) {
     Clipper* nc = c ? Clipper::From(c) : nullptr;
@@ -854,7 +855,7 @@ HRESULT Surface::GetPalette(IDirectDrawPalette** out) {
 // palette goes to this surface only, not the rest of its flip chain.
 HRESULT Surface::SetPalette(IDirectDrawPalette* p, int version) {
     Palette* np = p ? Palette::From(p) : nullptr;
-    if (p && !np) return DDERR_INVALIDPARAMS;
+    if (p && (!np || !LivePalette(np))) return DDERR_INVALIDPARAMS;
     if (desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER) return DDERR_INVALIDSURFACETYPE;
     if (version == 7 && (desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) return DDERR_NOTONMIPMAPSUBLEVEL;
     if (IsLost()) return DDERR_SURFACELOST;
@@ -1315,9 +1316,27 @@ HRESULT Surface::GetFlipStatus(DWORD flags) {
 
 // ================================================================ Palette
 
+// As for clippers (see LiveClipper): a released or made-up palette pointer gets 0 from
+// AddRef/Release, as in ddraw.dll, and is refused by SetPalette, instead of a crash.
+namespace {
+std::vector<const Palette*>* g_palettes;  // live palettes (g_lock)
+const void* g_paletteVtbl;                // the genuine vtable
+}
+
+bool LivePalette(const Palette* p) {
+    Guard l;
+    return g_palettes && std::find(g_palettes->begin(), g_palettes->end(), p) != g_palettes->end();
+}
+
 Palette::Palette(DDraw* dd, DWORD c, const PALETTEENTRY* e) : caps(c), dd_(dd) {
     WritableVtbl(this);
     if (dd_) dd_->IntAddRef();
+    {
+        Guard l;
+        if (!g_palettes) g_palettes = new std::vector<const Palette*>;
+        g_palettes->push_back(this);
+        g_paletteVtbl = *reinterpret_cast<void* const*>(this);
+    }
     int n = Count();
     if (e) {
         if (caps & DDPCAPS_8BITENTRIES) {
@@ -1344,6 +1363,7 @@ void Palette::ReserveSystemEntries() {
 // ddraw.dll detaches it, so GetPalette then says DDERR_NOPALETTEATTACHED instead of
 // handing out freed memory. g_lock held.
 Palette::~Palette() {
+    g_palettes->erase(std::find(g_palettes->begin(), g_palettes->end(), this));
     if (dd_) {
         for (Surface* s : dd_->surfaces)
             if (s->palette == this) s->palette = nullptr;
@@ -1369,21 +1389,28 @@ HRESULT Palette::QueryInterface(REFIID r, void** out) {
     return E_NOINTERFACE;
 }
 
-ULONG Palette::AddRef() { return ULONG(InterlockedIncrement(&ref_)); }
+ULONG Palette::AddRef() {
+    if (!LivePalette(this)) return 0;
+    return ULONG(InterlockedIncrement(&ref_));
+}
 
 ULONG Palette::Release() {
-    LONG r = InterlockedDecrement(&ref_);
-    if (r == 0) {
-        DDraw* owner = dd_;
-        const int ownerRef = ddRef;
-        if (owner) owner->IntAddRef();  // see Surface::Release
-        {
-            Guard l;
+    DDraw* owner = nullptr;
+    int ownerRef = 0;
+    LONG r;
+    {
+        Guard l;  // the check and the decrement go together
+        if (!LivePalette(this) || *reinterpret_cast<void* const*>(this) != g_paletteVtbl) return 0;
+        r = InterlockedDecrement(&ref_);
+        if (r == 0) {
+            owner = dd_;
+            ownerRef = ddRef;
+            if (owner) owner->IntAddRef();  // see Surface::Release
             delete this;
         }
-        if (ownerRef) owner->Release(ownerRef);
-        if (owner) owner->IntRelease();
     }
+    if (ownerRef) owner->Release(ownerRef);
+    if (owner) owner->IntRelease();
     return ULONG(r < 0 ? 0 : r);
 }
 

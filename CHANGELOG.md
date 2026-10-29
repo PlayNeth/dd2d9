@@ -3,6 +3,25 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.11
+More of XP SP3's `ddraw.dll`:
+- **CreateSurface** checks descriptions as `ddraw.dll` does, in its order: its caps rules
+  (e.g. PALETTE or VISIBLE asked for, invalid combinations), Z buffers (by depth through
+  IDirectDraw/2, by pixel format through 4/7), no size or format for a primary, power-of-two
+  mipmaps with no more levels than the size allows (they used to be cut down), color keys
+  (no overlay keys or ranges), client memory (checked first; IDirectDraw4 takes an
+  unaligned pointer), cube maps through IDirectDraw7 only; CLASS_E_NOAGGREGATION comes
+  later through IDirectDraw/2.
+- **EnumSurfaces** validates its flags and filter as `ddraw.dll` does and matches only the
+  fields it compares (caps exactly, the size, keys, counts, and a pixel format only for
+  surfaces created with one), newest surface first; CANBECREATED ignores the callback's answer.
+- **SetCooperativeLevel**: exclusive mode stays on its window (another window gets
+  `DDERR_HWNDALREADYSET` until the game goes back to normal); entering it loses every
+  DirectDraw object's surfaces; `DDSCL_SETDEVICEWINDOW`'s checks; a window with a dialog
+  frame but no border isn't changed.
+- A DirectDraw object made by CoCreateInstance answers `DDERR_NOTINITIALIZED` until
+  Initialize. A released palette's AddRef/Release return 0 and SetPalette refuses it.
+
 ## 0.7.10
 - **In exclusive mode the image fills the screen whatever size the window is.** JJ2+
   sizes its window past the screen while starting up (661x544 at 640x480); the image was
