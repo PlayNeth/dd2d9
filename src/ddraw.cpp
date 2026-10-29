@@ -166,6 +166,25 @@ RECT DDraw::PresentSource(HWND hwnd) const {
     return r;
 }
 
+// Where in the window's client area the image goes (client coordinates). In exclusive
+// mode with the window covering the screen, that is the screen: ddraw.dll shows the game
+// there whatever the window's size. JJ2+ sizes its window past the screen itself while
+// starting up (661x544 at 640x480), and the image centered in the whole client area
+// left a black bar at the top. Otherwise the whole client area.
+RECT DDraw::PresentTarget(HWND hwnd) const {
+    RECT c = {};
+    GetClientRect(hwnd, &c);
+    const int display = modeSet_ ? activeDisplay_ : g_config.display;
+    if (!Exclusive() || display == kDisplayWindow || hwnd != hwnd_) return c;
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+    RECT m = mi.rcMonitor;
+    MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&m), 2);  // into client coordinates
+    RECT t;
+    return IntersectRect(&t, &m, &c) ? t : c;
+}
+
 bool DDraw::ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const {
     if (g_config.present != kPresentExclusive || !Exclusive() || !switched_ || suspended_ || !primary) return false;
     *w = modeW_;

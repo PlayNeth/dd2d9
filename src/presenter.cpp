@@ -401,6 +401,7 @@ void Presenter::Loop() {
         // Only those paths clear it: Flip() checks it right after waking us.
         HWND hwnd = nullptr;
         RECT src = {};
+        RECT target = {};  // where the image goes in the back buffer (client coordinates)
         bool havePrimary;
         bool superseded;
         bool fullscreen = false;
@@ -420,6 +421,7 @@ void Presenter::Loop() {
                           !dd_->Has3D() && !superseded;
             if (havePrimary) hwnd = dd_->PresentWindow();
             if (hwnd) src = dd_->PresentSource(hwnd);
+            if (hwnd) target = dd_->PresentTarget(hwnd);
             if (hwnd && !exclusiveFailed_) fullscreen = dd_->ExclusivePresent(&fw, &fh, &fhz);
         }
         if (!havePrimary || !hwnd || !IsWindow(hwnd) || IsIconic(hwnd)) {
@@ -442,6 +444,8 @@ void Presenter::Loop() {
             GetClientRect(hwnd, &cr);
             bw = UINT(std::max<LONG>(cr.right, 1));
             bh = UINT(std::max<LONG>(cr.bottom, 1));
+        } else {
+            target = RECT{0, 0, LONG(bw), LONG(bh)};
         }
         const UINT sw = UINT(src.right - src.left), sh = UINT(src.bottom - src.top);
         if (int(sw) <= 0 || int(sh) <= 0) {
@@ -529,7 +533,13 @@ void Presenter::Loop() {
 
         IDirect3DSurface9* bb = nullptr;
         if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
-            RECT dst = FitRect(sw, sh, bw, bh);
+            // Fitted into the target area of the back buffer (the client area's part on the
+            // screen, see DDraw::PresentTarget).
+            RECT tg;
+            const RECT whole = {0, 0, LONG(bw), LONG(bh)};
+            if (!IntersectRect(&tg, &target, &whole)) tg = whole;
+            RECT dst = FitRect(sw, sh, UINT(tg.right - tg.left), UINT(tg.bottom - tg.top));
+            OffsetRect(&dst, tg.left, tg.top);
             if (dst.left > 0 || dst.top > 0 || dst.right < LONG(bw) || dst.bottom < LONG(bh))
                 dev_->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
             const bool same = UINT(dst.right - dst.left) == sw && UINT(dst.bottom - dst.top) == sh;

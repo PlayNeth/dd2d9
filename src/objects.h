@@ -424,6 +424,7 @@ public:
     DWORD RefreshRate() const { return refresh_; }
     HWND PresentWindow() const;
     RECT PresentSource(HWND hwnd) const;
+    RECT PresentTarget(HWND hwnd) const;  // g_lock held
     // present=exclusive and the real display mode is switched: the presenter
     // should use an exclusive-fullscreen device of this size and refresh rate.
     bool ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const;

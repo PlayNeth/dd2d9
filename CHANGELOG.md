@@ -3,11 +3,15 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.10
+- **In exclusive mode the image fills the screen whatever size the window is.** JJ2+
+  sizes its window past the screen while starting up (661x544 at 640x480); the image was
+  centered in the whole window, which put a black bar at the top and cut off the bottom
+  until the next mode change. As with `ddraw.dll`, the screen shows the game now.
+
 ## 0.7.9
 - **A game changing its window's frame in exclusive mode** gets its window fitted to the
-  screen again (the frame just off it). JJ2+ changes its window's style while starting
-  up, which left the client area off the screen's edges: a black bar at the top until the
-  next mode change.
+  screen again (the frame just off it).
 - `log=2` also traces style changes, with the window and client rectangles.
 
 ## 0.7.8
