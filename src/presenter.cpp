@@ -171,6 +171,9 @@ void Presenter::GetGamma(DDGAMMARAMP* ramp) {
 void Presenter::ReleaseDevice() {
     if (staging_) staging_->Release();
     staging_ = nullptr;
+    if (prescaled_) prescaled_->Release();
+    prescaled_ = nullptr;
+    preW_ = preH_ = 0;
     stW_ = stH_ = 0;
     if (dev_) dev_->Release();
     dev_ = nullptr;
@@ -234,6 +237,9 @@ bool Presenter::EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT re
     if (coop == D3DERR_DEVICENOTRESET || w != bbW_ || h != bbH_) {
         if (staging_) staging_->Release();
         staging_ = nullptr;
+        if (prescaled_) prescaled_->Release();  // D3DPOOL_DEFAULT: gone before a Reset
+        prescaled_ = nullptr;
+        preW_ = preH_ = 0;
         stW_ = stH_ = 0;
         HRESULT hr = dev_->Reset(&pp);
         if (hr == D3DERR_DEVICELOST) return false;  // lost again before we got to it: retry later
@@ -253,6 +259,9 @@ bool Presenter::EnsureStaging(UINT w, UINT h) {
     if (staging_ && stW_ == w && stH_ == h) return true;
     if (staging_) staging_->Release();
     staging_ = nullptr;
+    if (prescaled_) prescaled_->Release();
+    prescaled_ = nullptr;
+    preW_ = preH_ = 0;
     HRESULT hr = dev_->CreateOffscreenPlainSurface(w, h, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &staging_, nullptr);
     if (FAILED(hr)) {
         DD2D9_LOG("CreateOffscreenPlainSurface(%u, %u) failed: 0x%08lx", w, h, hr);
@@ -262,6 +271,21 @@ bool Presenter::EnsureStaging(UINT w, UINT h) {
     stW_ = w;
     stH_ = h;
     stagingStale_ = true;
+    return true;
+}
+
+// filter=sharp's intermediate image: a render target (StretchRect filters only into one).
+bool Presenter::EnsurePrescaled(UINT w, UINT h) {
+    if (prescaled_ && preW_ == w && preH_ == h) return true;
+    if (prescaled_) prescaled_->Release();
+    prescaled_ = nullptr;
+    preW_ = preH_ = 0;
+    if (FAILED(dev_->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &prescaled_, nullptr))) {
+        prescaled_ = nullptr;
+        return false;
+    }
+    preW_ = w;
+    preH_ = h;
     return true;
 }
 
@@ -542,9 +566,24 @@ void Presenter::Loop() {
             OffsetRect(&dst, tg.left, tg.top);
             if (dst.left > 0 || dst.top > 0 || dst.right < LONG(bw) || dst.bottom < LONG(bh))
                 dev_->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
-            const bool same = UINT(dst.right - dst.left) == sw && UINT(dst.bottom - dst.top) == sh;
-            dev_->StretchRect(staging_, nullptr, bb, &dst,
-                              same || g_config.filter == 0 ? D3DTEXF_POINT : D3DTEXF_LINEAR);
+            const UINT dw = UINT(dst.right - dst.left), dh = UINT(dst.bottom - dst.top);
+            const bool same = dw == sw && dh == sh;
+            if (same || g_config.filter == 0) {
+                dev_->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_POINT);
+            } else if (g_config.filter == 2 && dw >= 2 * sw && dh >= 2 * sh) {
+                // Sharp bilinear: enlarged by the largest whole factor with point sampling (sharp
+                // pixels), the rest of the way with linear (no uneven pixel sizes, only the
+                // pixel edges blended).
+                const UINT k = std::min(dw / sw, dh / sh);
+                if (EnsurePrescaled(sw * k, sh * k)) {
+                    dev_->StretchRect(staging_, nullptr, prescaled_, nullptr, D3DTEXF_POINT);
+                    dev_->StretchRect(prescaled_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                } else {
+                    dev_->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                }
+            } else {
+                dev_->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+            }
             bb->Release();
         }
         HRESULT hr = dev_->Present(nullptr, nullptr, nullptr, nullptr);

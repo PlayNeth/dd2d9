@@ -1,6 +1,7 @@
 // DD2D9 test program.
 //   ddtest unit     - pixel-exact checks of blits, keys, conversion, GDI, flipping, surface lifetimes
 //   ddtest fs8      - exclusive 640x480x8 flip-chain animation with palette and GDI text
+//   ddtest pattern  - a still test image in exclusive 640x480x8 (or "pattern <w> <h>") for comparing filters
 //   ddtest win      - windowed (DDSCL_NORMAL) 32-bit desktop, blits to the primary through a clipper
 //   ddtest fuzz     - random same-format blits (keys, ranges, mirroring, stretching, overlap)
 //                     compared with a reference implementation, for 8/16/32-bit formats
@@ -418,6 +419,54 @@ static int RunUnit() {
     return 0;
 }
 
+// "pattern <w> <h>": a still test image in an exclusive 8-bit mode, held for a few seconds so a
+// screenshot can compare the scaling filters (1-pixel lines, a checkerboard, a diagonal).
+static int RunPattern(int modeW, int modeH) {
+    HWND hwnd = MakeWindow(WS_POPUP, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    if (!hwnd) return 1;
+    IDirectDraw7* dd = nullptr;
+    if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    CHECK(SUCCEEDED(dd->SetDisplayMode(modeW, modeH, 8, 0, 0)), "pattern: SetDisplayMode %dx%dx8", modeW, modeH);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* front = nullptr;
+    CHECK(SUCCEEDED(dd->CreateSurface(&d, &front, nullptr)), "pattern: primary");
+    if (!front) return 1;
+    PALETTEENTRY pe[256] = {};
+    pe[1] = {255, 255, 255, 0};
+    pe[2] = {255, 0, 0, 0};
+    IDirectDrawPalette* pal = nullptr;
+    dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, pe, &pal, nullptr);
+    front->SetPalette(pal);
+    d = {};
+    d.dwSize = sizeof(d);
+    if (SUCCEEDED(front->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) {
+        for (int y = 0; y < modeH; y++) {
+            BYTE* row = static_cast<BYTE*>(d.lpSurface) + y * d.lPitch;
+            for (int x = 0; x < modeW; x++) {
+                BYTE c = 0;
+                if (x < modeW / 2) c = ((x / 4 + y / 4) & 1) ? 1 : 0;      // 4-pixel checkerboard
+                else if ((x & 7) == 0 || (y & 7) == 0) c = 1;                // 1-pixel grid
+                if (x == y) c = 2;                                           // diagonal
+                row[x] = c;
+            }
+        }
+        front->Unlock(nullptr);
+    }
+    for (int i = 0; i < 40; i++) {  // ~4 s for the screenshot
+        Pump();
+        Sleep(100);
+    }
+    if (pal) pal->Release();
+    front->Release();
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 static int RunFullscreen8(int modeW, int modeH) {
     HWND hwnd = MakeWindow(WS_POPUP, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     const DWORD createError = hwnd ? 0 : GetLastError();
@@ -515,10 +564,10 @@ static int RunFullscreen8(int modeW, int modeH) {
         d = {};
         d.dwSize = sizeof(d);
         back->Lock(nullptr, &d, DDLOCK_WAIT, nullptr);
-        for (int y = 0; y < 480; y++) memset(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch, (y / 2) & 0x7F, 640);
+        for (int y = 0; y < modeH; y++) memset(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch, (y / 2) & 0x7F, modeW);
         back->Unlock(nullptr);
         for (int k = 0; k < 6; k++) {
-            int x = (i * (3 + k) + k * 90) % 576, y = 60 + k * 60 + ((i * 2) % 40);
+            int x = (i * (3 + k) + k * 90) % (modeW - 64), y = (60 + k * 60 + ((i * 2) % 40)) % (modeH - 64);
             back->BltFast(x, y, sprite, nullptr, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT);
         }
         HDC dc;
@@ -1068,7 +1117,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     g_out = fopen(path, "a");
     fprintf(g_out, "== ddtest %s\n", cmd);
     int r = 0;
-    if (strstr(cmd, "fs8")) {
+    if (strstr(cmd, "pattern")) {
+        int w = 640, h = 480;
+        sscanf(strstr(cmd, "pattern") + 7, "%d %d", &w, &h);
+        r = RunPattern(w, h);
+    }
+    else if (strstr(cmd, "fs8")) {
         // "fs8" runs at 640x480; "fs8 <w> <h>" uses another mode (a test display may only offer its own size)
         int w = 640, h = 480;
         sscanf(strstr(cmd, "fs8") + 3, "%d %d", &w, &h);

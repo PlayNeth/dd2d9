@@ -129,7 +129,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `display` | `switch`, `window`, `borderless` |
 | `present` | `window`, `exclusive` (D3D9 exclusive fullscreen after a real mode switch) |
 | `stretch` | `aspect`, `fill`, `integer` |
-| `filter` | `point`, `linear` |
+| `filter` | `point`, `linear`, `sharp` (bilinear-sharp: whole-multiple point scaling, then linear) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
 | `d3d` | `auto` (Direct3D objects for a wrapper when loaded as `ddraw_.dll`), `on`, `off` |
 | `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |

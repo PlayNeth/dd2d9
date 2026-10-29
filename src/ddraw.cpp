@@ -302,6 +302,52 @@ LONG ChangeDisplay(DEVMODEW* dm, DWORD flags) {
     return r;
 }
 
+// For the log: the program a process id belongs to ("?" if it can't be had).
+void ProcessName(DWORD pid, char* out, size_t size) {
+    snprintf(out, size, "?");
+    using QueryFn = BOOL(WINAPI*)(HANDLE, DWORD, LPWSTR, PDWORD);
+    static const QueryFn query = reinterpret_cast<QueryFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "QueryFullProcessImageNameW")));
+    if (!query || !pid) return;
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return;
+    wchar_t path[MAX_PATH];
+    DWORD n = MAX_PATH;
+    if (query(p, 0, path, &n)) {
+        const wchar_t* name = wcsrchr(path, L'\\');
+        snprintf(out, size, "%ls", name ? name + 1 : path);
+    }
+    CloseHandle(p);
+}
+
+// For the log: what took the focus from the game. WM_ACTIVATEAPP names the thread
+// whose window is being activated; once the switch is done, the foreground window.
+void LogFocusThief(DWORD thread, HWND fg) {
+    using PidFn = DWORD(WINAPI*)(HANDLE);
+    static const PidFn pidOfThread = reinterpret_cast<PidFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessIdOfThread")));
+    DWORD pid = 0;
+    if (thread && pidOfThread) {
+        if (HANDLE t = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, thread)) {
+            pid = pidOfThread(t);
+            CloseHandle(t);
+        }
+    }
+    char name[MAX_PATH];
+    ProcessName(pid, name, sizeof(name));
+    DD2D9_LOG("  activated: thread %04lx, process %lu (%s)%s", thread, pid, name,
+              pid && pid == GetCurrentProcessId() ? " - the game's own" : "");
+    if (!fg) return;
+    DWORD fgPid = 0;
+    const DWORD fgThread = GetWindowThreadProcessId(fg, &fgPid);
+    char cls[128] = "", title[128] = "";
+    GetClassNameA(fg, cls, sizeof(cls));
+    GetWindowTextA(fg, title, sizeof(title));
+    ProcessName(fgPid, name, sizeof(name));
+    DD2D9_LOG("  foreground: window %p, class \"%s\", title \"%s\", thread %04lx, process %lu (%s)",
+              static_cast<void*>(fg), cls, title, fgThread, fgPid, name);
+}
+
 UINT DeferredActivateMsg() {
     static UINT msg = RegisterWindowMessageW(L"DD2D9_DeferredActivate");
     return msg;
@@ -370,10 +416,10 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // Another thread may hold the display lock while it waits for this
         // thread (SetWindowPos on our window): never block here, retry later.
         if (TryEnterCriticalSection(&g_displayLock)) {
-            if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->OnActivate(wp != 0);
+            if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->OnActivate(wp != 0, DWORD(lp));
             LeaveCriticalSection(&g_displayLock);
         } else if (deferred) {
-            PostMessageW(h, deferred, wp, 0);
+            PostMessageW(h, deferred, wp, lp);
         }
         if (msg == deferred) return 0;
     } else if (msg == WM_DISPLAYCHANGE) {
@@ -488,7 +534,7 @@ void DDraw::UnhookWindow() {
 }
 
 // Called with g_displayLock held.
-void DDraw::OnActivate(bool active) {
+void DDraw::OnActivate(bool active, DWORD thread) {
     if (applying_ || !Exclusive() || !alive) return;
     // Before SetDisplayMode, the window covers the screen at the desktop mode (see ApplyWindow).
     const int display = modeSet_ ? activeDisplay_ : g_config.display;
@@ -514,6 +560,7 @@ void DDraw::OnActivate(bool active) {
         if (display != kDisplayWindow) InterlockedExchange(&deviceState_, kDevLost);
         // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
         if (cover && IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);  // a hidden one stays so
+        if (cover) LogFocusThief(thread, GetForegroundWindow());
         return;
     }
     InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
@@ -604,15 +651,26 @@ void DDraw::Uncover() {
 // As ddraw.dll: while the exclusive window covers its monitor and is in front, the
 // mouse stays on that monitor (with two monitors, a click on the other one would send
 // the game to the background). on = false lets it go again, if dd2d9 confined it.
+// Meanwhile other programs can't bring their windows to the front on their own (a
+// notification or a background program's window taking the focus, which sends the
+// game to the background as Alt+Tab would): the user still can, with Alt+Tab or a click.
 void DDraw::ConfineCursor(bool on) {
     if (on && hwnd_) {
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
         GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
         cursorConfined_ = ClipCursor(&mi.rcMonitor) != FALSE;
-    } else if (cursorConfined_) {
+        // Only the process in front may lock it; a failure leaves things as they were.
+        if (!foregroundLocked_) foregroundLocked_ = LockSetForegroundWindow(LSFW_LOCK) != FALSE;
+        return;
+    }
+    if (cursorConfined_) {
         ClipCursor(nullptr);
         cursorConfined_ = false;
+    }
+    if (foregroundLocked_) {
+        LockSetForegroundWindow(LSFW_UNLOCK);
+        foregroundLocked_ = false;
     }
 }
 

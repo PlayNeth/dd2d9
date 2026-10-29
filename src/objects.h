@@ -322,6 +322,7 @@ private:
     void Loop();
     bool EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT refresh);
     bool EnsureStaging(UINT w, UINT h);
+    bool EnsurePrescaled(UINT w, UINT h);
     void ReleaseDevice();
     // What the presenter copies from the primary surface under g_lock; the
     // pixels themselves are converted afterwards, without it.
@@ -346,6 +347,8 @@ private:
     IDirect3D9* d3d_ = nullptr;
     IDirect3DDevice9* dev_ = nullptr;
     IDirect3DSurface9* staging_ = nullptr;
+    IDirect3DSurface9* prescaled_ = nullptr;  // filter=sharp: the image enlarged by a whole factor
+    UINT preW_ = 0, preH_ = 0;
     HWND devHwnd_ = nullptr;
     bool devFullscreen_ = false;   // the device is a D3D9 exclusive-fullscreen one
     bool exclusiveFailed_ = false; // exclusive presentation failed once: stay windowed
@@ -460,7 +463,7 @@ public:
         return InterlockedExchange(&dirtyAll_, 0) != 0;
     }
     Presenter* GetPresenter() { return presenter_; }
-    void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
+    void OnActivate(bool active, DWORD thread);  // WM_ACTIVATEAPP while exclusive (thread: its lParam)
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
     void CheckCover(HWND h);       // the window moved in exclusive mode; g_displayLock held
     void OnPrimaryReleased();
@@ -548,6 +551,7 @@ private:
     DWORD recoverStart_ = 0;       // CheckCover: when its count started
     int recoverCount_ = 0;
     bool cursorConfined_ = false;  // ConfineCursor
+    bool foregroundLocked_ = false;  // ConfineCursor: LockSetForegroundWindow
     SIZE coverSize_ = {};        // its size, frame included
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
     bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)

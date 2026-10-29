@@ -105,6 +105,7 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
     } else if (key == "filter") {
         if (v == "point" || v == "nearest" || v == "0") g_config.filter = 0;
         else if (v == "linear" || v == "bilinear" || v == "1") g_config.filter = 1;
+        else if (v == "sharp" || v == "bilinear-sharp" || v == "sharp-bilinear" || v == "2") g_config.filter = 2;
         else ok = false;
     } else if (key == "present") {
         if (v == "window" || v == "windowed") g_config.present = kPresentWindow;
@@ -263,9 +264,10 @@ void LogInit() {
     for (const auto& f : g_iniLoaded) Log(1, "config:  %s", Utf8(f).c_str());
     for (const auto& e : g_iniErrors) Log(1, "config:  %s", Utf8(e).c_str());
     static const char* kD3D[] = {"auto", "on", "off"};
+    static const char* kFilter[] = {"point", "linear", "sharp"};
     Log(1, "settings: display=%s present=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], g_config.present == kPresentExclusive ? "exclusive" : "window",
-        kStretch[g_config.stretch], g_config.filter ? "linear" : "point", kVSync[g_config.vsync], kD3D[g_config.d3d],
+        kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first

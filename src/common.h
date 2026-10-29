@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.12"
+#define DD2D9_VERSION "0.7.13"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -28,7 +28,7 @@ enum { kD3DAuto, kD3DOn, kD3DOff };
 struct Config {
     int display = kDisplaySwitch;  // exclusive-mode games: real mode switch / centered window / borderless scaled
     int stretch = 0;               // window & borderless scaling: 0 aspect, 1 fill, 2 integer
-    int filter = 0;                // 0 point, 1 linear
+    int filter = 0;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear)
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int present = kPresentWindow;  // after a real mode switch: borderless window / D3D9 exclusive fullscreen
     int d3d = kD3DAuto;            // Direct3D objects for a wrapper (D7VK): auto = when loaded behind one

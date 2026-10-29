@@ -27,7 +27,12 @@ present=window
 ;   aspect (default), fill, integer
 stretch=aspect
 
-; Scaling filter: point (default, sharp pixels) or linear (smooth)
+; Scaling filter:
+;   point  - sharp pixels, but uneven at non-integer scales (default)
+;   linear - smooth, but blurry
+;   sharp  - in between (also bilinear-sharp): scaled up to the nearest whole multiple
+;            with sharp pixels, then smoothly the rest of the way; crisp, with only a
+;            one-pixel soft edge
 filter=point
 
 ; Vertical sync:
