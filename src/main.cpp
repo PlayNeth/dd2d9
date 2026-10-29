@@ -67,7 +67,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
         LoadConfig(inst);
         LogInit();
     }
-    if (reason == DLL_PROCESS_DETACH) LogFlush(reserved != nullptr);  // non-null: the process is exiting
+    if (reason == DLL_PROCESS_DETACH) {
+        if (!reserved) CrashLoggerRemove();  // unloaded while the process goes on: its handler must go too
+        LogFlush(reserved != nullptr);       // non-null: the process is exiting
+    }
     return TRUE;
 }
 

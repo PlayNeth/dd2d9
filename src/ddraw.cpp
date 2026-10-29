@@ -802,6 +802,12 @@ static void FinishCaps(DDSURFACEDESC2* d) {
 }
 
 HRESULT DDraw::CreateSurface(const void* inDesc, void** out, IUnknown* outer, int version) {
+    const HRESULT hr = CreateSurfaceImpl(inDesc, out, outer, version);
+    if (FAILED(hr)) DD2D9_LOG("CreateSurface failed: 0x%08lx", hr);
+    return hr;
+}
+
+HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer, int version) {
     if (outer) return CLASS_E_NOAGGREGATION;
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
@@ -816,7 +822,10 @@ HRESULT DDraw::CreateSurface(const void* inDesc, void** out, IUnknown* outer, in
     int w, h;
     Format fmt;
     if (caps & DDSCAPS_PRIMARYSURFACE) {
-        if (primary) return DDERR_PRIMARYSURFACEALREADYEXISTS;
+        if (primary) {
+            DD2D9_LOG("CreateSurface: the primary surface %p still exists", static_cast<void*>(primary));
+            return DDERR_PRIMARYSURFACEALREADYEXISTS;
+        }
         if (!coop_) return DDERR_NOCOOPERATIVELEVELSET;
         if (in.dwFlags & (DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT))
             DD2D9_LOG("CreateSurface: ignoring size/format given for the primary surface");

@@ -22,6 +22,8 @@ static std::wstring g_dllPath;                 // where this ddraw.dll was loade
 static std::wstring g_logPath;                 // log file actually opened
 static std::vector<std::wstring> g_iniLoaded;  // config files that were read
 static std::vector<std::wstring> g_iniErrors;  // unknown keys / bad values
+static PVOID g_crashHandler;                   // CrashLogger registration
+static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep);
 
 static std::wstring ModulePath(HMODULE m) {
     std::wstring s(kPathMax, L'\0');
@@ -257,6 +259,12 @@ void LogInit() {
         g_config.present == kPresentExclusive ? "exclusive" : "window", kStretch[g_config.stretch],
         g_config.filter ? "linear" : "point", kVSync[g_config.vsync], kD3D[g_config.d3d], g_config.log);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
+    g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
+}
+
+void CrashLoggerRemove() {
+    if (g_crashHandler) RemoveVectoredExceptionHandler(g_crashHandler);
+    g_crashHandler = nullptr;
 }
 
 bool WaitPumping(HANDLE h, DWORD timeoutMs) {
@@ -277,6 +285,79 @@ bool LoadedBehindWrapper() {
 }
 
 int LogLevel() { return g_logLevel; }
+
+// The module whose image (past its headers) contains `addr`, or null.
+static HMODULE ModuleAt(const void* addr) {
+    if (reinterpret_cast<ULONG_PTR>(addr) < 0x10000) return nullptr;  // null and small values: no module
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(addr), &m) || !m)
+        return nullptr;
+    const auto* base = reinterpret_cast<const uint8_t*>(m);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const ULONG_PTR off = static_cast<const uint8_t*>(addr) - base;
+    if (static_cast<const uint8_t*>(addr) < base || off < nt->OptionalHeader.SizeOfHeaders ||
+        off >= nt->OptionalHeader.SizeOfImage)
+        return nullptr;
+    return m;
+}
+
+// "module.dll+0x1234" for a code address, or the bare address outside any module.
+static void DescribeAddress(const void* addr, char* out, size_t size) {
+    if (HMODULE m = ModuleAt(addr)) {
+        snprintf(out, size, "%s+0x%lx", Utf8(BaseName(ModulePath(m))).c_str(),
+                 static_cast<unsigned long>(static_cast<const char*>(addr) - reinterpret_cast<const char*>(m)));
+    } else {
+        snprintf(out, size, "%p", addr);
+    }
+}
+
+// Logs crashes: which module faulted, and the modules found on the stack (a
+// rough call chain). Exceptions are seen before any handler runs, so one that
+// the program then handles is logged too; the number logged is limited.
+static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep) {
+    static LONG logged;
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    const char* what = nullptr;
+    switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION: what = "access violation"; break;
+    case EXCEPTION_IN_PAGE_ERROR: what = "in-page error"; break;
+    case EXCEPTION_ILLEGAL_INSTRUCTION: what = "illegal instruction"; break;
+    case EXCEPTION_PRIV_INSTRUCTION: what = "privileged instruction"; break;
+    case EXCEPTION_INT_DIVIDE_BY_ZERO: what = "integer division by zero"; break;
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: what = "array bounds exceeded"; break;
+    default: return EXCEPTION_CONTINUE_SEARCH;  // not a crash (or, for stack overflows, no stack left to log with)
+    }
+    if (InterlockedIncrement(&logged) > 5) return EXCEPTION_CONTINUE_SEARCH;
+    char at[300];
+    DescribeAddress(ep->ExceptionRecord->ExceptionAddress, at, sizeof(at));
+    char detail[64] = "";
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        const ULONG_PTR kind = ep->ExceptionRecord->ExceptionInformation[0];
+        snprintf(detail, sizeof(detail), " %s 0x%08lx", kind == 0 ? "reading" : kind == 8 ? "executing" : "writing",
+                 static_cast<unsigned long>(ep->ExceptionRecord->ExceptionInformation[1]));
+    }
+    Log(1, "exception 0x%08lx (%s%s) at %s - if the game crashed now, this is where", code, what, detail, at);
+#if defined(_M_IX86) || defined(__i386__)
+    // Return addresses: stack values that point into a loaded module. Only the
+    // committed memory region holding the stack pointer is read.
+    const auto* sp = reinterpret_cast<const ULONG_PTR*>(ep->ContextRecord->Esp);
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return EXCEPTION_CONTINUE_SEARCH;
+    const auto* top = reinterpret_cast<const ULONG_PTR*>(static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize);
+    std::string chain;
+    int found = 0;
+    for (int i = 0; i < 512 && sp + i < top && found < 12; i++) {
+        if (!ModuleAt(reinterpret_cast<const void*>(sp[i]))) continue;
+        DescribeAddress(reinterpret_cast<const void*>(sp[i]), at, sizeof(at));
+        chain += found++ ? ", " : "";
+        chain += at;
+    }
+    Log(1, "  stack (modules found, innermost first): %s", found ? chain.c_str() : "none");
+#endif
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 void Log(int level, const char* fmt, ...) {
     if (!g_logFile) return;

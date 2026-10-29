@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.6.0"
+#define DD2D9_VERSION "0.6.1"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -45,6 +45,7 @@ void LogInit();
 int LogLevel();
 void Log(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void LogFlush(bool processExit);
+void CrashLoggerRemove();  // before the DLL is unloaded (FreeLibrary)
 const char* GuidName(REFIID riid);
 
 #define DD2D9_LOG(...) do { if (::dd2d9::LogLevel() >= 1) ::dd2d9::Log(1, __VA_ARGS__); } while (0)

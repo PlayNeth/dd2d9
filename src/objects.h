@@ -294,6 +294,7 @@ public:
     void IntRelease();
 
     HRESULT CreateSurface(const void* desc, void** out, IUnknown* outer, int version);
+    HRESULT CreateSurfaceImpl(const void* desc, void** out, IUnknown* outer, int version);
     HRESULT CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPalette** out, IUnknown* outer);
     HRESULT CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* outer);
     HRESULT DuplicateSurface(void* src, void** out, int version);

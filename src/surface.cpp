@@ -139,6 +139,7 @@ Surface::~Surface() {
     delete static_cast<SurfaceWrap<7>*>(wraps_[4]);
     delete gamma;
     if (dd->primary == this) {
+        DD2D9_LOG("primary surface %p released", static_cast<void*>(this));
         dd->primary = nullptr;
         dd->MarkDirty();
     }
