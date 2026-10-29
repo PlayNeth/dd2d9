@@ -311,7 +311,7 @@ public:
     HRESULT GetScanLine(DWORD* line);
     HRESULT GetVerticalBlankStatus(BOOL* inVb);
     HRESULT Initialize(GUID* guid);
-    HRESULT SetCooperativeLevel(HWND hwnd, DWORD flags);
+    HRESULT SetCooperativeLevel(HWND hwnd, DWORD flags, int version);
     HRESULT SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD refresh, DWORD flags);
     HRESULT RestoreDisplayMode();
     HRESULT WaitForVerticalBlank(DWORD flags, HANDLE event);
@@ -398,6 +398,7 @@ private:
     bool modeSet_ = false;
     DWORD modeW_ = 0, modeH_ = 0, modeBpp_ = 0, modeRefresh_ = 0;
     bool switched_ = false;     // the real display mode was changed
+    bool ddraw1Coop_ = false;   // a SetCooperativeLevel through IDirectDraw succeeded (g_displayLock)
     bool suspended_ = false;    // display setup undone because the game lost focus
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
     int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used

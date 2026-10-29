@@ -193,7 +193,7 @@ public:
     STDMETHOD(GetVerticalBlankStatus)(WINBOOL* b) { return d->GetVerticalBlankStatus(b); }
     STDMETHOD(Initialize)(GUID* g) { return d->Initialize(g); }
     STDMETHOD(RestoreDisplayMode)() { return d->RestoreDisplayMode(); }
-    STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { return d->SetCooperativeLevel(h, f); }
+    STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { return d->SetCooperativeLevel(h, f, V); }
     STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp) { return d->SetDisplayMode(w, h, bpp, 0, 0); }
     STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD f) { return d->SetDisplayMode(w, h, bpp, rr, f); }
     STDMETHOD(WaitForVerticalBlank)(DWORD f, HANDLE e) { return d->WaitForVerticalBlank(f, e); }

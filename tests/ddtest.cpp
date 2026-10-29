@@ -614,6 +614,49 @@ static int RunLifetime() {
     return 0;
 }
 
+// Leaving exclusive mode: DirectDraw 2+ restores the desktop mode, DirectDraw 1
+// keeps the game's mode (as Windows does; Jazz Jackrabbit 2 relies on it).
+static int RunCoopModes() {
+    HWND hwnd = MakeWindow(WS_POPUP, 640, 480);
+    const int deskW = GetSystemMetrics(SM_CXSCREEN), deskH = GetSystemMetrics(SM_CYSCREEN);
+    for (int v : {1, 7}) {
+        DWORD w = 0, h = 0;
+        HRESULT hr;
+        if (v == 1) {
+            IDirectDraw* dd = nullptr;
+            DirectDrawCreate(nullptr, &dd, nullptr);
+            if (!dd) return 1;
+            dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+            hr = dd->SetDisplayMode(640, 480, 16);
+            dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+            DDSURFACEDESC d = {};
+            d.dwSize = sizeof(d);
+            dd->GetDisplayMode(&d);
+            w = d.dwWidth;
+            h = d.dwHeight;
+            dd->Release();
+        } else {
+            IDirectDraw7* dd = nullptr;
+            DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+            if (!dd) return 1;
+            dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+            hr = dd->SetDisplayMode(640, 480, 16, 0, 0);
+            dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            dd->GetDisplayMode(&d);
+            w = d.dwWidth;
+            h = d.dwHeight;
+            dd->Release();
+        }
+        const bool keeps = v == 1;
+        CHECK(SUCCEEDED(hr) && (keeps ? (w == 640 && h == 480) : (int(w) == deskW && int(h) == deskH)),
+              "DirectDraw %d: exclusive -> NORMAL %s the display mode (%lux%lu)", v, keeps ? "keeps" : "restores", w, h);
+    }
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 // ---------------------------------------------------------------- fuzz
 
 // A surface and a model of what it should contain.
@@ -825,7 +868,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     }
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
-    else r = RunUnit() | RunLifetime();
+    else r = RunUnit() | RunLifetime() | RunCoopModes();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);

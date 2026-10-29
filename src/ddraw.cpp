@@ -474,8 +474,8 @@ HRESULT DDraw::Initialize(GUID*) {
     return DD_OK;
 }
 
-HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags) {
-    DD2D9_LOG("SetCooperativeLevel(%p, 0x%lx)", static_cast<void*>(hwnd), flags);
+HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
+    DD2D9_LOG("SetCooperativeLevel(%p, 0x%lx)%s", static_cast<void*>(hwnd), flags, version == 1 ? " (DirectDraw 1)" : "");
     // Validation as in ddraw.dll.
     if (flags & ~0x3FFFu) return DDERR_INVALIDPARAMS;
     if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
@@ -486,22 +486,34 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags) {
         return DDERR_INVALIDPARAMS;
 
     DisplayGuard dg;
+    // Once a call through IDirectDraw (version 1) succeeds, the object keeps the
+    // DirectDraw 1 behavior below, whatever interface is used afterwards.
+    if (version == 1) ddraw1Coop_ = true;
     if ((flags & (DDSCL_SETFOCUSWINDOW | DDSCL_SETDEVICEWINDOW)) && !(flags & (DDSCL_NORMAL | DDSCL_EXCLUSIVE))) {
         Guard l;
         if (hwnd) hwnd_ = hwnd;
         return DD_OK;
     }
     const bool leaving = Exclusive() && !(flags & DDSCL_EXCLUSIVE);
+    // Leaving exclusive mode restores the desktop mode, except with DirectDraw 1:
+    // there the display stays as the game set it (games switch through NORMAL
+    // between their screens) until RestoreDisplayMode or the final Release.
+    const bool restore = leaving && !ddraw1Coop_;
     if (leaving) {
         UnhookWindow();
-        RestoreDisplay();
+        if (restore) {
+            RestoreDisplay();
+        } else {
+            DropExclusiveDevice();  // a fullscreen device needs exclusive mode
+            suspended_ = false;
+            DD2D9_LOG("leaving exclusive mode: the display mode stays (DirectDraw 1)");
+        }
     }
     {
         Guard l;
         coop_ = flags;
         if (hwnd) hwnd_ = hwnd;
-        if (leaving) {
-            // Back to the desktop mode, as ddraw.dll does when exclusive mode ends.
+        if (restore) {
             modeSet_ = false;
             if (!PrimaryBusy()) ResizePrimary();
         }

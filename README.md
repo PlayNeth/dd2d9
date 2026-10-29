@@ -118,7 +118,7 @@ install DXVK's `d3d9.dll` into the prefix, or put it next to the game.
 - `ddtest fuzz` runs thousands of random blits (8/16/32-bit, color keys and key
   ranges, mirroring, stretching, overlapping copies) against a reference implementation.
 
-All 73 checks pass under Wine 11 (wined3d, Xvfb).
+All 75 checks pass under Wine 11 (wined3d, Xvfb).
 
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter
 throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small
