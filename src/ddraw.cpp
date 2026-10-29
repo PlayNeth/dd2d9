@@ -226,8 +226,12 @@ void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE: name = "WM_CLOSE"; break;
         default: return;
     }
-    DD2D9_TRACE("window %p: %s wParam 0x%lx lParam 0x%lx (foreground %p)", static_cast<void*>(h), name,
-               static_cast<unsigned long>(wp), static_cast<unsigned long>(lp), static_cast<void*>(GetForegroundWindow()));
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm);
+    DD2D9_TRACE("window %p: %s wParam 0x%lx lParam 0x%lx (foreground %p, display %lux%lu)", static_cast<void*>(h),
+               name, static_cast<unsigned long>(wp), static_cast<unsigned long>(lp),
+               static_cast<void*>(GetForegroundWindow()), dm.dmPelsWidth, dm.dmPelsHeight);
 }
 
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -245,12 +249,14 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == deferred) return 0;
     } else if (msg == WM_DISPLAYCHANGE) {
         // Before the game sees it, as ddraw.dll: the surfaces are lost and the window
-        // covers the screen in the new mode. Windows may deliver the notice of the mode
-        // the game set itself late, after ChangeDisplaySettings returned and the game
-        // made its new surfaces: SetDisplayMode already lost the old ones, the new stay.
+        // covers the screen in the new mode. Windows sends the notices twice, the second
+        // time late (after ChangeDisplaySettings returned and the game made its new
+        // surfaces), and between two game modes one may name the desktop's: only a
+        // display that really left the game's mode loses the surfaces. SetDisplayMode
+        // already lost those of the old mode.
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner) {
-            if (!owner->IsOwnMode(LOWORD(lp), HIWORD(lp))) owner->InvalidateSurfaces();
+            if (!owner->InOwnMode()) owner->InvalidateSurfaces();
             if (TryEnterCriticalSection(&g_displayLock)) {
                 if (g_hook.owner == owner) owner->OnDisplayChange();
                 LeaveCriticalSection(&g_displayLock);
@@ -713,10 +719,14 @@ void DDraw::OnPrimaryReleased() {
     if (modeSet_ && hwnd_ && IsWindow(hwnd_)) RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
 }
 
-// The display mode the game set and dd2d9 switched to (read without a lock: a stale
-// answer only means one more or one less loss of surfaces).
-bool DDraw::IsOwnMode(DWORD w, DWORD h) const {
-    return switched_ && modeSet_ && w == modeW_ && h == modeH_;
+// The display is in the mode the game set and dd2d9 switched to (read without a lock:
+// a stale answer only means one more or one less loss of surfaces).
+bool DDraw::InOwnMode() const {
+    if (!switched_ || !modeSet_) return false;
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm)) return false;
+    return dm.dmPelsWidth == modeW_ && dm.dmPelsHeight == modeH_;
 }
 
 // g_lock held (the other object's primary is read).

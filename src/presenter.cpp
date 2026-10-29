@@ -170,6 +170,13 @@ bool Presenter::EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT re
             DD2D9_LOG("Direct3DCreate9 failed");
             return false;
         }
+        static bool named;  // which d3d9.dll presents: the system's, or one in the game folder (DXVK)
+        if (!named) {
+            named = true;
+            char path[MAX_PATH] = "?";
+            if (HMODULE m = GetModuleHandleW(L"d3d9.dll")) GetModuleFileNameA(m, path, MAX_PATH);
+            DD2D9_LOG("presenting through %s", path);
+        }
         HRESULT hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
                                         D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE |
                                             D3DCREATE_NOWINDOWCHANGES,  // the game's window is ours to manage
