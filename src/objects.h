@@ -139,6 +139,9 @@ public:
     // interface they were created with (as ddraw.dll counts it); dd2d9's own references
     // (Direct3D render targets) have a count of their own.
     enum RefSlot { kRefV1, kRefV2, kRefV3, kRefV4, kRefV7, kRefGamma, kRefInternal, kRefSlots };
+    // The interface GetAttachedSurface and EnumAttachedSurfaces hand out through `version`:
+    // IDirectDrawSurface2/3 give IDirectDrawSurface (v1) ones, as ddraw.dll does.
+    static int HandedOut(int version) { return version >= 4 ? version : 1; }
     static int SlotFor(int version) {
         return version == 1 ? kRefV1 : version == 2 ? kRefV2 : version == 3 ? kRefV3 : version == 4 ? kRefV4 : kRefV7;
     }
@@ -146,7 +149,7 @@ public:
     ULONG Release(int slot = kRefInternal);
     void TraceRef(const char* what, int slot, LONG r) const;  // log=2, primary chain only
 
-    HRESULT AddAttachedSurface(Surface* s, int version);
+    HRESULT AddAttachedSurface(Surface* s, int version, int attacheeVersion);
     HRESULT DeleteAttachedSurface(DWORD flags, Surface* s, int ifaceVersion);
     HRESULT EnumAttachedSurfaces(int version, void* ctx, void* callback);
     HRESULT GetAttachedSurface(const DDSCAPS2& caps, Surface** out, int version);
@@ -405,7 +408,7 @@ public:
     HRESULT CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* outer, int version);
     HRESULT DuplicateSurface(void* src, void** out, int ddVersion);
     HRESULT EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void* callback, int descVersion);
-    HRESULT EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version);
+    HRESULT EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version, int ddVersion);
     HRESULT GetCaps(DDCAPS* drv, DDCAPS* hel);
     HRESULT GetDisplayMode(void* desc, int version);
     HRESULT GetGDISurface(void** out, int version);

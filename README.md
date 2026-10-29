@@ -100,12 +100,11 @@ ratio, or centered) decides how it fills the screen.
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).
 - **A second DirectDraw object takes exclusive mode over** from the first (as in Wine;
   `ddraw.dll` refuses it with `DDERR_EXCLUSIVEMODEALREADYSET` while the first is active).
-  Type Wild relies on it.
 - **A primary surface a mode change made lost can be replaced** by a new one
-  (`ddraw.dll` refuses any second primary). Jazz Jackrabbit 2 relies on it.
-- **IDirectDrawSurface2/3's GetAttachedSurface and EnumAttachedSurfaces hand out the
-  interface they were called through** (`ddraw.dll` hands out IDirectDrawSurface), so the
-  v2/v3 methods work on the result.
+  (`ddraw.dll` refuses any second primary).
+  These two only matter behind D7VK, which keeps references the games released (Type
+  Wild's DirectDraw object, Jazz Jackrabbit 2's old front buffer), so on XP they're gone
+  and behind D7VK they aren't. They go once dd2d9 does Direct3D itself.
 - **`DDPCAPS_PRIMARYSURFACE` is accepted in CreatePalette** (`ddraw.dll` refuses it), for
   games made on Windows 9x.
 

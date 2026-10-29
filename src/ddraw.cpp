@@ -400,6 +400,9 @@ void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
 }
 
+LONG_PTR GetProc(HWND h, bool unicode);
+LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc);
+
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
     const UINT deferred = DeferredActivateMsg();
@@ -471,12 +474,24 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL) ClientToScreen(h, &p);
         if (MouseToGame(&p)) lp = MAKELPARAM(p.x, p.y);
-    } else if (msg == WM_SYSCOMMAND && ((wp & 0xFFF0) == SC_SCREENSAVE || (wp & 0xFFF0) == SC_MONITORPOWER)) {
+    } else if (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_SCREENSAVE) {
+        // As ddraw.dll (FUN_7375dcdc): no screensaver in exclusive mode. The monitor may
+        // still power down (SC_MONITORPOWER goes through).
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner && owner->Exclusive()) return 0;
     }
     const WNDPROC orig = g_hook.orig;
     const bool unicode = g_hook.unicode;
+    if (msg == WM_NCDESTROY && h == g_hook.hwnd) {
+        // As ddraw.dll: the window is going, and the hook with it. The game's procedure
+        // gets the message first; the window's procedure is put back (a later message
+        // goes straight to the game's), and dd2d9 no longer counts the window as hooked.
+        const LRESULT r = !orig ? (unicode ? DefWindowProcW(h, msg, wp, lp) : DefWindowProcA(h, msg, wp, lp))
+                                : (unicode ? CallWindowProcW(orig, h, msg, wp, lp) : CallWindowProcA(orig, h, msg, wp, lp));
+        if (orig && GetProc(h, unicode) == reinterpret_cast<LONG_PTR>(HookProc)) SetProc(h, unicode, reinterpret_cast<LONG_PTR>(orig));
+        g_hook.hwnd = nullptr;
+        return r;
+    }
     if (!orig) return unicode ? DefWindowProcW(h, msg, wp, lp) : DefWindowProcA(h, msg, wp, lp);
     return unicode ? CallWindowProcW(orig, h, msg, wp, lp) : CallWindowProcA(orig, h, msg, wp, lp);
 }
@@ -493,7 +508,16 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc) {
 
 void DDraw::HookWindow() {
     if (!hwnd_ || !IsWindow(hwnd_)) return;
-    InstallMouseHooks();  // modules the game loaded since the last time too
+    // As ddraw.dll: no "Not Responding" ghost window replaces the game's while it is busy
+    // (loading a level without pumping messages). For the process, once.
+    static const bool noGhosting = [] {
+        using Fn = void(WINAPI*)();
+        if (const auto fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+                GetProcAddress(GetModuleHandleW(L"user32.dll"), "DisableProcessWindowsGhosting"))))
+            fn();
+        return true;
+    }();
+    (void)noGhosting;
     if (g_hook.hwnd == hwnd_) {  // already in this window's chain (maybe from an earlier DirectDraw object)
         g_hook.owner = this;
         return;
@@ -555,6 +579,9 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         ConfineCursor(false);
         // Window mode is an ordinary window; switch and borderless cover the screen.
         const bool cover = display != kDisplayWindow && !suspended_;
+        // DDSCL_NOWINDOWCHANGES: the mode goes back, the window is left alone (as ddraw.dll:
+        // neither minimized nor made non-topmost; spec: re/spec/window-procedure.md).
+        const bool windowChanges = !(coop_ & DDSCL_NOWINDOWCHANGES);
         if (cover) {
             DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
             suspended_ = true;      // first: the presenter must not create a new device from here on
@@ -564,21 +591,21 @@ void DDraw::OnActivate(bool active, DWORD thread) {
                 switched_ = false;
                 UpdateRefreshRate();
             }
-            SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (windowChanges) SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         // From here on (as in ddraw.dll, once the desktop mode is back) the surfaces are
         // lost and can't be restored; back in front they can (see UpdateLostSurfaces).
         // Window mode stays an ordinary, visible window: the game keeps running.
         if (display != kDisplayWindow) InterlockedExchange(&deviceState_, kDevLost);
         // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
-        if (cover && IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);  // a hidden one stays so
+        if (cover && windowChanges && IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);  // a hidden one stays so
         if (cover) LogFocusThief(thread, GetForegroundWindow());
         return;
     }
     InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     if (suspended_) {
         DD2D9_LOG("focus regained: setting up %lux%lu again", modeW_, modeH_);
-        if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+        if (IsIconic(hwnd_) && !(coop_ & DDSCL_NOWINDOWCHANGES)) ShowWindow(hwnd_, SW_RESTORE);
         ApplyWindow();
         // Only now: until the mode is switched back the presenter must not create
         // a device (it would make a windowed one, then replace it right away).
@@ -598,6 +625,8 @@ void DDraw::OnDisplayChange() {
     const int display = modeSet_ ? activeDisplay_ : g_config.display;
     if (display == kDisplayWindow) return;
     CoverMonitor(HWND_TOP, SWP_NOACTIVATE);
+    // As ddraw.dll: the cursor stays on the (possibly resized) screen while in front.
+    if (GetForegroundWindow() == hwnd_) ConfineCursor(true);
 }
 
 // The window covers its monitor in exclusive mode. ddraw.dll leaves the window's style
@@ -749,6 +778,10 @@ void DDraw::ApplyWindow() {
         UpdateRefreshRate();
     }
     activeDisplay_ = display;
+    // The game's mode shown scaled or in a window: its cursor functions are pointed at
+    // dd2d9's (input.cpp), which show it the mode as its screen. A real mode switch
+    // leaves its imports alone. Again for each mode: modules loaded since are covered.
+    if (modeSet_ && display != kDisplaySwitch) InstallMouseHooks();
     if (!windowChanges) {
         applying_ = false;
         return;
@@ -970,6 +1003,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
     if ((flags & DDSCL_EXCLUSIVE) && (!hwnd || (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)))
         return DDERR_INVALIDPARAMS;
+    // A call through IDirectDraw (version 1) that gets past the checks gives the object
+    // the DirectDraw 1 behavior below for good, whatever interface is used afterwards;
+    // as in ddraw.dll, even if the window then can't be taken (HWNDALREADYSET).
+    if (version == 1) ddraw1Coop_ = true;
     // As ddraw.dll: exclusive mode stays on its window until the game goes back to normal.
     if ((flags & DDSCL_EXCLUSIVE) && Exclusive() && hwnd != hwnd_) return DDERR_HWNDALREADYSET;
     // A window with a dialog frame but no border is left alone, as ddraw.dll leaves it.
@@ -983,9 +1020,6 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     // without releasing the old one, hangs otherwise.
     DDraw* const prev = (flags & DDSCL_EXCLUSIVE) && g_exclusiveDD && g_exclusiveDD != this ? g_exclusiveDD : nullptr;
 
-    // Once a call through IDirectDraw (version 1) succeeds, the object keeps the
-    // DirectDraw 1 behavior below, whatever interface is used afterwards.
-    if (version == 1) ddraw1Coop_ = true;
     const bool leaving = Exclusive() && !(flags & DDSCL_EXCLUSIVE);
     // Taking exclusive mode activates the window, as in ddraw.dll (asking again changes
     // nothing).
@@ -1636,7 +1670,7 @@ static bool DescMatches(const DDSURFACEDESC2& want, const Surface* s) {
 
 // Checks in ddraw.dll's order (spec: re/spec/ddraw-object.md, EnumSurfaces). The wrapper
 // checked the filter's size for the interface version.
-HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version) {
+HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* callback, int version, int ddVersion) {
     if (!callback || IsBadCodePtr(reinterpret_cast<FARPROC>(callback)) || (flags & ~0x1Fu)) return DDERR_INVALIDPARAMS;
     using CB = HRESULT(WINAPI*)(void*, void*, void*);
     DDSURFACEDESC2 want = {};
@@ -1661,8 +1695,12 @@ HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* ca
             DDSURFACEDESC v1;
             DDSURFACEDESC2 v2;
         } out;
-        out.v1.dwSize = version >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
-        DescOut(d, &out);
+        if (version >= 4) {
+            out.v2.dwSize = sizeof(DDSURFACEDESC2);
+            DescOut(d, &out);
+        } else {
+            DescOutEnum(d, &out.v1);  // as ddraw.dll: the new structure cut short
+        }
         return reinterpret_cast<CB>(callback)(s ? s->Iface(version) : nullptr, &out, ctx);
     };
     if (flags & DDENUMSURFACES_CANBECREATED) {
@@ -1696,7 +1734,8 @@ HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* ca
             in.v1.dwSize = version >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
             DescOut(d, &in);
             void* iface = nullptr;
-            if (FAILED(CreateSurfaceImpl(&in, &iface, nullptr, version))) return true;
+            // With the rules of the interface called (IDirectDraw2's, not IDirectDraw's).
+            if (FAILED(CreateSurfaceImpl(&in, &iface, nullptr, ddVersion))) return true;
             Surface* s = Surface::From(iface);
             DDSURFACEDESC2 got;
             {

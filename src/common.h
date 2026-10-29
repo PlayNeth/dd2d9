@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.15"
+#define DD2D9_VERSION "0.7.16"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -163,6 +163,7 @@ uint32_t ARGBToPixel(const Format& f, uint32_t argb);
 bool DescSizeOk(const void* desc);
 bool DescIn(const void* in, DDSURFACEDESC2* out);
 void DescOut(const DDSURFACEDESC2& in, void* out);
+void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interface enumerations
 
 // ---------------------------------------------------------------- mouse (input.cpp)
 // The game's user32 imports of the cursor functions point at dd2d9's, which translate

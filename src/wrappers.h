@@ -38,7 +38,19 @@ public:
     STDMETHOD(QueryInterface)(REFIID r, void** p) override { return s->QueryInterface(r, p); }
     STDMETHOD_(ULONG, AddRef)() override { return s->AddRef(Surface::SlotFor(V)); }
     STDMETHOD_(ULONG, Release)() override { return s->Release(Surface::SlotFor(V)); }
-    STDMETHOD(AddAttachedSurface)(I* a) { Guard l; return s->AddAttachedSurface(S(a), V); }
+    // The interface version of a surface pointer the game passed (by identity): ddraw.dll
+    // counts an attachment on the pointer given, whatever interface it was called through
+    // (spec: re/spec/legacy-interfaces.md, difference 1).
+    static int VersionOf(void* iface, Surface* x) {
+        for (int v : {1, 2, 3, 4, 7})
+            if (iface == x->Iface(v)) return v;
+        return V;
+    }
+    STDMETHOD(AddAttachedSurface)(I* a) {
+        Guard l;
+        Surface* x = S(a);
+        return s->AddAttachedSurface(x, V, x ? VersionOf(a, x) : V);
+    }
     // No overlays here: the overlay methods give what ddraw.dll gives for other surfaces
     // (spec: re/spec/surface-other.md, "Overlay methods on non-overlay surfaces").
     STDMETHOD(AddOverlayDirtyRect)(LPRECT r) {
@@ -75,7 +87,11 @@ public:
         if (!ss) return DDERR_INVALIDPARAMS;
         return TraceFail("BltFast", s, s->BltFast(x, y, ss, sr, t, V));
     }
-    STDMETHOD(DeleteAttachedSurface)(DWORD f, I* a) { Guard l; return s->DeleteAttachedSurface(f, S(a), V); }
+    STDMETHOD(DeleteAttachedSurface)(DWORD f, I* a) {
+        Guard l;
+        Surface* x = S(a);
+        return s->DeleteAttachedSurface(f, x, x ? VersionOf(a, x) : V);
+    }
     STDMETHOD(EnumAttachedSurfaces)(LPVOID ctx, typename T::CB cb) {
         return s->EnumAttachedSurfaces(V, ctx, reinterpret_cast<void*>(cb));
     }
@@ -89,13 +105,18 @@ public:
         return TraceFail("Flip", s, s->Flip(t, f));
     }
     STDMETHOD(GetAttachedSurface)(typename T::Caps* caps, I** out) {
-        if (!caps || !out) return DDERR_INVALIDPARAMS;
+        // As ddraw.dll (spec: re/spec/legacy-interfaces.md, difference 5): a lost surface
+        // fails first, and *out is left alone until the search runs.
         Guard l;
+        if (s->IsLost()) return DDERR_SURFACELOST;
+        if (!caps || !out) return DDERR_INVALIDPARAMS;
         Surface* a = nullptr;
         DDSCAPS2 c = ToCaps2(*caps);
         if (V < 4) c.dwCaps2 = c.dwCaps3 = c.dwCaps4 = 0;  // IDirectDrawSurface 1-3: only dwCaps
-        HRESULT hr = s->GetAttachedSurface(c, &a, V);
-        *out = SUCCEEDED(hr) ? static_cast<I*>(a->Iface(V)) : nullptr;
+        HRESULT hr = s->GetAttachedSurface(c, &a, Surface::HandedOut(V));
+        if (hr != DDERR_INVALIDCAPS) *out = SUCCEEDED(hr) ? static_cast<I*>(a->Iface(Surface::HandedOut(V))) : nullptr;
+        DD2D9_TRACE("GetAttachedSurface %p (v%d) caps 0x%lx -> %p (0x%08lx)", static_cast<void*>(s), V,
+                    static_cast<unsigned long>(c.dwCaps), static_cast<void*>(a), static_cast<unsigned long>(hr));
         return hr;
     }
     STDMETHOD(GetBltStatus)(DWORD f) {  // blits are done when Blt returns
@@ -256,7 +277,7 @@ public:
         DD2D9_READY();
         // A filter of this interface version's size only, as in ddraw.dll.
         if (desc && desc->dwSize != sizeof(typename T::Desc)) return DDERR_INVALIDPARAMS;
-        return d->EnumSurfaces(f, desc, ctx, reinterpret_cast<void*>(cb), T::SV);
+        return d->EnumSurfaces(f, desc, ctx, reinterpret_cast<void*>(cb), T::SV, V);
     }
     STDMETHOD(FlipToGDISurface)() { DD2D9_READY(); return d->FlipToGDISurface(); }
     STDMETHOD(GetCaps)(LPDDCAPS drv, LPDDCAPS hel) { DD2D9_READY(); return d->GetCaps(drv, hel); }

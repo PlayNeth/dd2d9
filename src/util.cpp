@@ -613,6 +613,17 @@ bool DescIn(const void* in, DDSURFACEDESC2* out) {
     return true;
 }
 
+// The enumerations through the old interfaces (EnumAttachedSurfaces v1-3, EnumSurfaces
+// through IDirectDraw/2) hand out ddraw.dll's DDSURFACEDESC2 cut to the old size: the
+// fields are where the old structure has them, a Z buffer keeps its pixel format
+// (no DDSD_ZBUFFERBITDEPTH; spec: re/spec/legacy-interfaces.md, difference 2).
+void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out) {
+    static_assert(sizeof(DDSURFACEDESC) == 0x6c && offsetof(DDSURFACEDESC2, ddsCaps) == offsetof(DDSURFACEDESC, ddsCaps),
+                  "the old structure is the new one's start");
+    memcpy(out, &in, sizeof(DDSURFACEDESC));
+    out->dwSize = sizeof(DDSURFACEDESC);
+}
+
 void DescOut(const DDSURFACEDESC2& in, void* out) {
     if (*static_cast<DWORD*>(out) == sizeof(DDSURFACEDESC2)) {
         *static_cast<DDSURFACEDESC2*>(out) = in;

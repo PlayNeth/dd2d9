@@ -370,6 +370,38 @@ static int RunUnit() {
         }
     }
 
+    // The old surface interfaces, as ddraw.dll (spec: re/spec/legacy-interfaces.md): an
+    // attachment is the pointer passed (a v1 one through IDirectDrawSurface3 here), and
+    // IDirectDrawSurface2/3 hand out IDirectDrawSurface (v1) pointers.
+    {
+        IDirectDrawSurface7* a7 = Make32(dd, 8, 8);
+        IDirectDrawSurface7* b7 = Make32(dd, 8, 8);
+        IDirectDrawSurface3* a3 = nullptr;
+        IDirectDrawSurface* a1 = nullptr;
+        IDirectDrawSurface* b1 = nullptr;
+        a7->QueryInterface(IID_IDirectDrawSurface3, reinterpret_cast<void**>(&a3));
+        a7->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<void**>(&a1));
+        b7->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<void**>(&b1));
+        auto* b1as3 = reinterpret_cast<IDirectDrawSurface3*>(b1);
+        hr = a3->AddAttachedSurface(b1as3);
+        CHECK(hr == DD_OK, "v1 pointer attached through IDirectDrawSurface3 (0x%08lx)", hr);
+        DDSCAPS want = {DDSCAPS_BACKBUFFER};
+        IDirectDrawSurface3* got = nullptr;
+        hr = a3->GetAttachedSurface(&want, &got);
+        CHECK(hr == DD_OK && static_cast<void*>(got) == static_cast<void*>(b1),
+              "IDirectDrawSurface3::GetAttachedSurface hands out the v1 pointer (0x%08lx)", hr);
+        if (got) got->Release();
+        hr = a3->AddAttachedSurface(b1as3);
+        CHECK(hr == DDERR_SURFACEALREADYATTACHED, "the same pointer again -> SURFACEALREADYATTACHED (0x%08lx)", hr);
+        hr = a1->DeleteAttachedSurface(0, b1);
+        CHECK(hr == DD_OK, "detached through IDirectDrawSurface with the same pointer (0x%08lx)", hr);
+        b1->Release();
+        a1->Release();
+        a3->Release();
+        b7->Release();
+        a7->Release();
+    }
+
     // Flip chain swaps memory
     IDirectDrawSurface7* prim = nullptr;
     {

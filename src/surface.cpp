@@ -303,6 +303,7 @@ HRESULT Surface::QueryInterface(REFIID r, void** out) {
     else if (IsEqualGUID(r, IID_IDirectDrawSurface4)) v = 4;
     else if (IsEqualGUID(r, IID_IDirectDrawSurface7)) v = 7;
     if (v) {
+        DD2D9_TRACE("QueryInterface %p -> IDirectDrawSurface v%d", static_cast<void*>(this), v);
         AddRef(SlotFor(v));
         *out = Iface(v);
         return S_OK;
@@ -466,7 +467,9 @@ static bool FlipCompatible(const Surface* a, const Surface* b) {
 }
 
 // Checks in ddraw.dll's order (spec: re/spec/surface-other.md, AddAttachedSurface).
-HRESULT Surface::AddAttachedSurface(Surface* s, int version) {
+// `version` is the interface called, `attacheeVersion` that of the pointer passed (whose
+// reference the attachment holds).
+HRESULT Surface::AddAttachedSurface(Surface* s, int version, int attacheeVersion) {
     if (!s) return DDERR_INVALIDPARAMS;
     const DWORD tc = desc.ddsCaps.dwCaps, ac = s->desc.ddsCaps.dwCaps;
     // IDirectDrawSurface7 attaches Z buffers only (to anything but a Z buffer, or the other way round).
@@ -475,14 +478,11 @@ HRESULT Surface::AddAttachedSurface(Surface* s, int version) {
     if ((tc & DDSCAPS_PRIMARYSURFACE) && !dd->Exclusive()) return DDERR_NOEXCLUSIVEMODE;
     if (s == this) return DDERR_CANNOTATTACHSURFACE;
     if (IsLost() || s->IsLost()) return DDERR_SURFACELOST;
-    const int slot = SlotFor(version);
-    for (const AttachEntry& e : AttachList()) {
-        if (e.s != s) continue;
-        // The same interface pointer is there already. Through another interface version
-        // ddraw.dll refuses it too, as a different attachment it can't make.
-        if (e.slot < 0 || e.slot == slot) return DDERR_SURFACEALREADYATTACHED;
-        return DDERR_CANNOTATTACHSURFACE;
-    }
+    const int slot = SlotFor(attacheeVersion);
+    // The same interface pointer attached already (or made with this surface). Another
+    // pointer to the same surface goes on to the checks below, as in ddraw.dll.
+    for (const AttachEntry& e : AttachList())
+        if (e.s == s && (e.slot < 0 || e.slot == slot)) return DDERR_SURFACEALREADYATTACHED;
     // Sizes: a mipmap level no bigger than this one; a texture and a non-texture of any
     // sizes (a Z buffer on a texture); otherwise equal.
     const DWORD mipTex = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
@@ -673,7 +673,7 @@ HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
         Guard l;
         if (IsLost()) return DDERR_SURFACELOST;
         for (const AttachEntry& e : AttachList()) list.push_back(e.s);
-        for (Surface* s : list) s->AddRef(SlotFor(v));  // the callback releases it
+        for (Surface* s : list) s->AddRef(SlotFor(HandedOut(v)));  // the callback releases it
     }
     size_t i = 0;
     for (; i < list.size(); i++) {
@@ -683,14 +683,21 @@ HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
             DDSURFACEDESC v1;
             DDSURFACEDESC2 v2;
         } out;
-        out.v1.dwSize = v >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);
-        DescOut(d2, &out);
-        if (reinterpret_cast<CB>(callback)(list[i]->Iface(v), &out, ctx) == DDENUMRET_CANCEL) {
+        if (v >= 4) {
+            out.v1.dwSize = sizeof(DDSURFACEDESC2);
+            DescOut(d2, &out);
+        } else {
+            DescOutEnum(d2, &out.v1);
+        }
+        const HRESULT r = reinterpret_cast<CB>(callback)(list[i]->Iface(HandedOut(v)), &out, ctx);
+        DD2D9_TRACE("EnumAttachedSurfaces %p (v%d): %p (caps 0x%lx) -> callback returned %ld", static_cast<void*>(this),
+                    v, static_cast<void*>(list[i]), static_cast<unsigned long>(d2.ddsCaps.dwCaps), static_cast<long>(r));
+        if (r == DDENUMRET_CANCEL) {
             i++;
             break;
         }
     }
-    for (; i < list.size(); i++) list[i]->Release(SlotFor(v));  // never handed to the callback
+    for (; i < list.size(); i++) list[i]->Release(SlotFor(HandedOut(v)));  // never handed to the callback
     return DD_OK;
 }
 
@@ -1733,8 +1740,10 @@ HRESULT GammaControl::QueryInterface(REFIID r, void** out) { return surface->Que
 ULONG GammaControl::AddRef() { return surface->AddRef(Surface::kRefGamma); }
 ULONG GammaControl::Release() { return surface->Release(Surface::kRefGamma); }
 
-// As ddraw.dll (spec: re/spec/surface-other.md): the primary's only. Without a ramp
-// of its own, the display's (the identity if Windows has none to give).
+// As ddraw.dll (spec: re/spec/gamma-colorcontrol.md): the primary's only. Without a ramp
+// of its own, the display's. Where Windows has none to give, ddraw.dll returns
+// DDERR_UNSUPPORTED; dd2d9 applies ramps itself (to the game's image), so it always
+// has one: the identity (deliberate).
 HRESULT GammaControl::GetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
     Guard l;
     if (!ramp || flags || !(surface->desc.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)) return DDERR_INVALIDPARAMS;
