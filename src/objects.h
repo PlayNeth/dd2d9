@@ -144,6 +144,7 @@ public:
     }
     ULONG AddRef(int slot = kRefInternal);
     ULONG Release(int slot = kRefInternal);
+    void TraceRef(const char* what, int slot, LONG r) const;  // log=2, primary chain only
 
     HRESULT AddAttachedSurface(Surface* s, int version);
     HRESULT DeleteAttachedSurface(DWORD flags, Surface* s, int ifaceVersion);

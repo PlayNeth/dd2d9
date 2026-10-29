@@ -325,13 +325,28 @@ HRESULT Surface::QueryInterface(REFIID r, void** out) {
 // destroyed.
 ULONG Surface::AddRef(int slot) {
     InterlockedIncrement(&total_);
-    return ULONG(InterlockedIncrement(&refs_[slot]));
+    const LONG r = InterlockedIncrement(&refs_[slot]);
+    TraceRef("AddRef", slot, r);
+    return ULONG(r);
+}
+
+// log=2: reference changes on the primary's flip chain (when a game lets go of its old
+// primary decides whether a new one can be created).
+void Surface::TraceRef(const char* what, int slot, LONG r) const {
+    if (LogLevel() < 2 || !(isPrimary || (root && root->isPrimary))) return;
+    static const char* const kSlot[kRefSlots] = {"v1", "v2", "v3", "v4", "v7", "gamma", "dd2d9"};
+    DD2D9_TRACE("%s %p%s through %s -> %ld (total %ld)", what, static_cast<const void*>(this),
+                isPrimary ? " (primary)" : " (primary chain)", slot >= 0 && slot < kRefSlots ? kSlot[slot] : "?", r,
+                total_);
 }
 
 ULONG Surface::Release(int slot) {
     // A member of a complex surface with only its root's reference left: ddraw.dll
     // ignores the call (and returns 0).
-    if (root && total_ <= 1) return 0;
+    if (root && total_ <= 1) {
+        TraceRef("Release (ignored: only the root's reference left)", slot, refs_[slot]);
+        return 0;
+    }
     // Released more often than referenced through this interface: ignored.
     LONG r;
     do {
@@ -339,7 +354,9 @@ ULONG Surface::Release(int slot) {
         if (r <= 0) return 0;
     } while (InterlockedCompareExchange(&refs_[slot], r - 1, r) != r);
     r--;
-    if (InterlockedDecrement(&total_) == 0) {
+    const LONG left = InterlockedDecrement(&total_);
+    TraceRef("Release", slot, r);
+    if (left == 0) {
         DDraw* owner = nullptr;
         int ownerRef = 0;
         {

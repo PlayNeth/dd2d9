@@ -81,9 +81,14 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out) {
 
 static int IfaceIndex(int version) { return version == 1 ? 0 : version == 2 ? 1 : version == 4 ? 2 : 3; }
 
+// log=2 traces these (whether a game lets go of its old DirectDraw object before making
+// another decides what the new one may do). Surfaces made through IDirectDraw4/7 hold a
+// reference of their own, counted here too.
 ULONG DDraw::AddRef(int version) {
-    InterlockedIncrement(&ref_);
-    return ULONG(InterlockedIncrement(&ifaceRef_[IfaceIndex(version)]));
+    const LONG total = InterlockedIncrement(&ref_);
+    const LONG r = InterlockedIncrement(&ifaceRef_[IfaceIndex(version)]);
+    DD2D9_TRACE("AddRef DirectDraw %p through v%d -> %ld (total %ld)", static_cast<void*>(this), version, r, total);
+    return ULONG(r);
 }
 
 ULONG DDraw::Release(int version) {
@@ -93,9 +98,11 @@ ULONG DDraw::Release(int version) {
         InterlockedIncrement(own);
         return 0;
     }
+    const LONG total = InterlockedDecrement(&ref_);
+    DD2D9_TRACE("Release DirectDraw %p through v%d -> %ld (total %ld)", static_cast<void*>(this), version, r, total);
     // Tear down once: a stray AddRef/Release pair after the final release must
     // not run this (and IntRelease) a second time.
-    if (InterlockedDecrement(&ref_) == 0 && InterlockedExchange(&tornDown_, 1) == 0) {
+    if (total == 0 && InterlockedExchange(&tornDown_, 1) == 0) {
         // Teardown waits for the presenter thread, which takes g_lock: if this
         // thread holds it (a surface released inside another call, or the game's
         // AcquireDDThreadLock), wait until it lets go.
