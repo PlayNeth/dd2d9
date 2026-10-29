@@ -3,6 +3,12 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.8
+- **Leaving exclusive mode loses the surfaces when the desktop's display mode comes
+  back**, as in `ddraw.dll` (the game's mode is gone). The old fullscreen primary is then
+  no longer shown in the window, which still covered the screen for a moment until the
+  game resized it: a black flash after Alt+Enter. (JJ2+ switching to windowed.)
+
 ## 0.7.7
 Matched to Windows XP SP3's `ddraw.dll` call for call (from its decompiled code; the
 specifications are in `re/spec/`), method by method for the surfaces, palettes, clippers,

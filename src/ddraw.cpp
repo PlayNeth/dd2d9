@@ -774,6 +774,8 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     // there the display stays as the game set it (games switch through NORMAL
     // between their screens) until RestoreDisplayMode or the final Release.
     const bool restore = leaving && !ddraw1Coop_;
+    // The game's display mode gives way to the desktop's (restored, or virtual and dropped).
+    const bool modeBack = restore && (modeSet_ || switched_);
     if (leaving) {
         FlipToGDISurface();  // as ddraw.dll: the screen GDI draws on is in front again
         if (restore) {
@@ -790,10 +792,14 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
             DD2D9_LOG("leaving exclusive mode: the display mode stays (DirectDraw 1)");
         }
         UnhookWindow();
-        // Once the game has been in the background in exclusive mode, ddraw.dll's leaving it
-        // loses the surfaces (not with DirectDraw 1, which leaves the display alone); out of
-        // exclusive mode there is no background to be in, so they are restorable again.
-        if (restore && backgrounded_) InterlockedExchange(&deviceState_, kDevNotRestored);
+        // Once the game has been in the background in exclusive mode, or when the desktop's
+        // display mode comes back, ddraw.dll's leaving it loses the surfaces (not with
+        // DirectDraw 1, which leaves the display alone). A lost primary isn't presented: the
+        // window, still covering the screen until the game sizes it, doesn't show the
+        // fullscreen image placed on the desktop (a black flash on Alt+Enter, JJ2+).
+        // Otherwise there is no background to be in out of exclusive mode, so they are
+        // restorable again.
+        if (restore && (backgrounded_ || modeBack)) InterlockedExchange(&deviceState_, kDevNotRestored);
         else InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
         backgrounded_ = false;
     }
