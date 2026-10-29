@@ -49,8 +49,8 @@ d3d=auto
 
 ; Which d3d9.dll dd2d9 presents the 2D picture through:
 ;   system - Windows' own, even when the game folder holds another one (DXVK's, which D7VK
-;            needs). Presenting through DXVK in a window that covers the screen lets some
-;            drivers (AMD) take over the display and switch it back to the desktop
+;            needs). Presenting through DXVK's Vulkan in a window that covers the screen
+;            can let the driver take over the display and switch it back to the desktop
 ;            resolution, which drops games out of fullscreen (default)
 ;   game   - the one the game loads (the game folder's, if there is one)
 d3d9=system

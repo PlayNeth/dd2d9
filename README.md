@@ -1,7 +1,8 @@
 # dd2d9
 
-DirectDraw (DirectX 1–7) for 2D games, implemented on Direct3D 9. On Linux, DXVK
-turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
+DirectDraw (DirectX 1–7) for 2D games, implemented on Direct3D 9. Behind D7VK it covers
+the 2D half (menus, movies, 2D games) that D7VK leaves to the system's DirectDraw. See
+`CHANGELOG.md` for what changed and why.
 
 ## How it works
 - **Surfaces live in system memory**, laid out as ddraw.dll lays them out (the same
@@ -33,11 +34,16 @@ turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
   subclassed and covers the screen. Alt+Tab or another loss of focus restores the
   desktop resolution (or drops the borderless cover) and minimizes the game, and
   coming back sets it up again. The screensaver and monitor power-off are blocked.
-- **Lost surfaces as in ddraw.dll.** Display-mode changes, entering exclusive mode
-  and losing focus in it make video-memory surfaces (and the primary) lost until
-  the game calls `Restore` or `RestoreAllSurfaces`; `Lock` and `Flip` say
-  `DDERR_SURFACELOST` meanwhile, as games expect. Unlike on real hardware, the
-  contents survive.
+- **Lost surfaces as in ddraw.dll.** Display-mode changes, entering exclusive mode,
+  losing focus in it, and leaving it after a focus loss (except with DirectDraw 1) make
+  video-memory surfaces (and the primary) lost until the game calls `Restore` or
+  `RestoreAllSurfaces`; `Lock` and `Flip` say `DDERR_SURFACELOST` meanwhile, as games
+  expect. Unlike on real hardware, the contents survive. A display-change notice only
+  counts if the display really left the game's mode (Windows sends late and misleading
+  ones), a lost primary isn't shown, and a new primary may replace a lost one.
+- **Several DirectDraw objects**: a second one taking exclusive mode takes it over
+  from the first (games that recreate their DirectDraw object without releasing the
+  old one), and only the exclusive object's primary is presented.
 - **Blit rules match ddraw.dll.** Without a clipper, `Blt` rejects destination
   rectangles that extend past the surface; with one, it clips to the clipper's
   window or clip list. `BltFast` never clips (with a clipper attached it fails
@@ -46,7 +52,12 @@ turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
 - **Windowed games** (`DDSCL_NORMAL`) get a desktop-sized primary surface, and
   the part under their window is shown.
 - **All interface versions are implemented**: IDirectDraw 1/2/4/7,
-  IDirectDrawSurface 1/2/3/4/7, Palette, Clipper and GammaControl.
+  IDirectDrawSurface 1/2/3/4/7, Palette, Clipper and GammaControl. Their method tables
+  are writable, as `ddraw.dll`'s, for overlays and patches that hook them.
+- **Presenting through Windows' own `d3d9.dll`** (`d3d9=system`), even when the game
+  folder holds DXVK's for D7VK: Vulkan presentation in a window covering the screen can
+  let the driver switch the display back to the desktop mode. `d3d9=game` uses the
+  game's.
 
 ## Direct3D and D7VK
 dd2d9 doesn't render 3D. For 3D games, install it behind D7VK (D7VK as `ddraw.dll`, dd2d9
@@ -57,6 +68,17 @@ DirectDraw surfaces). D7VK renders and presents while a 3D device exists, and dd
 presents 2D the rest of the time (menus, movies, 2D-only games). Loaded on its own,
 dd2d9 answers Direct3D queries with `E_NOINTERFACE`, so games fall back to their other
 renderers. The `d3d=` ini key overrides this.
+
+## Differences from ddraw.dll on purpose
+- **No window frame in fullscreen**: the frame is removed so the picture fills the
+  screen (`ddraw.dll` leaves the style alone and draws over it).
+- **8-bit to RGB blits use the palette** (`ddraw.dll` copies the index as grey).
+- **`display=window` doesn't lose surfaces on focus loss**: the game keeps running.
+- **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2
+  keeps drawing to its old back buffer).
+- **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).
+- **A display-mode change by another program while a game is windowed** doesn't lose
+  its surfaces.
 
 ## Not implemented (yet)
 - **Mouse coordinate scaling.** When the image is scaled (`display=borderless`,
@@ -88,7 +110,9 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `point`, `linear` |
 | `vsync` | `auto` (the game decides), `on`, `off` |
-| `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change) |
+| `d3d` | `auto` (Direct3D objects for a wrapper when loaded as `ddraw_.dll`), `on`, `off` |
+| `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
+| `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
 
 `DD2D9_LOG=0|1|2` overrides `log`. Any other value of `DD2D9_LOG` is taken as a
@@ -112,9 +136,11 @@ dependencies.
 
 ## Using
 Copy `ddraw.dll` next to the game's executable, and under Wine also set
-`WINEDLLOVERRIDES="ddraw=n"`. Alternatively, `install-dd2d9.sh` installs it
-into a Wine prefix, either on its own or behind D7VK as `ddraw_.dll`. To get Vulkan on Linux,
-install DXVK's `d3d9.dll` into the prefix, or put it next to the game.
+`WINEDLLOVERRIDES="ddraw=n"`. Behind D7VK, D7VK is `ddraw.dll` and dd2d9 is
+`ddraw_.dll` in the same folder. `install-dd2d9.sh` installs it into a Wine prefix,
+either on its own or behind D7VK. Under Wine, `d3d9=system` presents through the prefix's
+`d3d9.dll` (wined3d, or DXVK if it's installed into the prefix); `d3d9=game` also takes
+one next to the game.
 
 ## Tests
 `build/ddtest.exe` writes its results to `ddtest.txt`:
@@ -127,6 +153,9 @@ install DXVK's `d3d9.dll` into the prefix, or put it next to the game.
   ranges, mirroring, stretching, overlapping copies) against a reference implementation.
 
 All checks pass under Wine 11 (wined3d, Xvfb).
+
+`tests/wine/` runs Wine's own ddraw tests (expectations confirmed on Windows) against a
+build and compares the result with a baseline; see `tests/wine/README.md`.
 
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter
 throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small

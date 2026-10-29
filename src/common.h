@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.4"
+#define DD2D9_VERSION "0.7.5"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -51,6 +51,19 @@ const char* GuidName(REFIID riid);
 
 #define DD2D9_LOG(...) do { if (::dd2d9::LogLevel() >= 1) ::dd2d9::Log(1, __VA_ARGS__); } while (0)
 #define DD2D9_TRACE(...) do { if (::dd2d9::LogLevel() >= 2) ::dd2d9::Log(2, __VA_ARGS__); } while (0)
+// ddraw.dll's interface tables (vtables) are writable, and programs patch them to hook
+// a method (overlays, fan patches); ours sit in read-only memory. Made writable once per
+// class, from its first object.
+void MakeVtblWritable(const void* obj);
+template <class T>
+inline void WritableVtbl(const T* obj) {
+    static bool done;
+    if (!done) {
+        done = true;
+        MakeVtblWritable(obj);
+    }
+}
+
 // A call's failure, traced (log=2) with what it was called on.
 inline HRESULT TraceFail(const char* what, const void* obj, HRESULT hr) {
     if (FAILED(hr)) DD2D9_TRACE("%s %p failed: 0x%08lx", what, obj, static_cast<unsigned long>(hr));

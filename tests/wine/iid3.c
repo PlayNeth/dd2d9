@@ -1,0 +1,3 @@
+/* IDirectDraw3 (DirectX 5), missing from mingw's dxguid; d3d.c defines its own. */
+#include <windows.h>
+const GUID IID_IDirectDraw3 = {0x618f8ad4, 0x8b7a, 0x11d0, {0x8f, 0xcc, 0x00, 0xc0, 0x4f, 0xd9, 0x18, 0x9d}};

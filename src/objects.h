@@ -111,7 +111,7 @@ public:
     uint32_t magic = kMagic;
     Surface* surface;
 
-    explicit GammaControl(Surface* s) : surface(s) {}
+    explicit GammaControl(Surface* s) : surface(s) { WritableVtbl(this); }
     STDMETHOD(QueryInterface)(REFIID riid, void** out) override;
     STDMETHOD_(ULONG, AddRef)() override;
     STDMETHOD_(ULONG, Release)() override;
@@ -477,6 +477,7 @@ private:
     bool switched_ = false;     // the real display mode was changed
     bool ddraw1Coop_ = false;   // a SetCooperativeLevel through IDirectDraw succeeded (g_displayLock)
     bool suspended_ = false;    // display setup undone because the game lost focus
+    bool backgrounded_ = false;  // lost focus at some point during this exclusive mode
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
     bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)
     int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used

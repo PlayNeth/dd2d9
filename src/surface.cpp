@@ -11,11 +11,13 @@ namespace dd2d9 {
 // ================================================================ Buffer
 
 static bool DibFormat(const Format& f) {
+    // Red in the low byte (A8B8G8R8, X8B8G8R8): ddraw.dll on Vista and later has no DC for it.
+    if (f.bpp == 32 && f.r == 0xFF && f.b == 0xFF0000) return false;
     return !f.zbuf && !f.fourcc && (f.bpp == 8 || f.bpp == 16 || f.bpp == 24 || f.bpp == 32);
 }
 
 // A top-down DIB section for format f (DibFormat(f)). As ddraw.dll's: 8-bit with a
-// colour table, 24-bit and standard 32-bit as BI_RGB, others with their masks.
+// colour table, 24- and 32-bit as BI_RGB (whatever the 32-bit masks), 16-bit with its masks.
 static HBITMAP MakeDib(int w, int h, const Format& f, uint8_t** bits) {
     struct {
         BITMAPINFOHEADER h;
@@ -30,7 +32,7 @@ static HBITMAP MakeDib(int w, int h, const Format& f, uint8_t** bits) {
         bi.h.biCompression = BI_RGB;
         bi.h.biClrUsed = 256;
         for (int i = 0; i < 256; i++) bi.colors[i] = DWORD(i) * 0x010101u;
-    } else if (f.bpp == 24 || (f.bpp == 32 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF)) {
+    } else if (f.bpp == 24 || f.bpp == 32) {
         bi.h.biCompression = BI_RGB;
     } else {
         bi.h.biCompression = BI_BITFIELDS;
@@ -123,6 +125,7 @@ UINT KmtFormat(const Format& f) {
     if (f.zbuf || f.fourcc) return 0;
     if (f.pal8) return 41;  // P8
     if (f.bpp == 32 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return f.a == 0xFF000000u ? 21 : 22;
+    if (f.bpp == 32 && f.r == 0x3FF00000 && f.g == 0xFFC00 && f.b == 0x3FF) return 35;  // A2R10G10B10
     if (f.bpp == 24 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return 20;
     if (f.bpp == 16 && f.r == 0xF800 && f.g == 0x7E0 && f.b == 0x1F) return 23;
     if (f.bpp == 16 && f.r == 0x7C00 && f.g == 0x3E0 && f.b == 0x1F) return f.a == 0x8000 ? 25 : 24;
@@ -434,6 +437,10 @@ HRESULT Surface::AddAttachedSurface(Surface* s, int version) {
     // Parts of one complex surface are already attached to each other; a
     // reference to our own root would also keep the chain alive forever.
     if ((s->root ? s->root : s) == (root ? root : this)) return DDERR_CANNOTATTACHSURFACE;
+    // Attached through another interface version: ddraw.dll counts it as a different
+    // attachment it can't make.
+    for (const AttachRef& r : attachRefs)
+        if (r.s == s) return r.slot == slot ? DDERR_SURFACEALREADYATTACHED : DDERR_CANNOTATTACHSURFACE;
     for (Surface* a : attached)
         if (a == s) return DDERR_SURFACEALREADYATTACHED;
     for (Surface* a : s->attached)
@@ -1009,6 +1016,7 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
 // ================================================================ Palette
 
 Palette::Palette(DDraw* dd, DWORD c, const PALETTEENTRY* e) : caps(c), dd_(dd) {
+    WritableVtbl(this);
     if (dd_) dd_->IntAddRef();
     int n = Count();
     if (e) {
@@ -1126,6 +1134,7 @@ static bool LiveClipper(const Clipper* c) {
 }
 
 Clipper::Clipper(DDraw* dd) : dd_(dd) {
+    WritableVtbl(this);
     if (dd_) dd_->IntAddRef();
     Guard l;
     if (!g_clippers) g_clippers = new std::vector<const Clipper*>;

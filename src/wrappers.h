@@ -28,7 +28,7 @@ class SurfaceWrap final : public ST<V>::I {
 public:
     uint32_t magic = kMagic;
     Surface* s;
-    explicit SurfaceWrap(Surface* impl) : s(impl) {}
+    explicit SurfaceWrap(Surface* impl) : s(impl) { WritableVtbl(this); }
 
     static Surface* S(void* iface) { return Surface::From(iface); }
 
@@ -173,7 +173,7 @@ class DDWrap final : public DT<V>::I {
 public:
     uint32_t magic = kMagic;
     DDraw* d;
-    explicit DDWrap(DDraw* impl) : d(impl) {}
+    explicit DDWrap(DDraw* impl) : d(impl) { WritableVtbl(this); }
 
     STDMETHOD(QueryInterface)(REFIID r, void** p) override { return d->QueryInterface(r, p); }
     STDMETHOD_(ULONG, AddRef)() override { return d->AddRef(V); }

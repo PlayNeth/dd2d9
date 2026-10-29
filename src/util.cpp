@@ -564,6 +564,18 @@ bool DescSizeOk(const void* desc) {
     return size == sizeof(DDSURFACEDESC) || size == sizeof(DDSURFACEDESC2);
 }
 
+void MakeVtblWritable(const void* obj) {
+    void* const vtbl = *static_cast<void* const*>(obj);
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(vtbl, &mi, sizeof(mi))) return;
+    const DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (mi.Protect & writable) return;
+    DWORD old;
+    // Up to 64 methods: the largest interface here (IDirectDrawSurface7) has 49.
+    if (!VirtualProtect(vtbl, 64 * sizeof(void*), PAGE_READWRITE, &old))
+        DD2D9_LOG("could not make an interface table writable (%lu)", GetLastError());
+}
+
 bool DescIn(const void* in, DDSURFACEDESC2* out) {
     if (!DescSizeOk(in)) return false;
     if (*static_cast<const DWORD*>(in) == sizeof(DDSURFACEDESC2)) {

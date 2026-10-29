@@ -9,8 +9,8 @@ namespace dd2d9 {
 
 // Direct3D 9 for presenting. By default Windows' own d3d9.dll, loaded by its full path:
 // next to a wrapper such as D7VK the game folder holds DXVK's d3d9.dll, whose Vulkan
-// presentation lets some drivers take the display over in a window that covers it
-// (AMD switches the display mode back to the desktop's when it lets go).
+// presentation can let the driver take the display over in a window that covers it,
+// and switch the display mode back to the desktop's when it lets go.
 static IDirect3D9* CreateD3D9() {
     using Create = IDirect3D9*(WINAPI*)(UINT);
     static const Create create = [] {

@@ -1,0 +1,1697 @@
+{
+ "note": "per sub-test failure counts of a Wine ddraw test run (see compare.py)",
+ "tests": {
+  "d3d:test_get_caps1": {
+   "nfail": 0,
+   "crash": false
+  },
+  "d3d:test_get_caps7": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_alphatest": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_blit_to_self": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_blt_z_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_caps": {
+   "nfail": 6,
+   "crash": false
+  },
+  "ddraw1:test_ck_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_ck_default": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_ck_operation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_ck_rgba": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_clear": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_clear_rect_count": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_clipper_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_clipper_in_exclusive_fullscreen": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_clipper_refcount": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_color_fill": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_colorkey_precision": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_activateapp": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_create_device_window": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_d3d_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_mode_set": {
+   "nfail": 2,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_mode_set_multi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_multi_window": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_surf_create": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_coop_level_threaded": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_create_surface_pitch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_cross_device_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_cursor_clipping": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_d32_support": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_depth_readback": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_device_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_display_mode_surface_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_enum_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_enum_surfaces": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_execute_buffer_updates": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_execute_data": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_filling_convention": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_find_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_flip": {
+   "nfail": 2,
+   "crash": false
+  },
+  "ddraw1:test_gdi_surface": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_get_display_mode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_getdc": {
+   "nfail": 1,
+   "crash": false
+  },
+  "ddraw1:test_initialize": {
+   "nfail": 1,
+   "crash": true
+  },
+  "ddraw1:test_killfocus": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_lockrect_invalid": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_lost_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_material": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_mipmap": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_multiple_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_offscreen_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_overlay_rect": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_p8_blit": {
+   "nfail": 8,
+   "crash": false
+  },
+  "ddraw1:test_palette_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_palette_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_palette_gdi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_pinned_sysmem": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_primary_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_primary_palette": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_range_colorkey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_redundant_mode_set": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_rt_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_shademode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_specular_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_surface_attachment": {
+   "nfail": 2,
+   "crash": false
+  },
+  "ddraw1:test_surface_desc_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_surface_desc_size": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_surface_discard": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_surface_interface_mismatch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_surface_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_surface_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_sysmem_depth_fill": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_sysmem_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_sysmem_x_channel": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_texture_load": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_texture_wrong_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_texturemapblend": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_transform_vertices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_unsupported_formats": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_viewport": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_viewport_clear_rect": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_viewport_object": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_vtbl_protection": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_window_position": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_window_style": {
+   "nfail": 34,
+   "crash": false
+  },
+  "ddraw1:test_wndproc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_yuv_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_yv12_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw1:test_zenable": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_alphatest": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_blit_to_self": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_blt_z_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_caps": {
+   "nfail": 6,
+   "crash": false
+  },
+  "ddraw2:test_ck_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_ck_default": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_ck_operation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_ck_rgba": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_clear": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_clear_rect_count": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_clipper_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_clipper_in_exclusive_fullscreen": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_clipper_refcount": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_color_fill": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_colorkey_precision": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_activateapp": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_create_device_window": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_d3d_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_mode_set": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_mode_set_multi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_multi_window": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_surf_create": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_threaded": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_coop_level_versions": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_create_surface_pitch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_cross_device_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_cursor_clipping": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_d32_support": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_d3d_state_reset": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_depth_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_depth_readback": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_device_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_display_mode_surface_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_draw_primitive": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_edge_antialiasing_blending": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_enum_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_enum_surfaces": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_filling_convention": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_find_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_flip": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_gdi_surface": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_get_display_mode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_getdc": {
+   "nfail": 1,
+   "crash": false
+  },
+  "ddraw2:test_initialize": {
+   "nfail": 1,
+   "crash": true
+  },
+  "ddraw2:test_killfocus": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_lighting_interface_versions": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_lockrect_invalid": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_lost_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_material": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_mipmap": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_multiple_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_offscreen_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_overlay_rect": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_p8_blit": {
+   "nfail": 8,
+   "crash": false
+  },
+  "ddraw2:test_palette_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_palette_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_palette_gdi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_primary_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_primary_palette": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_range_colorkey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_redundant_mode_set": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_rt_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_set_render_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_set_surface_desc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_shademode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_specular_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_attachment": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_desc_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_desc_size": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_discard": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_interface_mismatch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_surface_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_sysmem_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_sysmem_x_channel": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_texture_load_ckey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_texture_wrong_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_texturemapblend": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_transform_vertices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_unsupported_formats": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_user_memory_getdc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_viewport": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_viewport_clear_rect": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_viewport_object": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_window_position": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_window_style": {
+   "nfail": 22,
+   "crash": false
+  },
+  "ddraw2:test_wndproc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_yuv_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_yv12_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw2:test_zenable": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_alphatest": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_blit_to_self": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_block_formats_creation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_blt_z_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_caps": {
+   "nfail": 6,
+   "crash": false
+  },
+  "ddraw4:test_ck_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_ck_default": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_ck_operation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_ck_rgba": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_clear": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_clear_rect_count": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_clipper_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_clipper_in_exclusive_fullscreen": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_clipper_refcount": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_color_clamping": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_color_fill": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_colorkey_precision": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_compute_sphere_visibility": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_activateapp": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_create_device_window": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_d3d_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_mode_set": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_mode_set_multi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_multi_window": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_surf_create": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_threaded": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_coop_level_versions": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_create_surface_pitch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_cross_device_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_cursor_clipping": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_d32_support": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_d3d_state_reset": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_depth_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_depth_readback": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_device_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_display_mode_surface_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_draw_primitive": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_draw_strided": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_edge_antialiasing_blending": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_enum_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_enum_surfaces": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_filling_convention": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_find_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_flip": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_gdi_surface": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_get_display_mode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_get_surface_from_dc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_getdc": {
+   "nfail": 1,
+   "crash": false
+  },
+  "ddraw4:test_initialize": {
+   "nfail": 1,
+   "crash": true
+  },
+  "ddraw4:test_killfocus": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_lighting_interface_versions": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_lockrect_invalid": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_lost_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_map_synchronisation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_material": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_mipmap": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_multiple_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_offscreen_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_overlay_rect": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_p8_blit": {
+   "nfail": 8,
+   "crash": false
+  },
+  "ddraw4:test_palette_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_palette_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_palette_gdi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_primary_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_primary_palette": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_private_data": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_process_vertices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_range_colorkey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_redundant_mode_set": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_rt_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_set_render_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_set_surface_desc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_shademode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_signed_formats": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_specular_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_attachment": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_desc_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_desc_size": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_discard": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_format_conversion_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_interface_mismatch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_surface_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_sysmem_draw": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_sysmem_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_sysmem_x_channel": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_texcoordindex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_texture_load_ckey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_texture_stages_limits": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_texture_wrong_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_texturemanage": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_texturemapblend": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_transform_vertices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_unsupported_formats": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_user_memory_getdc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_vb_desc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_vb_discard": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_vb_refcount": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_vb_writeonly": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_viewport": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_viewport_object": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_window_position": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_window_style": {
+   "nfail": 22,
+   "crash": false
+  },
+  "ddraw4:test_wndproc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_yuv_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_yv12_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw4:test_zenable": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_alphatest": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_begin_end_state_block": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_blit_to_self": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_block_formats_creation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_blt_z_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_caps": {
+   "nfail": 6,
+   "crash": false
+  },
+  "ddraw7:test_ck_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_ck_default": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_ck_operation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_ck_rgba": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_clear": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_clear_rect_count": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_clip_planes_limits": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_clipper_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_clipper_in_exclusive_fullscreen": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_clipper_refcount": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_color_clamping": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_color_fill": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_color_vertex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_colorkey_precision": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_compressed_surface_stretch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_compute_sphere_visibility": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_activateapp": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_create_device_window": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_d3d_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_mode_set": {
+   "nfail": 5,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_mode_set_multi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_multi_window": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_surf_create": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_threaded": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_coop_level_versions": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_create_surface_pitch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_cross_device_blt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_cursor_clipping": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_d32_support": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_d3d_state_reset": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_depth_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_depth_readback": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_device_load": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_device_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_display_mode_surface_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_draw_primitive": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_draw_strided": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_edge_antialiasing_blending": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_enum_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_enum_surfaces": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_filling_convention": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_flip": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_flip_3d": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_fog_interpolation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_fog_process_vertices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_fog_special": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_gdi_surface": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_get_display_mode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_get_surface_from_dc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_getdc": {
+   "nfail": 1,
+   "crash": false
+  },
+  "ddraw7:test_initialize": {
+   "nfail": 1,
+   "crash": true
+  },
+  "ddraw7:test_killfocus": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_lighting_interface_versions": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_lockrect_invalid": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_lost_device": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_map_synchronisation": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_material": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_mipmap": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_multiple_devices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_multiply_transform": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_negative_fixedfunction_fog": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_offscreen_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_overlay_rect": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_p8_blit": {
+   "nfail": 8,
+   "crash": false
+  },
+  "ddraw7:test_palette_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_palette_complex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_palette_gdi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_pixel_format": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_primary_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_primary_palette": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_private_data": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_process_vertices": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_range_colorkey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_redundant_mode_set": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_resource_priority": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_rt_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_set_render_state": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_set_surface_desc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_shademode": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_signed_formats": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_specular_lighting": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_attachment": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_desc_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_desc_size": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_discard": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_format_conversion_alpha": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_interface_mismatch": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_lock": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_surface_qi": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_sysmem_draw": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_sysmem_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_sysmem_x_channel": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_table_fog_zw": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_texcoordindex": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_texture_load_ckey": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_texture_stages_limits": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_texture_wrong_caps": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_texturemanage": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_unsupported_formats": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_user_memory": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_user_memory_getdc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_vb_desc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_vb_discard": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_vb_refcount": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_vb_writeonly": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_viewport": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_window_position": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_window_style": {
+   "nfail": 22,
+   "crash": false
+  },
+  "ddraw7:test_wndproc": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_yuv_blit": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_yv12_overlay": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddraw7:test_zenable": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddrawmodes:test_DirectDrawEnumerateA": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddrawmodes:test_DirectDrawEnumerateExA": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddrawmodes:test_DirectDrawEnumerateExW": {
+   "nfail": 0,
+   "crash": false
+  },
+  "ddrawmodes:test_DirectDrawEnumerateW": {
+   "nfail": 0,
+   "crash": false
+  },
+  "dsurface:": {
+   "nfail": 0,
+   "crash": false
+  },
+  "refcount:test_d3d_ifaces": {
+   "nfail": 0,
+   "crash": false
+  },
+  "refcount:test_ddraw_objects": {
+   "nfail": 0,
+   "crash": false
+  },
+  "refcount:test_iface_refcnt": {
+   "nfail": 0,
+   "crash": false
+  },
+  "visual:test_blend": {
+   "nfail": 0,
+   "crash": false
+  }
+ }
+}

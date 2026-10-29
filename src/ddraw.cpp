@@ -341,6 +341,7 @@ void DDraw::OnActivate(bool active) {
     // Before SetDisplayMode, the window covers the screen at the desktop mode (see ApplyWindow).
     const int display = modeSet_ ? activeDisplay_ : g_config.display;
     if (!active) {
+        backgrounded_ = true;  // see SetCooperativeLevel: leaving exclusive mode now loses the surfaces
         // Window mode is an ordinary window; switch and borderless cover the screen.
         const bool cover = display != kDisplayWindow && !suspended_;
         if (cover) {
@@ -659,8 +660,12 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
             DD2D9_LOG("leaving exclusive mode: the display mode stays (DirectDraw 1)");
         }
         UnhookWindow();
-        // Out of exclusive mode there is no background to be in: restorable again.
-        InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
+        // Once the game has been in the background in exclusive mode, ddraw.dll's leaving it
+        // loses the surfaces (not with DirectDraw 1, which leaves the display alone); out of
+        // exclusive mode there is no background to be in, so they are restorable again.
+        if (restore && backgrounded_) InterlockedExchange(&deviceState_, kDevNotRestored);
+        else InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
+        backgrounded_ = false;
     }
     if (prev) TakeOverExclusive(prev, hwnd);
     // Entering exclusive mode (or moving it to another window) loses the surfaces.
