@@ -661,6 +661,8 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.dwSVBFXCaps = c.dwFXCaps;
     c.dwVSBCaps = c.dwCaps;
     c.dwSSBCaps = c.dwCaps;
+    DD2D9_TRACE("GetCaps(%p, %p) -> dwCaps 0x%08lx, ddsCaps 0x%08lx%s", static_cast<void*>(drv),
+               static_cast<void*>(hel), c.dwCaps, c.ddsCaps.dwCaps, (c.dwCaps & DDCAPS_3D) ? " (3D)" : "");
     for (DDCAPS* out : {drv, hel}) {
         if (!out) continue;
         DWORD size = out->dwSize;

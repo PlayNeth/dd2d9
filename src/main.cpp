@@ -97,6 +97,7 @@ HRESULT WINAPI DD2D9_DirectDrawCreateClipper(DWORD, LPDIRECTDRAWCLIPPER* out, IU
 }
 
 HRESULT WINAPI DD2D9_DirectDrawEnumerateA(LPDDENUMCALLBACKA cb, LPVOID ctx) {
+    DD2D9_LOG("DirectDrawEnumerateA()");
     if (!cb) return DDERR_INVALIDPARAMS;
     char desc[] = "Primary Display Driver", name[] = "display";
     cb(nullptr, desc, name, ctx);
@@ -104,20 +105,23 @@ HRESULT WINAPI DD2D9_DirectDrawEnumerateA(LPDDENUMCALLBACKA cb, LPVOID ctx) {
 }
 
 HRESULT WINAPI DD2D9_DirectDrawEnumerateW(LPDDENUMCALLBACKW cb, LPVOID ctx) {
+    DD2D9_LOG("DirectDrawEnumerateW()");
     if (!cb) return DDERR_INVALIDPARAMS;
     wchar_t desc[] = L"Primary Display Driver", name[] = L"display";
     cb(nullptr, desc, name, ctx);
     return DD_OK;
 }
 
-HRESULT WINAPI DD2D9_DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb, LPVOID ctx, DWORD) {
+HRESULT WINAPI DD2D9_DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb, LPVOID ctx, DWORD flags) {
+    DD2D9_LOG("DirectDrawEnumerateExA(flags 0x%lx)", flags);
     if (!cb) return DDERR_INVALIDPARAMS;
     char desc[] = "Primary Display Driver", name[] = "display";
     cb(nullptr, desc, name, ctx, nullptr);
     return DD_OK;
 }
 
-HRESULT WINAPI DD2D9_DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW cb, LPVOID ctx, DWORD) {
+HRESULT WINAPI DD2D9_DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW cb, LPVOID ctx, DWORD flags) {
+    DD2D9_LOG("DirectDrawEnumerateExW(flags 0x%lx)", flags);
     if (!cb) return DDERR_INVALIDPARAMS;
     wchar_t desc[] = L"Primary Display Driver", name[] = L"display";
     cb(nullptr, desc, name, ctx, nullptr);
