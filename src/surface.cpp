@@ -1,6 +1,8 @@
 // Surfaces, surface memory, palettes, clippers and gamma control.
 #include "wrappers.h"
 
+#include "d3dproxy.h"
+
 #include <new>
 
 namespace dd2d9 {
@@ -128,6 +130,7 @@ Surface::~Surface() {
     if (clipper) clipper->Release();
     for (auto& p : priv_)
         if (p.unk) p.unk->Release();
+    D3DProxySurfaceDestroyed(this);
     buf->Release();
     delete static_cast<SurfaceWrap<1>*>(wraps_[0]);
     delete static_cast<SurfaceWrap<2>*>(wraps_[1]);
@@ -176,9 +179,9 @@ HRESULT Surface::QueryInterface(REFIID r, void** out) {
         *out = gamma;
         return S_OK;
     }
-    DD2D9_LOG("Surface::QueryInterface(%s): not supported%s", GuidName(r),
-             (r.Data1 & 0xF0000000) == 0x80000000 || r.Data1 == 0x2CDCD9E0 || r.Data1 == 0x93281502
-                 ? " (Direct3D interface; dd2d9 only implements 2D)" : "");
+    HRESULT hr = D3DProxyQuerySurface(this, r, out);  // textures and Direct3D 1 devices for a wrapper
+    if (hr != E_NOINTERFACE) return hr;
+    DD2D9_LOG("Surface::QueryInterface(%s): not supported", GuidName(r));
     return E_NOINTERFACE;
 }
 
@@ -538,6 +541,22 @@ HRESULT Surface::FreePrivateData(REFGUID tag) {
         }
     }
     return DDERR_NOTFOUND;
+}
+
+void Surface::FillRect(const RECT& r, DWORD value) {
+    const RECT bounds = {0, 0, buf->w, buf->h};
+    RECT c;
+    if (buf->fmt.BlockCompressed() || !IntersectRect(&c, &r, &bounds)) return;
+    FillCore(&c, value);
+    uniqueness++;
+    MarkDirtyIfVisible();
+}
+
+Surface* Surface::NextMipLevel() const {
+    const Surface* family = root ? root : this;
+    for (Surface* a : attached)
+        if ((a->root ? a->root : a) == family && (a->desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) return a;
+    return nullptr;
 }
 
 void Surface::MarkDirtyIfVisible() {

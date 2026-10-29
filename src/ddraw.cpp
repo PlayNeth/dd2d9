@@ -1,6 +1,8 @@
 // The DirectDraw object: display modes, cooperative level, object creation.
 #include "wrappers.h"
 
+#include "d3dproxy.h"
+
 #include <mmsystem.h>
 
 #include <algorithm>
@@ -8,13 +10,6 @@
 #include <new>
 
 namespace dd2d9 {
-
-// Direct3D (DX3-7) interface IDs, only used to log that a game wants 3D.
-// Declared here because d3d.h conflicts with d3d9.h.
-static const GUID kIID_IDirect3D = {0x3BBA0080, 0x2421, 0x11CF, {0xA3, 0x1A, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56}};
-static const GUID kIID_IDirect3D2 = {0x6AAE1EC1, 0x662A, 0x11D0, {0x88, 0x9D, 0x00, 0xAA, 0x00, 0xBB, 0xB7, 0x6A}};
-static const GUID kIID_IDirect3D3 = {0xBB223240, 0xE72B, 0x11D0, {0xA9, 0xB4, 0x00, 0xAA, 0x00, 0xC0, 0x99, 0x3E}};
-static const GUID kIID_IDirect3D7 = {0xF5049E77, 0x4861, 0x11D2, {0xA4, 0x07, 0x00, 0xA0, 0xC9, 0x06, 0x29, 0xA8}};
 
 DDraw::DDraw() {
     wraps_[0] = new DDWrap<1>(this);
@@ -60,11 +55,8 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out) {
         *out = Iface(v);
         return S_OK;
     }
-    if (IsEqualGUID(r, kIID_IDirect3D) || IsEqualGUID(r, kIID_IDirect3D2) || IsEqualGUID(r, kIID_IDirect3D3) ||
-        IsEqualGUID(r, kIID_IDirect3D7)) {
-        DD2D9_LOG("DDraw::QueryInterface(Direct3D %lx): not supported, dd2d9 only implements 2D", r.Data1);
-        return E_NOINTERFACE;
-    }
+    HRESULT hr = D3DProxyQueryDDraw(this, r, out);  // Direct3D objects for a wrapper such as D7VK
+    if (hr != E_NOINTERFACE) return hr;
     DD2D9_LOG("DDraw::QueryInterface(%s): not supported", GuidName(r));
     return E_NOINTERFACE;
 }
@@ -140,6 +132,17 @@ bool DDraw::ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const {
     *h = modeH_;
     *refresh = refresh_;
     return true;
+}
+
+void DDraw::Add3DDevice() {
+    if (InterlockedIncrement(&devices3D_) != 1) return;
+    DD2D9_LOG("a Direct3D device exists: the wrapper presents from now on, dd2d9 stops");
+    presenter_->DropDevice();  // its D3D9 device must not compete with the wrapper's on this window
+}
+
+void DDraw::Remove3DDevice() {
+    if (InterlockedDecrement(&devices3D_) != 0) return;
+    DD2D9_LOG("no Direct3D device left: dd2d9 presents again once the game draws");
 }
 
 bool DDraw::PrimaryBusy() const {

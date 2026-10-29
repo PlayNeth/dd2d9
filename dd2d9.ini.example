@@ -37,10 +37,19 @@ filter=point
 ;   off  - never wait (uncapped, may tear)
 vsync=auto
 
+; Direct3D (3D games):
+;   auto - when loaded behind a Direct3D wrapper such as D7VK (as ddraw_.dll), give it the
+;          Direct3D objects it builds on; it renders and presents the 3D frames, and dd2d9
+;          takes over again for 2D once the game releases its 3D device. Loaded on its
+;          own (as ddraw.dll), dd2d9 offers no Direct3D, so games use their 2D or
+;          software renderers (default)
+;   on   - offer them even when not loaded as ddraw_.dll (a wrapper under another name)
+;   off  - never offer them
+d3d=auto
+
 ; Logging: 0 off (default), 1 info, 2 trace (every blit, lock, flip and palette change -
 ; very verbose, for diagnosing rendering problems).
-; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ..."), as are
-; Direct3D requests (which D7VK handles).
+; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ...").
 log=0
 ; Default log file: dd2d9.log next to the game's exe. If that folder isn't writable, dd2d9
 ; falls back to the current directory, then %TEMP%. A relative path is relative to the

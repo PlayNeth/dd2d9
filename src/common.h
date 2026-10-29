@@ -7,7 +7,7 @@
 #endif
 #include <windows.h>
 #include <ddraw.h>
-#include <d3d9.h>
+// d3d9.h is only included by presenter.cpp: it conflicts with d3d.h (d3dproxy.cpp).
 
 #include <cstdint>
 #include <cstring>
@@ -17,11 +17,12 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.4.1"
+#define DD2D9_VERSION "0.5.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
 enum { kPresentWindow, kPresentExclusive };
+enum { kD3DAuto, kD3DOn, kD3DOff };
 
 // Defaults behave like the original DirectDraw.
 struct Config {
@@ -30,11 +31,14 @@ struct Config {
     int filter = 0;                // 0 point, 1 linear
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int present = kPresentWindow;  // after a real mode switch: borderless window / D3D9 exclusive fullscreen
+    int d3d = kD3DAuto;            // Direct3D objects for a wrapper (D7VK): auto = when loaded behind one
     int log = 0;                   // 0 off, 1 info, 2 trace (every blit, lock, flip and palette change)
     std::wstring logFile;          // empty: dd2d9.log next to the game's executable
 };
 extern Config g_config;
 void LoadConfig(HMODULE self);
+// dd2d9 was loaded under another name than ddraw.dll (as ddraw_.dll behind D7VK).
+bool LoadedBehindWrapper();
 
 // ---------------------------------------------------------------- logging
 void LogInit();

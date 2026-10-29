@@ -108,6 +108,11 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (v == "window" || v == "windowed") g_config.present = kPresentWindow;
         else if (v == "exclusive" || v == "fullscreen") g_config.present = kPresentExclusive;
         else ok = false;
+    } else if (key == "d3d") {
+        int b;
+        if (v == "auto") g_config.d3d = kD3DAuto;
+        else if (ParseBool(v, &b)) g_config.d3d = b ? kD3DOn : kD3DOff;
+        else ok = false;
     } else if (key == "vsync") {
         int b;
         if (v == "auto" || v == "game") g_config.vsync = kVSyncAuto;
@@ -247,9 +252,11 @@ void LogInit() {
     if (g_iniLoaded.empty()) Log(1, "config:  none found");
     for (const auto& f : g_iniLoaded) Log(1, "config:  %s", Utf8(f).c_str());
     for (const auto& e : g_iniErrors) Log(1, "config:  %s", Utf8(e).c_str());
-    Log(1, "settings: display=%s present=%s stretch=%s filter=%s vsync=%s log=%d", kDisplay[g_config.display],
+    static const char* kD3D[] = {"auto", "on", "off"};
+    Log(1, "settings: display=%s present=%s stretch=%s filter=%s vsync=%s d3d=%s log=%d", kDisplay[g_config.display],
         g_config.present == kPresentExclusive ? "exclusive" : "window", kStretch[g_config.stretch],
-        g_config.filter ? "linear" : "point", kVSync[g_config.vsync], g_config.log);
+        g_config.filter ? "linear" : "point", kVSync[g_config.vsync], kD3D[g_config.d3d], g_config.log);
+    if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
 }
 
 bool WaitPumping(HANDLE h, DWORD timeoutMs) {
@@ -263,6 +270,10 @@ bool WaitPumping(HANDLE h, DWORD timeoutMs) {
         MSG msg;
         PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);  // dispatches the sent messages
     }
+}
+
+bool LoadedBehindWrapper() {
+    return _wcsicmp(BaseName(g_dllPath).c_str(), L"ddraw.dll") != 0;
 }
 
 int LogLevel() { return g_logLevel; }

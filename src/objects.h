@@ -3,6 +3,11 @@
 #pragma once
 #include "common.h"
 
+// Direct3D 9 types, defined in d3d9.h (presenter.cpp only).
+struct IDirect3D9;
+struct IDirect3DDevice9;
+struct IDirect3DSurface9;
+
 namespace dd2d9 {
 
 class DDraw;
@@ -153,6 +158,8 @@ public:
     const PALETTEENTRY* EffectivePalette() const;
     void MarkDirtyIfVisible();
     void ReplaceBuffer(Buffer* b);  // takes ownership of b
+    void FillRect(const RECT& r, DWORD value);  // raw pixel value, clipped to the surface; g_lock held
+    Surface* NextMipLevel() const;              // next smaller level of a mipmap chain, or null
 
     DDraw* dd;
     DDSURFACEDESC2 desc;  // creation description (size/format/caps); pitch & lpSurface filled on demand
@@ -172,6 +179,7 @@ public:
     HDC dcOut = nullptr;
     DWORD uniqueness = 1, priority = 0, lod = 0;
     GammaControl* gamma = nullptr;
+    void* d3dTexture = nullptr;  // Direct3D texture object (d3dproxy.cpp), created on demand
 
 private:
     struct PrivateData {
@@ -213,7 +221,7 @@ private:
     bool EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT refresh);
     bool EnsureStaging(UINT w, UINT h);
     void ReleaseDevice();
-    void Convert(Surface* primary, const RECT& src, const D3DLOCKED_RECT& lr);
+    void Convert(Surface* primary, const RECT& src, void* bits, int pitch);
     void BuildLut16(const Format& f);
     RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
 
@@ -222,6 +230,7 @@ private:
     HANDLE dirtyEvent_ = nullptr;
     HANDLE dropDone_ = nullptr;          // signaled when a DropDevice() request was handled
     volatile bool dropRequest_ = false;
+    bool waitForContent_ = false;  // presenter thread only: see Loop()
     volatile bool running_ = false;
     volatile bool active_ = false;
 
@@ -296,6 +305,11 @@ public:
     Presenter* GetPresenter() { return presenter_; }
     void OnActivate(bool active);  // WM_ACTIVATEAPP while exclusive
     bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
+    // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which
+    // then presents itself): while any exist, dd2d9 doesn't present.
+    void Add3DDevice();
+    void Remove3DDevice();
+    bool Has3D() const { return devices3D_ > 0; }
     void SleepUntilVBlank(int count);
     void PaceFlip();  // never let Flip() run faster than the refresh rate
     double VBlankPhase() const;  // 0..1 position inside the current refresh period
@@ -303,6 +317,7 @@ public:
     Surface* primary = nullptr;
     std::vector<Surface*> surfaces;
     PALETTEENTRY defaultPalette[256];
+    void* d3dObject = nullptr;  // Direct3D object (d3dproxy.cpp), shared by its interfaces
     bool alive = true;
     bool initialized = true;
 
@@ -322,6 +337,7 @@ private:
 
     LONG ref_ = 0;
     LONG tornDown_ = 0;
+    LONG devices3D_ = 0;
     LONG intRef_ = 1;  // released when the last external reference goes away
     void* wraps_[4] = {};
     HWND hwnd_ = nullptr;

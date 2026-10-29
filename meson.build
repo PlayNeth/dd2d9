@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '0.4.1',
+  version : '0.5.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -17,7 +17,7 @@ endforeach
 static_link = ['-static', '-static-libgcc', '-static-libstdc++']
 
 ddraw = shared_library('ddraw',
-  'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp',
+  'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp', 'src/d3dproxy.cpp',
   name_prefix : '',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,
@@ -31,3 +31,11 @@ executable('ddtest', 'tests/ddtest.cpp',
                   cpp.find_library('user32')],
   link_args : static_link + ['-mwindows'],
   install : false)
+
+# Direct3D 7 test (a 3D game as D7VK sees it); needs a D3D7 implementation such as D7VK.
+executable('d3d7test', 'tests/d3d7test.cpp',
+  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
+                  cpp.find_library('user32')],
+  link_args : static_link + ['-mwindows'],
+  install : false)
+

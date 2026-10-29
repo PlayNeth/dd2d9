@@ -38,9 +38,17 @@ turns that into Vulkan, so dd2d9 covers the 2D half that D7VK leaves to wined3d.
 - **All interface versions are implemented**: IDirectDraw 1/2/4/7,
   IDirectDrawSurface 1/2/3/4/7, Palette, Clipper and GammaControl.
 
+## Direct3D and D7VK
+dd2d9 doesn't render 3D. For 3D games, install it behind D7VK (D7VK as `ddraw.dll`, dd2d9
+as `ddraw_.dll`, which `install-dd2d9.sh --d7vk` does). D7VK builds its Direct3D 3–7 on
+the DirectDraw it wraps, so in that setup dd2d9 provides the Direct3D objects D7VK needs
+(devices, viewports, materials, textures, with `Clear` and `Load` applied to the
+DirectDraw surfaces). D7VK renders and presents while a 3D device exists, and dd2d9
+presents 2D the rest of the time (menus, movies, 2D-only games). Loaded on its own,
+dd2d9 answers Direct3D queries with `E_NOINTERFACE`, so games fall back to their other
+renderers. The `d3d=` ini key overrides this.
+
 ## Not implemented (yet)
-- **Direct3D (`IDirect3D*`).** `QueryInterface` fails and the request is logged.
-  Use D7VK for 3D games.
 - **Mouse coordinate scaling.** When the image is scaled (`display=borderless`,
   or the fallback when a mode switch fails), games that read the cursor with
   `GetCursorPos` or `WM_MOUSEMOVE` see unscaled coordinates.
@@ -106,7 +114,10 @@ install DXVK's `d3d9.dll` into the prefix, or put it next to the game.
   the pacing.
 - `ddtest win` runs a windowed primary with a clipper.
 
-All 37 checks pass under Wine 9.0 (wined3d, Xvfb).
+All 55 checks pass under Wine 11 (wined3d, Xvfb).
+
+`build/d3d7test.exe [w h [bpp]]` renders a Direct3D 7 triangle with DirectDraw fills
+and GDI text on top, then flips. It's meant to run behind D7VK and writes `d3d7test.txt`.
 
 ## Reverse-engineering notes
 `re/` has the vtable map of the XP SP3 `ddraw.dll` (5.3.2600.5512), along with

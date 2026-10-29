@@ -1,6 +1,8 @@
 // Direct3D 9 presentation of the primary surface.
 #include "objects.h"
 
+#include <d3d9.h>
+
 #include <cmath>
 
 namespace dd2d9 {
@@ -223,7 +225,7 @@ void Presenter::BuildLut16(const Format& f) {
 }
 
 // Called with g_lock held: copies the visible part of the primary surface.
-void Presenter::Convert(Surface* p, const RECT& src, const D3DLOCKED_RECT& lr) {
+void Presenter::Convert(Surface* p, const RECT& src, void* bits, int pitch) {
     Buffer* b = p->buf;
     const Format& f = b->fmt;
     const int sw = src.right - src.left, sh = src.bottom - src.top;
@@ -243,7 +245,7 @@ void Presenter::Convert(Surface* p, const RECT& src, const D3DLOCKED_RECT& lr) {
     const bool fastCopy = f.IsStandardX8R8G8B8() && !gamma;
 
     for (int y = 0; y < sh; y++) {
-        auto* out = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(lr.pBits) + size_t(y) * lr.Pitch);
+        auto* out = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(bits) + size_t(y) * pitch);
         const int py = src.top + y;
         if (py < 0 || py >= b->h || x0 >= x1) {
             memset(out, 0, size_t(sw) * 4);
@@ -283,7 +285,7 @@ void Presenter::Loop() {
     while (running_) {
         // Also refresh periodically (window exposed, moved...). D3D9 may create
         // windows on the thread that owns a device, so keep its messages flowing.
-        MsgWaitForMultipleObjects(1, &dirtyEvent_, FALSE, 250, QS_ALLINPUT);
+        const bool woken = MsgWaitForMultipleObjects(1, &dirtyEvent_, FALSE, 250, QS_ALLINPUT) == WAIT_OBJECT_0;
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         if (!running_) break;
@@ -306,14 +308,23 @@ void Presenter::Loop() {
             Guard l;
             // In the background (focus lost) nothing is shown, and no device may be
             // created: the window is about to be minimized.
-            havePrimary = dd_->primary != nullptr && !dd_->Suspended();
+            // A wrapper's Direct3D device presents instead (see DDraw::Add3DDevice).
+            havePrimary = dd_->primary != nullptr && !dd_->Suspended() && !dd_->Has3D();
             if (havePrimary) hwnd = dd_->PresentWindow();
             if (hwnd) src = dd_->PresentSource(hwnd);
             if (hwnd && !exclusiveFailed_) fullscreen = dd_->ExclusivePresent(&fw, &fh, &fhz);
         }
         if (!havePrimary || !hwnd || !IsWindow(hwnd) || IsIconic(hwnd)) {
             active_ = false;
+            // After a wrapper's 3D device, the screen shows its last frame, which
+            // the primary surface never held: wait for the game to draw again
+            // instead of refreshing with stale content.
+            if (dd_->Has3D()) waitForContent_ = true;
             continue;
+        }
+        if (waitForContent_) {
+            if (!woken) continue;  // periodic refresh: nothing new yet
+            waitForContent_ = false;
         }
         UINT bw = fw, bh = fh;
         if (!fullscreen) {
@@ -332,6 +343,12 @@ void Presenter::Loop() {
             Sleep(50);
             continue;
         }
+        // Creating the device takes a while: if meanwhile a 3D device appeared,
+        // the game lost focus or the device is to be dropped, don't present.
+        if (dropRequest_ || dd_->Has3D() || dd_->Suspended()) {
+            SetEvent(dirtyEvent_);  // handle it right away in the next iteration
+            continue;
+        }
 
         // Lock the D3D surface before taking g_lock: the lock may wait for the
         // GPU, and the game must not wait for that in every Blt and Flip.
@@ -342,7 +359,7 @@ void Presenter::Loop() {
         {
             Guard l;
             if (dd_->primary) {
-                Convert(dd_->primary, src, lr);
+                Convert(dd_->primary, src, lr.pBits, lr.Pitch);
                 seq = ++convertSeq_;
                 converted = true;
                 DD2D9_TRACE("present #%llu: primary %p, palette %p v%lu", static_cast<unsigned long long>(seq),
