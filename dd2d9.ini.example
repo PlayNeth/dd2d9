@@ -17,14 +17,6 @@
 ;                stretch and filter: keep switch for 3D games.
 display=switch
 
-; How the image reaches the screen after a real mode switch (display=switch):
-;   window    - a borderless window covering the screen (default). Other topmost
-;               windows (overlays, notifications) can appear over the game.
-;   exclusive - a Direct3D 9 exclusive-fullscreen swapchain, closer to what the game
-;               originally got: overlays can't cover it. Falls back to window if the
-;               driver refuses it.
-present=window
-
 ; Scaling when the image doesn't fit 1:1 (window resized, borderless, windowed games):
 ;   aspect (default), fill, integer
 stretch=aspect

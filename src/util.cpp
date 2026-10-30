@@ -108,9 +108,8 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         else if (v == "sharp" || v == "bilinear-sharp" || v == "sharp-bilinear" || v == "2") g_config.filter = 2;
         else ok = false;
     } else if (key == "present") {
-        if (v == "window" || v == "windowed") g_config.present = kPresentWindow;
-        else if (v == "exclusive" || v == "fullscreen") g_config.present = kPresentExclusive;
-        else ok = false;
+        // Gone in 0.7.17 (the shared Direct3D 9 device presents through a window's swap
+        // chain): accepted and ignored, so old ini files don't log an error.
     } else if (key == "d3d") {
         int b;
         if (v == "auto") g_config.d3d = kD3DAuto;
@@ -265,9 +264,8 @@ void LogInit() {
     for (const auto& e : g_iniErrors) Log(1, "config:  %s", Utf8(e).c_str());
     static const char* kD3D[] = {"auto", "on", "off"};
     static const char* kFilter[] = {"point", "linear", "sharp"};
-    Log(1, "settings: display=%s present=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
-        kDisplay[g_config.display], g_config.present == kPresentExclusive ? "exclusive" : "window",
-        kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
+    Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
+        kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first

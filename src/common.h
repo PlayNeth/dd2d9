@@ -17,11 +17,10 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.7.16"
+#define DD2D9_VERSION "0.7.17"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
-enum { kPresentWindow, kPresentExclusive };
 enum { kD3DAuto, kD3DOn, kD3DOff };
 
 // Defaults behave like the original DirectDraw.
@@ -30,7 +29,6 @@ struct Config {
     int stretch = 0;               // window & borderless scaling: 0 aspect, 1 fill, 2 integer
     int filter = 0;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear)
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
-    int present = kPresentWindow;  // after a real mode switch: borderless window / D3D9 exclusive fullscreen
     int d3d = kD3DAuto;            // Direct3D objects for a wrapper (D7VK): auto = when loaded behind one
     bool mouseScale = true;        // map the mouse to the game's display mode when it is scaled or windowed
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)

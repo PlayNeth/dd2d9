@@ -2,6 +2,7 @@
 // live in wrappers.h and forward to these.
 #pragma once
 #include "common.h"
+#include "gpu.h"
 
 // Direct3D 9 types, defined in d3d9.h (presenter.cpp only).
 struct IDirect3D9;
@@ -14,6 +15,7 @@ class DDraw;
 class Surface;
 class Palette;
 class Presenter;
+class Gpu;
 
 // ---------------------------------------------------------------- Buffer
 // Pixel memory of a surface. RGB / palettized buffers are GDI DIB sections so
@@ -298,10 +300,10 @@ private:
 bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out);  // presenter.cpp
 
 // ---------------------------------------------------------------- Presenter
-// Owns the Direct3D 9 device. A dedicated thread copies the primary surface
-// into a D3D9 surface (converting 8/16/24/32-bit to X8R8G8B8), scales it into
-// the game window and presents.
-class Presenter {
+// A dedicated thread copies the primary surface into a D3D9 surface (converting
+// 8/16/24/32-bit to X8R8G8B8), scales it into the game window and presents: through the
+// DirectDraw object's shared device (gpu.h) and its swap chain on the window.
+class Presenter final : public Gpu::Owner {
 public:
     explicit Presenter(DDraw* dd);
     ~Presenter();
@@ -311,10 +313,9 @@ public:
     uint64_t ConvertSeq() const { return convertSeq_; }  // read under g_lock
     bool WaitPresented(uint64_t afterSeq, DWORD timeoutMs);
     bool Active() const { return active_; }
-    bool HasExclusiveDevice() const { return dev_ && devFullscreen_; }
-    // Releases the device on the presenter thread and waits for it (handling
-    // window messages meanwhile). Needed before the display mode is restored
-    // under an exclusive-fullscreen device.
+    // Stops presenting into the window (its swap chain goes) on the presenter thread and
+    // waits for it, handling window messages meanwhile: another device (a wrapper's)
+    // presents there from now on.
     void DropDevice();
     void SetGamma(const DDGAMMARAMP& ramp);
     void GetGamma(DDGAMMARAMP* ramp);
@@ -324,10 +325,10 @@ public:
 private:
     static DWORD WINAPI ThreadProc(void* self);
     void Loop();
-    bool EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT refresh);
-    bool EnsureStaging(UINT w, UINT h);
-    bool EnsurePrescaled(UINT w, UINT h);
-    void ReleaseDevice();
+    bool EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h);
+    bool EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h);
+    void ReleaseGpuResources() override;     // staging and prescaled surfaces (Gpu lock held)
+    void LeaveGpu();                         // stop presenting through the shared device
     // What the presenter copies from the primary surface under g_lock; the
     // pixels themselves are converted afterwards, without it.
     struct Snapshot {
@@ -348,15 +349,11 @@ private:
     volatile bool running_ = false;
     volatile bool active_ = false;
 
-    IDirect3D9* d3d_ = nullptr;
-    IDirect3DDevice9* dev_ = nullptr;
+    bool usingGpu_ = false;            // presenting through the shared device (an owner of it)
     IDirect3DSurface9* staging_ = nullptr;
     IDirect3DSurface9* prescaled_ = nullptr;  // filter=sharp: the image enlarged by a whole factor
     UINT preW_ = 0, preH_ = 0;
-    HWND devHwnd_ = nullptr;
-    bool devFullscreen_ = false;   // the device is a D3D9 exclusive-fullscreen one
-    bool exclusiveFailed_ = false; // exclusive presentation failed once: stay windowed
-    UINT bbW_ = 0, bbH_ = 0, stW_ = 0, stH_ = 0;
+    UINT stW_ = 0, stH_ = 0;
 
     // What the staging surface holds (presenter thread only): a partial update
     // is only possible while these match the primary surface.
@@ -437,9 +434,6 @@ public:
     // screen's origin (a scaled or windowed mode). g_lock held. See input.cpp.
     bool ImageOnScreen(RECT* image, SIZE* mode) const;
     HWND Window() const { return hwnd_; }
-    // present=exclusive and the real display mode is switched: the presenter
-    // should use an exclusive-fullscreen device of this size and refresh rate.
-    bool ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const;
     bool Exclusive() const { return (coop_ & DDSCL_EXCLUSIVE) != 0; }
     // The whole visible image changed (flip, palette, window...). Any thread.
     void MarkDirty() {
@@ -467,6 +461,7 @@ public:
         return InterlockedExchange(&dirtyAll_, 0) != 0;
     }
     Presenter* GetPresenter() { return presenter_; }
+    Gpu& GetGpu() { return *gpu_; }
     void OnActivate(bool active, DWORD thread);  // WM_ACTIVATEAPP while exclusive (thread: its lParam)
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
     void CheckCover(HWND h);       // the window moved in exclusive mode; g_displayLock held
@@ -516,7 +511,6 @@ private:
     void ConfineCursor(bool on);  // g_displayLock held
     void Uncover();
     void RestoreSavedWindow(bool windowChanges);
-    void DropExclusiveDevice();
     void HookWindow();
     void UnhookWindow();
     bool SwitchMode();
@@ -569,6 +563,7 @@ private:
     LARGE_INTEGER qpcFreq_, qpcBase_;
     int64_t lastFlip_ = 0;
     Presenter* presenter_ = nullptr;
+    Gpu* gpu_ = nullptr;  // the Direct3D 9 device (gpu.h)
     volatile LONG deviceState_ = kDevOk;
     const Buffer* gdiBuf_ = nullptr;  // the primary's first memory (compared only)
 };

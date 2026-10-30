@@ -1,5 +1,6 @@
 // The DirectDraw object: display modes, cooperative level, object creation.
 #include "wrappers.h"
+#include "gpu.h"
 
 #include "d3dproxy.h"
 
@@ -34,6 +35,7 @@ DDraw::DDraw() {
     UpdateRefreshRate();
     QueryPerformanceFrequency(&qpcFreq_);
     QueryPerformanceCounter(&qpcBase_);
+    gpu_ = new Gpu;
     presenter_ = new Presenter(this);
     timeBeginPeriod(1);  // precise Sleep() for vblank emulation and flip pacing
 }
@@ -45,6 +47,7 @@ DDraw::~DDraw() {
     }
     timeEndPeriod(1);
     delete presenter_;
+    delete gpu_;  // after the presenter, which used it
     delete static_cast<DDWrap<1>*>(wraps_[0]);
     delete static_cast<DDWrap<2>*>(wraps_[1]);
     delete static_cast<DDWrap<4>*>(wraps_[2]);
@@ -239,14 +242,6 @@ bool MouseFromGame(POINT* p) {
     const LONG w = r.right - r.left, h = r.bottom - r.top;
     p->x = r.left + LONG((int64_t(p->x) * w + w / 2) / std::max<LONG>(m.cx, 1));
     p->y = r.top + LONG((int64_t(p->y) * h + h / 2) / std::max<LONG>(m.cy, 1));
-    return true;
-}
-
-bool DDraw::ExclusivePresent(UINT* w, UINT* h, UINT* refresh) const {
-    if (g_config.present != kPresentExclusive || !Exclusive() || !switched_ || suspended_ || !primary) return false;
-    *w = modeW_;
-    *h = modeH_;
-    *refresh = refresh_;
     return true;
 }
 
@@ -585,7 +580,6 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         if (cover) {
             DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
             suspended_ = true;      // first: the presenter must not create a new device from here on
-            DropExclusiveDevice();  // D3D9 wants its fullscreen device gone before the mode changes
             if (switched_) {
                 ChangeDisplay(nullptr, 0);
                 switched_ = false;
@@ -772,7 +766,6 @@ void DDraw::ApplyWindow() {
         display = kDisplayBorderless;
     }
     if (display != kDisplaySwitch && switched_) {
-        DropExclusiveDevice();
         ChangeDisplay(nullptr, 0);
         switched_ = false;
         UpdateRefreshRate();
@@ -841,17 +834,7 @@ bool DDraw::SwitchMode() {
 
 // Undoes the mode switch and gives the window back its style and position.
 // Called with g_displayLock held and g_lock not held.
-// Unconditional with present=exclusive: the presenter thread may be in the
-// middle of creating the device, before HasExclusiveDevice() says so.
-void DDraw::DropExclusiveDevice() {
-    if (presenter_ && g_config.present == kPresentExclusive) {
-        if (presenter_->HasExclusiveDevice()) DD2D9_LOG("releasing the exclusive fullscreen device");
-        presenter_->DropDevice();
-    }
-}
-
 void DDraw::RestoreDisplay() {
-    DropExclusiveDevice();
     if (switched_ && g_exclusiveDD && g_exclusiveDD != this) {
         DD2D9_LOG("display mode left alone: another DirectDraw object is in exclusive mode");
         switched_ = false;
@@ -1038,7 +1021,6 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
             RestoreDisplay();
             RestoreSavedWindow(!(flags & DDSCL_NOWINDOWCHANGES));
         } else {
-            DropExclusiveDevice();  // a fullscreen device needs exclusive mode
             suspended_ = false;
             // The window stays as it is but for being topmost, as with ddraw.dll.
             if (!(flags & DDSCL_NOWINDOWCHANGES) && hwnd_ && IsWindow(hwnd_))
@@ -1217,7 +1199,6 @@ bool DDraw::Superseded() const {
 // old object drops to normal mode so it neither restores them nor presents.
 void DDraw::TakeOverExclusive(DDraw* prev, HWND hwnd) {
     DD2D9_LOG("exclusive mode taken over from DirectDraw object %p", static_cast<void*>(prev));
-    prev->DropExclusiveDevice();
     if (prev->windowSaved_ && prev->savedHwnd_ == hwnd) {
         if (!windowSaved_) {
             windowSaved_ = true;

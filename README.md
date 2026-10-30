@@ -132,7 +132,6 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | Key | Values (default first) |
 | --- | --- |
 | `display` | `switch`, `window`, `borderless` |
-| `present` | `window`, `exclusive` (D3D9 exclusive fullscreen after a real mode switch) |
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `point`, `linear`, `sharp` (bilinear-sharp: whole-multiple point scaling, then linear) |
 | `vsync` | `auto` (the game decides), `on`, `off` |

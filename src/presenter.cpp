@@ -1,44 +1,12 @@
 // Direct3D 9 presentation of the primary surface.
 #include "objects.h"
+#include "gpu.h"
 
 #include <d3d9.h>
 
 #include <cmath>
 
 namespace dd2d9 {
-
-// Direct3D 9 for presenting. By default Windows' own d3d9.dll, loaded by its full path:
-// next to a wrapper such as D7VK the game folder holds DXVK's d3d9.dll, whose Vulkan
-// presentation can let the driver take the display over in a window that covers it,
-// and switch the display mode back to the desktop's when it lets go.
-static IDirect3D9* CreateD3D9() {
-    using Create = IDirect3D9*(WINAPI*)(UINT);
-    static const Create create = [] {
-        Create fn = &Direct3DCreate9;  // whichever d3d9.dll the process loaded
-        HMODULE m = GetModuleHandleW(L"d3d9.dll");
-        if (g_config.systemD3D9) {
-            bool loaded = false;
-            wchar_t path[MAX_PATH];
-            const UINT n = GetSystemDirectoryW(path, MAX_PATH);  // SysWOW64 for a 32-bit game on 64-bit Windows
-            if (n && n < MAX_PATH - 10) {
-                lstrcatW(path, L"\\d3d9.dll");
-                if (HMODULE sys = LoadLibraryW(path)) {
-                    if (auto f = reinterpret_cast<Create>(reinterpret_cast<void*>(GetProcAddress(sys, "Direct3DCreate9")))) {
-                        fn = f;
-                        m = sys;
-                        loaded = true;
-                    }
-                }
-            }
-            if (!loaded) DD2D9_LOG("Windows' d3d9.dll could not be loaded: using the game's");
-        }
-        char name[MAX_PATH] = "?";
-        if (m) GetModuleFileNameA(m, name, MAX_PATH);
-        DD2D9_LOG("presenting through %s", name);
-        return fn;
-    }();
-    return create(D3D_SDK_VERSION);
-}
 
 // The display adapter as Direct3D 9 describes it, for GetDeviceIdentifier (ddraw.dll
 // reports the real one too). Looked up once.
@@ -168,101 +136,35 @@ void Presenter::GetGamma(DDGAMMARAMP* ramp) {
 
 // ---------------------------------------------------------------- device
 
-void Presenter::ReleaseDevice() {
+// The staging and prescaled surfaces (the shared device's).
+void Presenter::ReleaseGpuResources() {
     if (staging_) staging_->Release();
     staging_ = nullptr;
     if (prescaled_) prescaled_->Release();
     prescaled_ = nullptr;
     preW_ = preH_ = 0;
     stW_ = stH_ = 0;
-    if (dev_) dev_->Release();
-    dev_ = nullptr;
-    if (d3d_) d3d_->Release();
-    d3d_ = nullptr;
-    devHwnd_ = nullptr;
-    devFullscreen_ = false;
-    active_ = false;
+    stagingStale_ = true;
 }
 
-// fullscreen: a D3D9 exclusive-fullscreen device at the (already switched)
-// display mode; otherwise a windowed device sized to the window's client area.
-bool Presenter::EnsureDevice(HWND hwnd, UINT w, UINT h, bool fullscreen, UINT refresh) {
-    if (dev_ && (devHwnd_ != hwnd || devFullscreen_ != fullscreen)) ReleaseDevice();
-
-    D3DPRESENT_PARAMETERS pp = {};
-    pp.Windowed = fullscreen ? FALSE : TRUE;
-    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
-    pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-    pp.BackBufferWidth = w;
-    pp.BackBufferHeight = h;
-    pp.BackBufferCount = 1;
-    pp.hDeviceWindow = hwnd;
-    pp.FullScreen_RefreshRateInHz = fullscreen ? refresh : 0;
-    pp.PresentationInterval = g_config.vsync == kVSyncOff ? D3DPRESENT_INTERVAL_IMMEDIATE : D3DPRESENT_INTERVAL_ONE;
-
-    if (!dev_) {
-        if (!d3d_) d3d_ = CreateD3D9();
-        if (!d3d_) {
-            DD2D9_LOG("Direct3DCreate9 failed");
-            return false;
-        }
-        HRESULT hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
-                                        D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE |
-                                            D3DCREATE_NOWINDOWCHANGES,  // the game's window is ours to manage
-                                        &pp, &dev_);
-        if (FAILED(hr)) {
-            dev_ = nullptr;
-            if (fullscreen) {
-                DD2D9_LOG("exclusive fullscreen device (%ux%u @ %u Hz) failed: 0x%08lx; presenting in a window", w,
-                          h, refresh, hr);
-                exclusiveFailed_ = true;
-            } else {
-                DD2D9_LOG("CreateDevice failed: 0x%08lx", hr);
-            }
-            return false;
-        }
-        devHwnd_ = hwnd;
-        devFullscreen_ = fullscreen;
-        bbW_ = w;
-        bbH_ = h;
-        DD2D9_LOG("D3D9 device created for window %p, %ux%u%s", static_cast<void*>(hwnd), w, h,
-                  fullscreen ? " (exclusive fullscreen)" : "");
-        return true;
-    }
-
-    // A fullscreen device is lost while the game is in the background, and
-    // needs a Reset when it comes back.
-    HRESULT coop = dev_->TestCooperativeLevel();
-    if (coop == D3DERR_DEVICELOST) return false;
-    if (coop == D3DERR_DEVICENOTRESET || w != bbW_ || h != bbH_) {
-        if (staging_) staging_->Release();
-        staging_ = nullptr;
-        if (prescaled_) prescaled_->Release();  // D3DPOOL_DEFAULT: gone before a Reset
-        prescaled_ = nullptr;
-        preW_ = preH_ = 0;
-        stW_ = stH_ = 0;
-        HRESULT hr = dev_->Reset(&pp);
-        if (hr == D3DERR_DEVICELOST) return false;  // lost again before we got to it: retry later
-        if (FAILED(hr)) {
-            DD2D9_LOG("Reset failed: 0x%08lx", hr);
-            if (fullscreen) exclusiveFailed_ = true;
-            ReleaseDevice();
-            return false;
-        }
-        bbW_ = w;
-        bbH_ = h;
-    }
-    return true;
+void Presenter::LeaveGpu() {
+    if (!usingGpu_) return;
+    Gpu& gpu = dd_->GetGpu();
+    GpuGuard g(gpu);
+    ReleaseGpuResources();
+    gpu.DropSwapChain();  // another device (a wrapper's, or another object's) may present here now
+    gpu.RemoveOwner(this);
+    usingGpu_ = false;
 }
 
-bool Presenter::EnsureStaging(UINT w, UINT h) {
+bool Presenter::EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h) {
     if (staging_ && stW_ == w && stH_ == h) return true;
     if (staging_) staging_->Release();
     staging_ = nullptr;
     if (prescaled_) prescaled_->Release();
     prescaled_ = nullptr;
     preW_ = preH_ = 0;
-    HRESULT hr = dev_->CreateOffscreenPlainSurface(w, h, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &staging_, nullptr);
+    HRESULT hr = d->CreateOffscreenPlainSurface(w, h, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &staging_, nullptr);
     if (FAILED(hr)) {
         DD2D9_LOG("CreateOffscreenPlainSurface(%u, %u) failed: 0x%08lx", w, h, hr);
         staging_ = nullptr;
@@ -275,12 +177,12 @@ bool Presenter::EnsureStaging(UINT w, UINT h) {
 }
 
 // filter=sharp's intermediate image: a render target (StretchRect filters only into one).
-bool Presenter::EnsurePrescaled(UINT w, UINT h) {
+bool Presenter::EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h) {
     if (prescaled_ && preW_ == w && preH_ == h) return true;
     if (prescaled_) prescaled_->Release();
     prescaled_ = nullptr;
     preW_ = preH_ = 0;
-    if (FAILED(dev_->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &prescaled_, nullptr))) {
+    if (FAILED(d->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &prescaled_, nullptr))) {
         prescaled_ = nullptr;
         return false;
     }
@@ -414,7 +316,7 @@ void Presenter::Loop() {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         if (!running_) break;
         if (dropRequest_) {
-            ReleaseDevice();
+            LeaveGpu();
             dropRequest_ = false;
             SetEvent(dropDone_);
             continue;
@@ -428,8 +330,6 @@ void Presenter::Loop() {
         RECT target = {};  // where the image goes in the back buffer (client coordinates)
         bool havePrimary;
         bool superseded;
-        bool fullscreen = false;
-        UINT fw = 0, fh = 0, fhz = 0;
         {
             Guard l;
             // In the background (focus lost) nothing is shown, and no device may be
@@ -446,10 +346,9 @@ void Presenter::Loop() {
             if (havePrimary) hwnd = dd_->PresentWindow();
             if (hwnd) src = dd_->PresentSource(hwnd);
             if (hwnd) target = dd_->PresentTarget(hwnd);
-            if (hwnd && !exclusiveFailed_) fullscreen = dd_->ExclusivePresent(&fw, &fh, &fhz);
         }
         if (!havePrimary || !hwnd || !IsWindow(hwnd) || IsIconic(hwnd)) {
-            if (superseded && dev_) ReleaseDevice();  // the window belongs to the other object's device
+            if (superseded) LeaveGpu();  // the window belongs to the other object's device
             active_ = false;
             stagingStale_ = true;  // the device may go meanwhile: start over with a full frame
             // After a wrapper's 3D device, the screen shows its last frame, which
@@ -462,21 +361,28 @@ void Presenter::Loop() {
             if (!woken) continue;  // periodic refresh: nothing new yet
             waitForContent_ = false;
         }
-        UINT bw = fw, bh = fh;
-        if (!fullscreen) {
-            RECT cr;
-            GetClientRect(hwnd, &cr);
-            bw = UINT(std::max<LONG>(cr.right, 1));
-            bh = UINT(std::max<LONG>(cr.bottom, 1));
-        } else {
-            target = RECT{0, 0, LONG(bw), LONG(bh)};
-        }
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        const UINT bw = UINT(std::max<LONG>(cr.right, 1)), bh = UINT(std::max<LONG>(cr.bottom, 1));
         const UINT sw = UINT(src.right - src.left), sh = UINT(src.bottom - src.top);
         if (int(sw) <= 0 || int(sh) <= 0) {
             active_ = false;
             continue;
         }
-        if (!EnsureDevice(hwnd, bw, bh, fullscreen, fhz) || !EnsureStaging(sw, sh)) {
+        // The shared device, through its swap chain on the window.
+        bool ready;
+        {
+            Gpu& gpu = dd_->GetGpu();
+            GpuGuard g(gpu);
+            if (!usingGpu_) {
+                gpu.AddOwner(this);
+                usingGpu_ = true;
+                stagingStale_ = true;
+            }
+            IDirect3DDevice9* d = gpu.Ensure();
+            ready = d && gpu.SwapChain(hwnd, bw, bh) && EnsureStaging(d, sw, sh);
+        }
+        if (!ready) {
             active_ = false;
             Sleep(50);
             continue;
@@ -538,6 +444,20 @@ void Presenter::Loop() {
             lockTime = Seconds() - t0;
         }
         if (!primaryExists) continue;
+        // The shared device again (taken after g_lock, never the other way round: the game's
+        // Direct3D calls hold g_lock and then take it). It may have been lost meanwhile,
+        // taking the staging surface with it.
+        Gpu& gpu = dd_->GetGpu();
+        gpu.Lock();
+        IDirect3DDevice9* const d = gpu.Device();
+        IDirect3DSwapChain9* const swap = gpu.SwapChain(hwnd, bw, bh);
+        if (!d || !staging_ || !swap) {
+            gpu.Unlock();
+            if (snap.buf) snap.buf->Release();
+            stagingStale_ = true;
+            active_ = false;
+            continue;
+        }
         double convertTime = 0;
         if (snap.buf) {
             RECT dst = {area.left - src.left, area.top - src.top, area.right - src.left, area.bottom - src.top};
@@ -556,7 +476,7 @@ void Presenter::Loop() {
                      double(area.right - area.left) * (area.bottom - area.top) / (double(sw) * sh));
 
         IDirect3DSurface9* bb = nullptr;
-        if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
+        if (SUCCEEDED(swap->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
             // Fitted into the target area of the back buffer (the client area's part on the
             // screen, see DDraw::PresentTarget).
             RECT tg;
@@ -564,29 +484,32 @@ void Presenter::Loop() {
             if (!IntersectRect(&tg, &target, &whole)) tg = whole;
             RECT dst = FitRect(sw, sh, UINT(tg.right - tg.left), UINT(tg.bottom - tg.top));
             OffsetRect(&dst, tg.left, tg.top);
+            // ColorFill rather than Clear: Clear works on the device's render target, which a
+            // swap chain's back buffer isn't.
             if (dst.left > 0 || dst.top > 0 || dst.right < LONG(bw) || dst.bottom < LONG(bh))
-                dev_->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+                d->ColorFill(bb, nullptr, D3DCOLOR_XRGB(0, 0, 0));
             const UINT dw = UINT(dst.right - dst.left), dh = UINT(dst.bottom - dst.top);
             const bool same = dw == sw && dh == sh;
             if (same || g_config.filter == 0) {
-                dev_->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_POINT);
+                d->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_POINT);
             } else if (g_config.filter == 2 && dw >= 2 * sw && dh >= 2 * sh) {
                 // Sharp bilinear: enlarged by the largest whole factor with point sampling (sharp
                 // pixels), the rest of the way with linear (no uneven pixel sizes, only the
                 // pixel edges blended).
                 const UINT k = std::min(dw / sw, dh / sh);
-                if (EnsurePrescaled(sw * k, sh * k)) {
-                    dev_->StretchRect(staging_, nullptr, prescaled_, nullptr, D3DTEXF_POINT);
-                    dev_->StretchRect(prescaled_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                if (EnsurePrescaled(d, sw * k, sh * k)) {
+                    d->StretchRect(staging_, nullptr, prescaled_, nullptr, D3DTEXF_POINT);
+                    d->StretchRect(prescaled_, nullptr, bb, &dst, D3DTEXF_LINEAR);
                 } else {
-                    dev_->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                    d->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
                 }
             } else {
-                dev_->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                d->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
             }
             bb->Release();
         }
-        HRESULT hr = dev_->Present(nullptr, nullptr, nullptr, nullptr);
+        const HRESULT hr = swap->Present(nullptr, nullptr, nullptr, nullptr, 0);
+        gpu.Unlock();
         active_ = SUCCEEDED(hr);
         if (FAILED(hr)) DD2D9_LOG("Present failed: 0x%08lx", hr);
 
@@ -596,7 +519,7 @@ void Presenter::Loop() {
         WakeAllConditionVariable(&seqCv_);
     }
     active_ = false;
-    ReleaseDevice();
+    LeaveGpu();
 }
 
 }  // namespace dd2d9
