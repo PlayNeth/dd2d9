@@ -249,3 +249,7 @@ It writes `d3d7test.txt`.
 `re/` has the vtable map of the XP SP3 `ddraw.dll` (5.3.2600.5512), along with
 naming scripts for Ghidra and IDA. `re/spec/` describes, from its decompiled code, what
 each method checks and in which order, with the differences from dd2d9 that remain.
+
+## License
+
+MIT, see [LICENSE](LICENSE). dd2d9 contains no Microsoft code or binaries.
