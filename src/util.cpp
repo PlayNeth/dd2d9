@@ -182,9 +182,11 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (end && (end == v.c_str() || *end)) ok = false;
         else if (x < 0 || x > 16) ok = false;
         else g_config.anisotropy = int(x);
-    } else if (key == "mipmaps" || key == "alternatepixelcenter" || key == "render32" || key == "depth24") {
+    } else if (key == "mipmaps" || key == "alternatepixelcenter" || key == "render32" || key == "depth24" ||
+               key == "drawtrace") {
         int b;
         bool* field = key == "mipmaps" ? &g_config.mipmaps : key == "render32" ? &g_config.render32
+                      : key == "drawtrace" ? &g_config.drawTrace
                       : key == "depth24" ? &g_config.depth24 : &g_config.pixelCenter;
         if (ParseBool(v, &b)) *field = b != 0;
         else ok = false;

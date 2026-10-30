@@ -3,6 +3,11 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.13
+- `drawtrace=on` (diagnostic): every 600 scenes (about 10 s), one whole frame's draws are
+  logged with their depth, blend and alpha-test states, texture, the depth bias dd2d9 put on
+  them, and the range of z and rhw in their vertices.
+
 ## 0.9.12
 - `overlaybias`: one 16-bit depth step whatever the game's Z buffer (NFS3+ asks for a 32-bit
   one, which got 16 steps of a 24-bit one: too little), plus a slope-scaled bias of one

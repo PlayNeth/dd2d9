@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.12"
+#define DD2D9_VERSION "0.9.13"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -42,6 +42,7 @@ struct Config {
     int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off
     bool render32 = false;         // 16-bit render targets drawn in 32 bits on the GPU
     bool depth24 = false;
+    bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s
     int overlayBias = 1;           // passes laid on drawn surfaces pulled forward N 16-bit depth steps (gpures.cpp)
     int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too          // 16-bit Z buffers made 24-bit on the GPU
     bool mipmaps = false;          // the GPU makes smaller levels for textures the game gave none

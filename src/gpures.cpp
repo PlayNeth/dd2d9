@@ -160,6 +160,9 @@ static unsigned g_drawSerial = 0;
 // Emulated W buffering's scale: 1/w times this is at most 1 for every vertex so far (it only
 // shrinks, when a nearer one comes). Gpu lock.
 static float g_wScale = 1.0f;
+// drawtrace=on: one whole frame's draws logged every 600 scenes (about 10 s).
+static unsigned g_traceScene = 0;
+static bool TracingFrame() { return g_config.drawTrace && g_traceScene % 600 == 300; }
 
 struct GpuSurf final : Gpu::Owner {
     Gpu* gpu;
@@ -748,6 +751,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     DWORD tci[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     bool cutoutStage[8] = {};
     bool wEmulate = false;  // ZENABLE = D3DZB_USEW on a GPU without W buffering
+    DWORD rsMirror[256] = {};  // render states as last set through this context (drawtrace)
     bool zWrite = true;     // ZWRITEENABLE
     bool alphaBlend = false;  // ALPHABLENDENABLE
     float gameBias = 0.0f;  // the game's depth bias (ZBIAS); biasSet: as D3D9 has it
@@ -804,6 +808,7 @@ bool GpuContext::Begin(bool* fresh) {
 }
 
 void GpuContext::SetRenderState(DWORD state, DWORD value) {
+    if (state < 256) p_->rsMirror[state] = value;  // as the game set it (drawtrace)
     if (state == D3DRS_ZENABLE) {
         // W buffering: D3D9's own where the GPU has it, else emulated for transformed
         // vertices (Draw); the depth test itself is an ordinary Z buffer's.
@@ -1210,6 +1215,28 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
             verts = p.scratch.data();
         }
     }
+    if (TracingFrame()) {
+        float zlo = 1e30f, zhi = -1e30f, wlo = 1e30f, whi = -1e30f;
+        const bool tl = (fvf & 0x0E) == 0x04 && stride >= 16;
+        for (UINT i = 0; tl && i < vertexCount; i++) {
+            const float* v = reinterpret_cast<const float*>(static_cast<const uint8_t*>(verts) + size_t(i) * stride);
+            zlo = std::min(zlo, v[2]);
+            zhi = std::max(zhi, v[2]);
+            wlo = std::min(wlo, v[3]);
+            whi = std::max(whi, v[3]);
+        }
+        const DWORD* rs = p.rsMirror;
+        Surface* t0 = p.tex[0];
+        float bias, slope;
+        memcpy(&bias, &p.biasSet, 4);
+        slope = p.slopeSet;
+        DD2D9_LOG("drawtrace: prim %lu x%u v%u fvf 0x%lx z(en %lu wr %lu fn %lu) blend(%lu %lu>%lu) atest(%lu %lu ref %lu) "
+                  "tex0 %p %dbpp%s%s bias %g slope %g | z %.6f..%.6f rhw %.6f..%.6f",
+                  primType, primCount, vertexCount, fvf, rs[7], rs[14], rs[23], rs[27], rs[19], rs[20], rs[15], rs[25], rs[24],
+                  static_cast<void*>(t0), t0 ? int(t0->buf->fmt.bpp) : 0, t0 && t0->buf->fmt.a ? " alpha" : "",
+                  t0 && t0->gpuTex && t0->gpuTex->keyed ? " keyed" : "", bias, slope, tl ? zlo : 0.0f, tl ? zhi : 0.0f,
+                  tl ? wlo : 0.0f, tl ? whi : 0.0f);
+    }
     p.gpu.OpenScene();
     if (indices)
         p.dev->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(primType), 0, vertexCount, primCount, indices, D3DFMT_INDEX16,
@@ -1224,6 +1251,10 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
 }
 
-void GpuContext::EndScene() { p_->gpu.CloseScene(); }
+void GpuContext::EndScene() {
+    if (TracingFrame()) DD2D9_LOG("drawtrace: end of scene %u", g_traceScene);
+    g_traceScene++;
+    p_->gpu.CloseScene();
+}
 
 }  // namespace dd2d9

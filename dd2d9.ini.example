@@ -133,6 +133,10 @@ anisotropy=0
 ; 2D drawn through Direct3D (menus, HUDs, sprites). off (default) / on
 alternatepixelcenter=off
 
+; Diagnostic: every ~10 seconds, one whole frame's Direct3D draws in the log (their depth,
+; blend and alpha-test states, texture, and depth values). off (default) / on
+;drawtrace=on
+
 ; Logging: 0 off (default), 1 info, 2 trace (every blit, lock, flip and palette change -
 ; very verbose, for diagnosing rendering problems).
 ; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ...").
