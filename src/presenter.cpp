@@ -350,6 +350,18 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
             sharpPs_ = nullptr;
             sharpFailed_ = true;
             DD2D9_LOG("filter=sharp: no pixel shader (0x%08lx), point scaling then linear instead", hr);
+            // Why: whether the device takes any pixel shader at all (a pass-through one).
+            static const DWORD kPassPs[] = {0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000,
+                                            0xa00f0800, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001,
+                                            0x800f0800, 0x80e40000, 0x0000ffff};
+            IDirect3DPixelShader9* pass = nullptr;
+            const HRESULT hp = d->CreatePixelShader(kPassPs, &pass);
+            if (pass) pass->Release();
+            D3DCAPS9 caps = {};
+            d->GetDeviceCaps(&caps);
+            DD2D9_LOG("  the device: pixel shaders %lu.%lu; a pass-through ps_2_0 shader: 0x%08lx",
+                      static_cast<unsigned long>((caps.PixelShaderVersion >> 8) & 0xFF),
+                      static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF), hp);
             return false;
         }
     }

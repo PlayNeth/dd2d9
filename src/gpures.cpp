@@ -829,7 +829,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
         memcpy(&p_->gameBias, &value, 4);
         p_->biasSet = -1.0f;  // re-sent at the next draw
     }
-    if (state == 195 && value) {
+    if (state == 195 && (value & 0x7FFFFFFF)) {  // (not -0: ZBIAS 0)
         static bool logged;
         if (!logged) {
             logged = true;

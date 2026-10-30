@@ -3,6 +3,13 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.10
+- The log names the Direct3D 9 adapter, its driver and pixel shader version when the
+  device is made; when `filter=sharp`'s shader is refused, whether the device takes a
+  pass-through shader at all. (On one Windows laptop the shader is refused with
+  D3DERR_INVALIDCALL; the point-then-linear fallback is used there meanwhile.)
+- The "game uses ZBIAS" line no longer fires for ZBIAS 0.
+
 ## 0.9.9
 - **W buffering** (`wbuffer=on`, default): Direct3D 3-7 devices report
   `D3DPRASTERCAPS_WBUFFER` again, as most hardware of the era did, and `D3DZB_USEW` is

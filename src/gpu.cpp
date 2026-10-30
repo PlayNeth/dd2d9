@@ -150,7 +150,15 @@ IDirect3DDevice9* Gpu::Ensure() {
             failedAt_ = GetTickCount();
             return nullptr;
         }
-        DD2D9_LOG("D3D9 device created");
+        {
+            D3DCAPS9 caps = {};
+            D3DADAPTER_IDENTIFIER9 id = {};
+            dev_->GetDeviceCaps(&caps);
+            d3d_->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id);
+            DD2D9_LOG("D3D9 device created: %s (%s), pixel shaders %lu.%lu", id.Description, id.Driver,
+                      static_cast<unsigned long>((caps.PixelShaderVersion >> 8) & 0xFF),
+                      static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF));
+        }
         generation_++;
         inScene_ = false;
         return dev_;
