@@ -1,254 +1,238 @@
 # dd2d9
 
-DirectDraw (DirectX 1–7) and Direct3D (3–7), implemented on Direct3D 9. See
-`CHANGELOG.md` for what changed and why.
+A drop-in `ddraw.dll` that runs **DirectDraw and Direct3D 3–7 games** on Direct3D 9, on modern Windows and on Linux.
 
-## How it works
-- **Surfaces live in system memory**, laid out as ddraw.dll lays them out (the same
-  pitch). `Lock` returns a direct pointer, and `GetDC` puts a GDI device context
-  right on that memory (`D3DKMTCreateDCFromMemory`), so games that draw text with
-  GDI work, on the game's own memory too.
-- **All blitting is done in software**: color fill, raster ops (SRCCOPY,
-  BLACKNESS, WHITENESS), stretch, left-right and up-down mirroring, source and
-  destination color keys, overlapping copies, and conversion
-  between 8/16/24/32-bit formats. Color-keyed copies (sprites) use SSE2.
-- **Flip chains** swap memory between surfaces, as the hardware does. Games can also
-  put them together with `AddAttachedSurface` (IDirectDrawSurface 1-4), as `ddraw.dll`
-  allows.
-- **A presenter thread owns the D3D9 device.** It converts the primary surface to
-  X8R8G8B8 (applying the palette and the gamma ramp), scales it into the game
-  window with `StretchRect` and presents. Only the changed part of the image is
-  converted, and the conversion runs without blocking the game: it holds the
-  DirectDraw lock only long enough to see what changed.
-- **The game decides vsync by default.** `Flip` waits until its frame is
-  presented unless the game passes `DDFLIP_NOVSYNC`, and a limiter caps it at
-  the refresh rate when the driver doesn't block on vsync. `vsync=on` and
-  `vsync=off` force it. `WaitForVerticalBlank`, `GetScanLine` and
-  `GetVerticalBlankStatus` run on a virtual vblank timer.
-- **Exclusive-mode games get a real display-mode switch by default**, as with
-  the original DirectDraw. The color depth stays virtual (an 8-bit game runs on
-  a 32-bit desktop). If the monitor lacks the requested mode, dd2d9 falls back to
-  a borderless window with the image scaled. `display=window` and
-  `display=borderless` avoid mode switches altogether.
-- **Focus handling as in ddraw.dll.** In exclusive mode the game's window is
-  subclassed and covers the screen. Alt+Tab or another loss of focus restores the
-  desktop resolution (or drops the borderless cover) and minimizes the game, and
-  coming back sets it up again. The screensaver and monitor power-off are blocked.
-- **Lost surfaces as in ddraw.dll.** Display-mode changes, entering exclusive mode,
-  losing focus in it, and leaving it after a focus loss (except with DirectDraw 1) make
-  video-memory surfaces (and the primary) lost until the game calls `Restore` or
-  `RestoreAllSurfaces`; `Lock` and `Flip` say `DDERR_SURFACELOST` meanwhile, as games
-  expect. Unlike on real hardware, the contents survive. A display-change notice only
-  counts if the display really left the game's mode (Windows sends late and misleading
-  ones), a lost primary isn't shown, and a new primary may replace a lost one.
-- **Several DirectDraw objects**: a second one taking exclusive mode takes it over
-  from the first (games that recreate their DirectDraw object without releasing the
-  old one), and only the exclusive object's primary is presented. A primary made by the
-  exclusive object makes the others' lost.
-- **Calls behave as in XP SP3's ddraw.dll**: the checks, their order and the return
-  codes follow its decompiled code (`re/spec/`), from `Blt`'s rectangle and flag rules to
-  attachments, palettes and clippers. Without a clipper, `Blt` rejects destination
-  rectangles that extend past the surface; with one, it clips to the clipper's
-  window or clip list. `BltFast` never clips (with a clipper attached it fails
-  with `DDERR_BLTFASTCANTCLIP`).
-- **The mouse follows the game's display mode** when it is shown scaled or in a window
-  (`display=borderless` or `window`, or a mode the monitor lacks): the game's imports of
-  the cursor functions (`GetCursorPos`, `SetCursorPos`, `ClipCursor`, `GetMessagePos`,
-  `GetSystemMetrics`' screen size, the window's rectangles and coordinate conversions) and
-  its window's mouse messages are translated, so the game sees its mode's coordinates
-  with its window as the screen, as after a real mode switch. Graphics and input DLLs in
-  the game folder (DXVK...) keep the real ones. `mouse=raw` turns it off.
-- **Windowed games** (`DDSCL_NORMAL`) get a desktop-sized primary surface, and
-  the part under their window is shown.
-- **All interface versions are implemented**: IDirectDraw 1/2/4/7,
-  IDirectDrawSurface 1/2/3/4/7, Palette, Clipper and GammaControl. Their method tables
-  are writable, as `ddraw.dll`'s, for overlays and patches that hook them.
-- **Presenting through Windows' own `d3d9.dll`** (`d3d9=system`), even when the game
-  folder holds DXVK's: Vulkan presentation in a window covering the screen can
-  let the driver switch the display back to the desktop mode. `d3d9=game` uses the
-  game's.
+dd2d9 is a reimplementation of Windows XP SP3's `ddraw.dll`: DirectDraw 1–7 and Direct3D 3–7, drawn through Direct3D 9. It aims to behave call for call like the original (its checks, return codes and their order follow XP's own code), with XP's bugs fixed and modern options added: scaling filters, antialiasing, anisotropic filtering, a frame limiter, and the answers old games expect about memory, the processor and the desktop's colour depth. It's a single file, `ddraw.dll`, with no runtime to install.
 
-## Direct3D
-dd2d9 implements **Direct3D 7** itself (`IDirect3D7`, `IDirect3DDevice7`,
-`IDirect3DVertexBuffer7`, matched to XP SP3's `d3dim700.dll`: `re/spec/d3d7-*.md`), drawing
-through the same Direct3D 9 device it presents with, so 3D works on Windows' own Direct3D 9
-and on DXVK alike. Textures, render targets and Z buffers get a GPU copy; whenever
-DirectDraw touches their pixels (Lock, Blt, GetDC, the screen after Flip) what Direct3D drew
-is read back first, so 2D drawn over a 3D frame (HUDs, menus) works.
+---
 
-**Direct3D 3–6** (`IDirect3D`/`2`/`3` with their devices, viewports, lights, materials,
-textures, execute buffers and vertex buffers, for DirectDraw objects made by
-`DirectDrawCreate`; matched to XP SP3's `d3dim.dll`: `re/spec/d3d6-*.md`) is dd2d9's own as
-well. As on XP, where DirectX 6 had no hardware transform and lighting, every vertex goes
-through a CPU front end: transformed with the viewport's clip volume, lit with the DX5
-(`D3DLIGHT`) or DX6 (`D3DLIGHT2`) model, fogged and clipped, then drawn by Direct3D 9 as
-transformed vertices. The legacy render states (`TEXTUREHANDLE`, `TEXTUREMAPBLEND`,
-`TEXTUREMAG`/`MIN`, ...) are mapped onto texture stages as Microsoft's own rasterizer mapped
-them; `GetRenderState` still answers what the game set.
+## Contents
 
-Not done yet: cube maps (mipmapped or colour-keyed render-target textures still go through
-the CPU), and Z buffers can't be read or copied by DirectDraw (only cleared with
-`DDBLT_DEPTHFILL`). Direct3D 7's `GetClipStatus` reflects `ProcessVertices` and
-`SetClipStatus` only. Direct3D 3–6: no picking (`Pick` finds nothing), `D3DOP_SPAN` isn't
-drawn, and Ramp devices draw in colour.
+- [Requirements](#requirements)
+- [Installing](#installing)
+- [Uninstalling](#uninstalling)
+- [What it does](#what-it-does)
+- [Settings](#settings)
+- [Files dd2d9 uses](#files-dd2d9-uses)
+- [Troubleshooting](#troubleshooting)
+- [Building from source](#building-from-source)
+- [For developers](#for-developers)
+- [License](#license)
 
-What Direct3D 9 lacks is emulated: 8-bit palettized textures are converted through their
-palette on the way to the GPU (and listed by EnumTextureFormats on every device), and the
-software devices render to 8-bit palettized surfaces as XP's RGB and Ramp rasterizers did:
-Direct3D 9 draws in true colour and each pixel read back becomes its palette entry (the
-exact one, else the nearest).
+---
 
-The gamma ramp (`IDirectDrawGammaControl`) applies to 3D frames presented straight from the
-GPU too, through a small pixel shader. `d3d=off` offers no Direct3D at all (2D only). D7VK
-isn't needed or supported any more (0.9.0).
+## Requirements
 
-- **Compatibility options**: what the game is told about the machine, as a PC of its era
-  would answer, through its imports (as for the mouse). `ram`: Windows reports 2 GB of
-  memory and a 4 GB page file to programs that aren't large-address-aware, and old games
-  overflow adding to them and claim there isn't enough memory; dd2d9 reports 1 GB by
-  default, and pins the game to one processor (`cpus=1`), as the PCs of the era had.
-  `desktopbpp=16` tells games that check for a 16-bit desktop that they have one. `cpu`
-  sets the clock in the registry (2 GHz by
-  default), but games that time the processor with `RDTSC` measure the real one (an
-  instruction a DLL can't intercept), and one that times itself with the registry's figure
-  runs at the wrong speed: `cpu=0` gives it the real clock.
+- A **32-bit game** that uses DirectDraw (DirectX 1–7), with or without Direct3D 3–7.
+- **Windows** with Direct3D 9, or **Linux** with Wine or Proton. Under Wine, dd2d9 presents through the prefix's Direct3D 9: Wine's own (wined3d), or DXVK if it's installed in the prefix.
 
-## Differences from ddraw.dll on purpose
-- **The window's frame sits just off the screen in fullscreen.** `ddraw.dll` leaves the
-  window's style alone and draws over the whole screen, frame included. dd2d9 keeps the
-  style too (games that read it see the same value), but presents into the client area, so
-  it makes the window larger than the screen until the client area covers it exactly, the
-  frame just outside (and clipped, so it can't show on a neighbouring monitor). Only the
-  window's outer rectangle differs from Windows; leaving exclusive mode shrinks it back to
-  the screen, as `ddraw.dll` leaves it.
+## Installing
+
+### Windows
+
+Copy `ddraw.dll` next to the game's exe. Don't replace the one in `System32` or `SysWOW64`.
+
+### Linux (Wine / Proton)
+
+Either install it into the prefix the game uses:
+
+```sh
+WINEPREFIX=~/Games/foo ./install-dd2d9.sh install ddraw.dll
+```
+
+That copies it into the prefix's 32-bit system folder (`syswow64` in a 64-bit prefix, `system32` in a 32-bit one), keeping Wine's own copy, sets the `ddraw=native,builtin` override, and creates `C:\windows\dd2d9.ini` from `dd2d9.ini.example` if there's none. After a Wine or Proton update, run it again: updating the prefix puts Wine's `ddraw.dll` back.
+
+Or, for one game: put `ddraw.dll` next to the game's exe and run the game with `WINEDLLOVERRIDES="ddraw=n"`.
+
+### Checking it works
+
+Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the game's exe, with the version, the config files read and the settings in effect.
+
+## Uninstalling
+
+- **Windows:** delete `ddraw.dll` from the game's folder.
+- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install-dd2d9.sh uninstall` puts Wine's `ddraw.dll` back and removes the override. It keeps `dd2d9.ini`.
+- You can also delete `dd2d9.ini` and `dd2d9.log`.
+
+---
+
+## What it does
+
+### DirectDraw
+
+- **Every interface version:** IDirectDraw 1, 2, 4 and 7, IDirectDrawSurface 1, 2, 3, 4 and 7, palettes, clippers and gamma control. Their method tables are writable, as `ddraw.dll`'s, for overlays and patches that hook them.
+- **Calls behave as in XP's `ddraw.dll`:** the checks, their order and the return codes follow its decompiled code, from `Blt`'s rectangle and flag rules to attachments, palettes and clippers.
+- **Surfaces in system memory,** laid out as `ddraw.dll` lays them out. `Lock` gives a direct pointer, and `GetDC` puts a GDI device context right on that memory, so games that draw text with GDI work.
+- **A software blitter for all 2D:** colour fills, raster ops, stretching, mirroring, source and destination colour keys, overlapping copies, and conversion between 8, 16, 24 and 32-bit formats. Colour-keyed copies (sprites) use SSE2.
+- **Flip chains** swap memory between surfaces, as the hardware did, including chains games put together themselves.
+- **Presenting:** a thread of its own owns the Direct3D 9 device. It converts only the changed part of the image (applying the palette and the gamma ramp), scales it into the game's window and presents it, without holding up the game.
+- **V-sync as the game asks:** `Flip` waits for its frame unless the game passes `DDFLIP_NOVSYNC`. `WaitForVerticalBlank`, `GetScanLine` and `GetVerticalBlankStatus` run on a virtual vblank timer.
+
+### Display modes and windows
+
+- **Real display mode switches** for exclusive-mode games, as the original did. The colour depth stays virtual: an 8-bit game runs on a 32-bit desktop. If the monitor lacks the mode, dd2d9 falls back to a borderless window with the image scaled. `display=window` and `display=borderless` avoid mode switches altogether.
+- **Alt+Tab as in `ddraw.dll`:** losing focus restores the desktop and minimizes the game, and coming back sets it up again. The screensaver and monitor power-off are blocked while the game is in front.
+- **Lost surfaces as in `ddraw.dll`:** mode changes and focus loss make surfaces lost until the game restores them, as games expect. Unlike on real hardware, their contents survive.
+- **Several DirectDraw objects:** a second one taking exclusive mode takes it over from the first, for games that recreate their DirectDraw object without releasing the old one.
+- **The mouse follows the game's mode** when it's shown scaled or in a window: the game sees its mode's coordinates, with its window as the screen, as after a real mode switch. `mouse=raw` turns this off.
+- **Windowed games** get a desktop-sized primary surface, and the part under their window is shown.
+
+### Direct3D
+
+- **Direct3D 7** (`IDirect3D7`, `IDirect3DDevice7`, vertex buffers), matched to XP's `d3dim700.dll`, drawn through the same Direct3D 9 device dd2d9 presents with. It works on Windows' Direct3D 9 and on DXVK alike.
+- **Direct3D 3–6** (devices, viewports, lights, materials, textures, execute buffers and vertex buffers), matched to XP's `d3dim.dll`. As on XP, every vertex goes through a CPU front end (transformed, lit with the DirectX 5 or 6 light model, fogged and clipped), then Direct3D 9 draws it. The old render states are mapped onto texture stages as Microsoft's own rasterizer mapped them.
+- **2D over 3D works:** textures, render targets and Z buffers get a GPU copy, and what Direct3D drew is read back before DirectDraw touches the pixels, so HUDs and menus drawn over a 3D frame show.
+- **What Direct3D 9 lacks is emulated:** 8-bit palettized textures, and the software devices rendering to 8-bit surfaces as XP's RGB and Ramp rasterizers did.
+- **The gamma ramp** applies to 3D frames too.
+
+### Options beyond the original
+
+- **Scaling:** keep the aspect ratio, fill the screen or scale by whole numbers, with point, linear or sharp-bilinear filtering.
+- **3D quality:** antialiasing, anisotropic filtering, mipmaps for textures that have none, linear filtering of point-filtered textures, 32-bit rendering of 16-bit targets (no banding) and 24-bit Z buffers.
+- **Old-hardware fixes:** emulated W buffering (no z-fighting of light maps on roads in NFS III), and light maps and decals pulled forward as 16-bit depth buffers rounded them.
+- **A frame limiter** for games that run too fast or use a whole processor core.
+- **What the game is told about the machine,** as a PC of its era would answer:
+  - 1 GB of memory by default (`ram`): Windows reports 2 GB and a 4 GB page file, and old games overflow adding them up and claim there isn't enough;
+  - one processor (`cpus`), and a 2 GHz clock in the registry (`cpu`);
+  - a 16 or 24-bit desktop (`desktopbpp`) for games that refuse a 32-bit one, through DirectDraw, GDI and the display settings alike.
+
+### Differences from `ddraw.dll` on purpose
+
+- **Fullscreen windows:** dd2d9 keeps the window's style, as `ddraw.dll` does, but presents into the client area, so it makes the window slightly larger than the screen with its frame just off it.
 - **8-bit to RGB blits use the palette** (`ddraw.dll` copies the index as grey).
-- **`display=window` doesn't lose surfaces on focus loss**: the game keeps running.
-- **Back from the background (Alt+Tab), surfaces outside the primary's flip chain can
-  still be drawn with.** They report lost as in `ddraw.dll` (IsLost, Restore), but dd2d9
-  keeps their pixels, so Blt, BltFast, Lock and GetDC on them still work, and games that
-  don't restore all of theirs keep working (Captain Claw). The primary and its back
-  buffers are lost as usual; after a display mode change nothing is drawable until restored.
-- **In the background after Alt+Tab, lost surfaces can still be locked** (`ddraw.dll`
-  fails the lock): Captain Claw writes through the pointer of a failed lock there.
-- **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2
-  keeps drawing to its old back buffer).
+- **`display=window` doesn't lose surfaces on focus loss:** the game keeps running.
+- **Back from Alt+Tab, surfaces outside the primary's flip chain can still be drawn with.** They report lost as in `ddraw.dll`, but keep their pixels, so games that don't restore all of theirs keep working (Captain Claw). In the background, lost surfaces can still be locked, for the same game.
+- **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2 keeps drawing to its old back buffer).
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).
-- **A second DirectDraw object takes exclusive mode over** from a first one that has lost
-  activation, or whose window is gone or hidden (`ddraw.dll` frees it then and the second
-  takes it). While the first is in front, `DDERR_EXCLUSIVEMODEALREADYSET`, as in `ddraw.dll`.
-- **Direct3D 3–6 checks what `d3dim.dll` dereferences blindly**: unknown matrix, material
-  and texture handles, a draw with no current viewport (`D3DERR_NOCURRENTVIEWPORT`), bad
-  vertex types, execute-buffer offsets past the buffer, and NULL pointers give errors
-  instead of crashes. Objects still in use when their DirectDraw object goes are cut loose
-  rather than freed under the game.
-- **`DDPCAPS_PRIMARYSURFACE` is accepted in CreatePalette** (`ddraw.dll` refuses it), for
-  games made on Windows 9x.
+- **A second DirectDraw object takes exclusive mode over** from a first one that has lost activation, or whose window is gone or hidden.
+- **Direct3D 3–6 checks what `d3dim.dll` used blindly:** unknown handles, a draw with no viewport, bad vertex types, execute-buffer offsets past the buffer and NULL pointers give errors instead of crashes.
+- **`DDPCAPS_PRIMARYSURFACE` is accepted in CreatePalette**, for games made on Windows 9x.
 
-## Not implemented (yet)
-- **Overlays.** Overlay surfaces are refused with `DDERR_NOOVERLAYHW`
-  (the caps say there are none), so games fall back to blitting. `BltBatch` checks its
-  arguments and fails with `DDERR_UNSUPPORTED`, as in `ddraw.dll`.
+### Not implemented (yet)
+
+- **Overlays:** the caps say there are none, so games fall back to blitting. `BltBatch` fails with `DDERR_UNSUPPORTED`, as in `ddraw.dll`.
 - **Blits that convert RGB to an 8-bit surface** write index 0.
-- **FourCC surfaces** are limited to DXT1–5, YUY2 and UYVY. They can be locked
-  but not blitted. Other FourCC codes are refused.
-- **`DDSCL_CREATEDEVICEWINDOW`**: the focus window serves as the device window.
+- **FourCC surfaces** are limited to DXT1–5, YUY2 and UYVY, which can be locked but not blitted.
+- **`DDSCL_CREATEDEVICEWINDOW`:** the focus window serves as the device window.
+- **Direct3D:**
+  - no cube maps; mipmapped or colour-keyed render-target textures still go through the CPU;
+  - Z buffers can only be cleared by DirectDraw (`DDBLT_DEPTHFILL`), not read or copied;
+  - Direct3D 7's `GetClipStatus` reflects `ProcessVertices` and `SetClipStatus` only;
+  - Direct3D 3–6 has no picking, `D3DOP_SPAN` isn't drawn, and Ramp devices draw in colour.
 
-## Configuration
-See `dd2d9.ini.example`. dd2d9 reads these files in order, later ones winning:
+---
 
-1. `C:\windows\dd2d9.ini`. In a Wine prefix that's `drive_c/windows/dd2d9.ini`;
-   `install-dd2d9.sh` creates it.
-2. `dd2d9.ini` next to `ddraw.dll`.
-3. `dd2d9.ini` next to the game's executable.
-4. The file named by the `DD2D9_INI` environment variable.
+## Settings
 
-Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
-`[game.exe]` section (case-insensitive) applies to that executable only.
+dd2d9 reads these files in order, later ones winning:
 
-| Key | Values (default first) |
+1. `C:\windows\dd2d9.ini` (in a Wine prefix, `drive_c/windows/dd2d9.ini`; `install-dd2d9.sh` creates it);
+2. `dd2d9.ini` next to `ddraw.dll`;
+3. `dd2d9.ini` next to the game's exe;
+4. the file named by the `DD2D9_INI` environment variable.
+
+Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A `[game.exe]` section applies to that exe only. [`dd2d9.ini.example`](dd2d9.ini.example) explains every key.
+
+| Setting | Values (default first) |
 | --- | --- |
-| `display` | `switch`, `window`, `borderless` |
+| `display` | `switch` (real mode switches), `window`, `borderless` |
 | `stretch` | `aspect`, `fill`, `integer` |
-| `filter` | `point`, `linear`, `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges, at any scale) |
+| `filter` | `point`, `linear`, `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
-| `d3d` | `auto` (or `on`): dd2d9's own Direct3D (3–7); `off`: no Direct3D |
-| `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
-| `ram` | `1024`: MB of memory games are told about (`GlobalMemoryStatus`), at most `2047`; `0`: the real values |
-| `vram` | `512`: MB of video memory DirectDraw reports (`GetCaps`, `GetAvailableVidMem`), `1`–`2047` |
-| `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
-| `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
-| `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about (DirectDraw's `GetDisplayMode`, GDI's `GetDeviceCaps`, `EnumDisplaySettings`), for games that refuse to start on a 32-bit desktop (Moto Racer); while the game has a display mode, that mode's depth |
-| `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside the rectangle it locked |
-| `fpslimit` | `0` (off); frames per second at most, for games that run too fast or use a whole core: paced at Flip, and at blits covering half the primary or more |
-| `render32` | `off`; `on`: 16-bit render targets drawn in 32 bits on the GPU (no banding in blending and fog), converted when the game reads them |
-| `depth24` | `off`; `on`: 16-bit Z buffers made 24-bit on the GPU (less z-fighting in the distance) |
-| `antialiasing` | `0` (off); `2`, `4`, `8`: multisample antialiasing for Direct3D (render targets drawn in 32 bits and Z in 24 then); 2D written between 3D draws is kept |
-| `wbuffer` | `on`: W buffering offered and emulated where the GPU lacks it (no z-fighting of light maps on roads in NFS III); `force`: Z buffering of transformed vertices treated the same; `off` |
-| `overlaybias` | `on`: light maps and decals (passes that don't write depth, or that add or multiply) drawn without writing depth and pulled forward one 16-bit depth step (and a pixel's depth change on slopes), as 16-bit depth buffers rounded them (no hatched z-fighting); `off`; a number for more steps |
+| `mouse` | `scale` (the mouse follows a scaled or windowed mode), `raw` |
+| `d3d` | `auto`: dd2d9's own Direct3D 3–7; `off`: no Direct3D (2D only) |
+| `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
+| `fpslimit` | `0` (off); frames per second at most |
+| `antialiasing` | `0` (off); `2`, `4` or `8` samples |
+| `anisotropy` | `0` (off); `2`, `4`, `8` or `16`, on textures the game filters smoothly |
+| `mipmaps` | `off`; `on`: the GPU makes smaller levels for textures the game gave none |
 | `texfilter` | `game`; `linear`: point-filtered textures drawn bilinear (cut-outs keep the game's filtering) |
-| `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance); cut-outs (colour-keyed or with alpha) are left alone |
-| `anisotropy` | `0` (off); `2`, `4`, `8` or `16`: anisotropic filtering on textures the game filters smoothly (linear), sharper at grazing angles (floors, roads); point-filtered and cut-out ones (colour-keyed or with alpha: trees, sprites) stay as they are |
-| `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered (lines at the edges of textures in 2D drawn through Direct3D) |
-| `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, Direct3D 3 execute buffer and change of `GetDisplayMode`'s answer, the game window's messages and every failed call) |
-| `drawtrace` | `off`; `on`: one frame's Direct3D draws logged every 600 scenes (about 10 s), with their depth, blend and alpha-test states, texture and depth and rhw ranges |
-| `logfile` | path; default `dd2d9.log` next to the game's executable |
+| `render32` | `off`; `on`: 16-bit render targets drawn in 32 bits (no banding in blending and fog) |
+| `depth24` | `off`; `on`: 16-bit Z buffers made 24-bit (less z-fighting in the distance) |
+| `wbuffer` | `on`: W buffering offered and emulated; `force`: also for transformed vertices; `off` |
+| `overlaybias` | `on`: light maps and decals pulled forward one 16-bit depth step; `off`; a number for more steps |
+| `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered |
+| `ram` | `1024`: MB of memory games are told about, at most `2047`; `0`: the real values |
+| `vram` | `512`: MB of video memory DirectDraw reports, `1`–`2047` |
+| `cpu` | `2000`: MHz in the registry; `0`: the real clock |
+| `cpus` | `1`: processors the game runs on and is told about; `0`: all |
+| `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth |
+| `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside what it locked |
+| `log` | `0`; `1` (info); `2` (every blit, lock, flip, palette change, Direct3D 3 execute buffer, window message and failed call) |
+| `drawtrace` | `off`; `on`: one frame's Direct3D draws logged every 600 scenes (about 10 s) |
+| `logfile` | a path; by default `dd2d9.log` next to the game's exe |
 
-`DD2D9_LOG=0|1|2` overrides `log`. Any other value of `DD2D9_LOG` is taken as a
-log file path, for example `DD2D9_LOG='Z:\tmp\dd2d9.log'` under Wine. If the
-log location can't be written to, dd2d9 tries the current directory and then
-`%TEMP%`. The log header lists the config files that were read, every unknown
-key, and the settings in effect.
+**Environment variables:** `DD2D9_INI` names an extra config file. `DD2D9_LOG=0`, `1` or `2` overrides `log`; any other value is taken as a log file path (for example `DD2D9_LOG='Z:\tmp\dd2d9.log'` under Wine).
 
-On load, dd2d9 sends a debug message saying where it was loaded from and which
-config file or log it's using. Under Wine 9, `WINEDEBUG=warn+seh` prints it;
-on Windows, use DebugView.
+## Files dd2d9 uses
 
-## Building
-Requires mingw-w64 (i686) and meson. On Arch: `pacman -S mingw-w64-gcc meson`.
+| File | |
+| --- | --- |
+| `ddraw.dll` | dd2d9 itself. |
+| `dd2d9.ini` | Settings (see [Settings](#settings)). |
+| `dd2d9.log` | Next to the game's exe, with `log=1` or more. If that folder can't be written to, the current folder or `%TEMP%`. Send it with any bug report. |
 
-    meson setup build --cross-file build-win32.txt
-    ninja -C build
+## Troubleshooting
 
-The output is `build/ddraw.dll`, which is statically linked with no MinGW runtime
-dependencies.
+- **Nothing changes, and `log=1` writes no `dd2d9.log`:** dd2d9 isn't being loaded. Under Wine, check the `ddraw=n` override, or run `install-dd2d9.sh install` again after a Wine update. On load, dd2d9 also sends a debug message saying where it was loaded from: under Wine 9, `WINEDEBUG=warn+seh` prints it; on Windows, use DebugView.
+- **A game refuses to start on a 32-bit desktop** ("16 bit screen mode required"): set `desktopbpp=16` in a `[game.exe]` section.
+- **A game says there isn't enough memory:** keep `ram` at its default, or lower it.
+- **A game runs too fast:** set `fpslimit`. If it times itself from the registry's processor clock, try `cpu=0`.
+- **The mouse is off in a scaled or windowed mode:** check `mouse=scale`; `mouse=raw` gives the game the real coordinates.
+- **Z-fighting (hatched light maps or decals):** try `wbuffer=force` or a higher `overlaybias`, and `depth24=on`.
+- **Display mode switches are a problem:** `display=borderless` or `display=window` avoid them.
+- **Under Wine with DXVK in the game's folder:** `d3d9=system`, the default, presents through the prefix's own Direct3D 9; `d3d9=game` uses the game folder's.
+- **Something else:** set `log=2` and look for failed calls in `dd2d9.log`. Please report problems with the log.
 
-## Using
-Copy `ddraw.dll` next to the game's executable, and under Wine also set
-`WINEDLLOVERRIDES="ddraw=n"`. `install-dd2d9.sh` installs it into a Wine prefix. Under Wine, `d3d9=system` presents through the prefix's
-`d3d9.dll` (wined3d, or DXVK if it's installed into the prefix); `d3d9=game` also takes
-one next to the game.
+## Building from source
 
-## Tests
+Requires mingw-w64 (i686) and Meson. On Arch: `pacman -S mingw-w64-gcc meson`.
+
+```sh
+meson setup build --cross-file build-win32.txt
+ninja -C build
+```
+
+The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to install.
+
+---
+
+## For developers
+
+### Repo layout
+
+| Path | What |
+| --- | --- |
+| `src/` | The DLL. `ddraw.cpp` (the DirectDraw object, display modes, focus, the window), `surface.cpp` and `blit.cpp` (surfaces, the software blitter), `presenter.cpp` (presenting through Direct3D 9), `gpu.cpp` and `gpures.cpp` (the shared Direct3D 9 device, GPU copies of surfaces and textures, drawing), `d3d7.cpp` (Direct3D 7), `d3d6*.cpp` (Direct3D 3–6: objects, devices, viewports, the CPU vertex pipeline and execute buffers), `compat.cpp` and `hooks.cpp` (import patching for the compatibility options), `input.cpp` (mouse translation), `convert.cpp` (SSE2 pixel conversion), `util.cpp` (config, logging). |
+| `tests/` | The test programs below. |
+| `tests/wine/` | Runs Wine's own ddraw test suite against a build and compares it with a baseline (see its README). |
+| `re/` | Reverse-engineering notes (below). |
+| `tools/` | The generator for the Direct3D interface stubs. |
+
+### Tests
+
 `build/ddtest.exe` writes its results to `ddtest.txt`:
-- `ddtest unit` runs pixel-exact checks of blits, keys, conversion, GDI, interface
-  versions and palettes.
-- `ddtest fs8` runs a 640×480×8 exclusive-mode flip-chain animation and checks
-  the pacing.
-- `ddtest win` runs a windowed primary with a clipper.
-- `ddtest fuzz` runs thousands of random blits (8/16/32-bit, color keys and key
-  ranges, mirroring, stretching, overlapping copies) against a reference implementation.
+- with no argument, pixel-exact checks of blits, keys, conversion, GDI, interface versions, palettes, object lifetimes and cooperative levels;
+- `ddtest fs8` runs a 640×480×8 exclusive-mode flip-chain animation and checks the pacing;
+- `ddtest win` runs a windowed primary with a clipper;
+- `ddtest mouse` checks the mouse translation (run it with `display=borderless`);
+- `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys and key ranges, mirroring, stretching, overlapping copies) against a reference implementation.
+
+`build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp. It writes `d3d7test.txt`.
 
 All checks pass under Wine 11 (wined3d, Xvfb).
 
-`tests/wine/` runs Wine's own ddraw tests (expectations confirmed on Windows) against a
-build and compares the result with a baseline; see `tests/wine/README.md`.
+`tests/wine/` runs Wine's own ddraw tests (expectations confirmed on Windows) against a build and compares the result with a baseline; see `tests/wine/README.md`.
 
-`build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter
-throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small
-updates to a windowed primary). With `log=1`, the presenter logs every 10 seconds how much of
-the frame it converted and how long the game had to wait for it.
+`build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small updates to a windowed primary). With `log=1`, the presenter logs every 10 seconds how much of the frame it converted and how long the game waited for it.
 
-`build/reloadtest.exe [dll]` frees and reloads dd2d9 (default `ddraw_.dll`) while the game window
-stays subclassed, as a wrapper loading dd2d9 under another name may do.
+`build/reloadtest.exe [dll]` frees and reloads dd2d9 (by default `ddraw_.dll`) while the game window stays subclassed, as a wrapper loading dd2d9 under another name may do.
 
-`build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw
-fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp.
-It writes `d3d7test.txt`.
+### Reverse-engineering notes
 
-## Reverse-engineering notes
-`re/` has the vtable map of the XP SP3 `ddraw.dll` (5.3.2600.5512), along with
-naming scripts for Ghidra and IDA. `re/spec/` describes, from its decompiled code, what
-each method checks and in which order, with the differences from dd2d9 that remain.
+`re/` has the vtable map of XP SP3's `ddraw.dll` (5.3.2600.5512), with naming scripts for Ghidra and IDA. `re/spec/` describes, from its decompiled code, what each method checks and in which order, with the differences from dd2d9 that remain. [`CHANGELOG.md`](CHANGELOG.md) explains every change and which game or test showed the need for it.
+
+---
 
 ## License
 
