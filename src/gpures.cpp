@@ -759,7 +759,12 @@ void GpuContext::Impl::BindTextures() {
                           (caps.TextureFilterCaps & D3DPTFILTERCAPS_MINFANISOTROPIC) ? "anisotropic minification" : "none");
             }
             // Only where the game filters smoothly: point (pixel art, sharp on purpose) stays.
-            const bool smooth = t && anisoLimit > 1 &&
+            // Not cut-outs either (colour-keyed or with alpha: trees, fences, sprites): the
+            // longer footprint reaches past their edges, wraps to the other side of the
+            // texture and draws a line of it into the transparent part (NFS III's trees), and
+            // they are mostly seen face-on, where anisotropy changes nothing.
+            const bool cutout = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->keyed));
+            const bool smooth = t && anisoLimit > 1 && !cutout &&
                                 (minFilter[i] == D3DTEXF_LINEAR || minFilter[i] == D3DTEXF_ANISOTROPIC);
             const DWORD wantMin = smooth ? DWORD(D3DTEXF_ANISOTROPIC) : minFilter[i];
             const DWORD wantAniso = smooth ? std::max(anisoLimit, maxAniso[i]) : maxAniso[i];

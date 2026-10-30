@@ -79,7 +79,8 @@ mipmaps=off
 
 ; Anisotropic filtering: 0 (off, default), 2, 4, 8 or 16 (at most what the GPU can).
 ; Textures seen at a grazing angle (floors, roads, walls) stay sharp instead of blurring.
-; Only where the game filters smoothly (linear): point-filtered textures stay as they are.
+; Only where the game filters smoothly (linear): point-filtered textures stay as they are,
+; and so do cut-outs (colour-keyed or with alpha: trees, sprites), which it would fringe.
 ; It works on mipmapped textures: for games that have none, together with mipmaps=on.
 anisotropy=0
 

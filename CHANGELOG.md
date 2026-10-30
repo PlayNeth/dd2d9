@@ -3,6 +3,12 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.5
+- `anisotropy` leaves cut-out textures alone (colour-keyed, or with an alpha channel):
+  its longer footprint reached past their edges and wrapped round, drawing thin vertical
+  lines through NFS III's trees (as with other wrappers). Sprites are seen face-on, where
+  anisotropic filtering changes nothing anyway.
+
 ## 0.9.4
 - **`anisotropy=2|4|8|16`**: anisotropic filtering on every texture stage the game filters
   smoothly (linear or anisotropic minification), at most what the GPU can; point-filtered
