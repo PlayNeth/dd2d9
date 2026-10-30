@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -1270,19 +1271,27 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     }
     if ((fvf & 0x0E) == 0x04 && stride >= 16) {
         const auto* src = static_cast<const uint8_t*>(verts);
-        bool clampZ = false, allRhwZero = true;
+        // rhw 0 (or negative, or not a number): hardware of the era interpolated colour
+        // across the screen without it, and used it for texture perspective only; Direct3D 9
+        // divides by it for every attribute, and a triangle of zeros comes out black (Moto
+        // Racer's menu letters: untextured, rhw 0 on part of the vertices). Such a draw gets
+        // one rhw for all its vertices when untextured (colour linear on the screen, as then),
+        // else the zeros the smallest valid rhw of the draw.
+        bool clampZ = false, badRhw = false;
+        float minRhw = 0.0f;
         for (UINT i = 0; i < vertexCount; i++) {
             const float* v = reinterpret_cast<const float*>(src + size_t(i) * stride);
             if (!zEnabled && (v[2] < 0.0f || v[2] > 1.0f)) clampZ = true;
-            if (v[3] != 0.0f) allRhwZero = false;
+            if (!(v[3] > 0.0f) || !std::isfinite(v[3])) badRhw = true;
+            else if (minRhw == 0.0f || v[3] < minRhw) minRhw = v[3];
         }
+        const bool flatRhw = badRhw && (!p.tex[0] || minRhw == 0.0f);  // every vertex: 1
         const bool wz = p.wEmulate;
-        if (clampZ || allRhwZero || shift || wz) {
+        if (clampZ || badRhw || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
             for (UINT i = 0; i < vertexCount; i++) {
                 float* v = reinterpret_cast<float*>(p.scratch.data() + size_t(i) * stride);
                 if (clampZ) v[2] = std::clamp(v[2], 0.0f, 1.0f);
-                if (allRhwZero) v[3] = 1.0f;
                 // Emulated W buffering: depth from 1/w (rhw), which varies linearly across
                 // the screen over any flat surface, as the Z buffer interpolates it: front to
                 // back as a W buffer orders, and coplanar polygons agree however they are cut
@@ -1293,6 +1302,8 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                     if (rhw * g_wScale > 1.0f) g_wScale = 0.5f / rhw;
                     v[2] = 1.0f - rhw * g_wScale;
                 }
+                if (flatRhw) v[3] = 1.0f;
+                else if (badRhw && (!(v[3] > 0.0f) || !std::isfinite(v[3]))) v[3] = minRhw;
                 if (shift) {
                     v[0] -= 0.5f;
                     v[1] -= 0.5f;

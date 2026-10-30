@@ -330,6 +330,18 @@ static int Run(int w, int h, int bpp) {
         CHECK(kept == 0xFFFFFF && drawn == 0xFF0000 && triangle == 0xFFFFFF,
               "2D between 3D draws kept: block 0x%06lx, new triangle 0x%06lx, earlier triangle 0x%06lx", kept, drawn, triangle);
 
+        // Transformed vertices with rhw 0 in a draw that also has valid ones (Moto Racer's menu
+        // letters): hardware of the era drew them coloured; Direct3D 9 alone makes 0/0 of the
+        // colour of a triangle whose rhw are all 0.
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+        dev->BeginScene();
+        Vertex mixed[6] = {{300, 100, 0.5f, 0, 0xFFFFFFFF}, {340, 100, 0.5f, 0, 0xFFFFFFFF}, {300, 140, 0.5f, 0, 0xFFFFFFFF},
+                           {360, 100, 0.5f, 1, 0xFFFFFFFF}, {400, 100, 0.5f, 1, 0xFFFFFFFF}, {360, 140, 0.5f, 1, 0xFFFFFFFF}};
+        dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, mixed, 6, 0);
+        dev->EndScene();
+        const DWORD zeroTri = pixel(305, 105), validTri = pixel(365, 105);
+        CHECK(zeroTri == 0xFFFFFF && validTri == 0xFFFFFF, "rhw 0 beside valid rhw in one draw: 0x%06lx, valid 0x%06lx", zeroTri, validTri);
+
         // A cut-out sprite (alpha tested) whose texture is transparent except a white column
         // at its left edge, drawn with its right edge at a fractional position: nothing may
         // show past that edge. (With antialiasing, the edge pixels' texture coordinate falls

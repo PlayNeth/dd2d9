@@ -3,6 +3,15 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.20
+- **Transformed vertices with rhw 0 beside valid ones in one draw** are drawn coloured.
+  Hardware of the era interpolated colour across the screen without rhw; Direct3D 9
+  divides every attribute by it, and a triangle whose rhw are all 0 came out black on
+  Intel's driver (Moto Racer's menu letters flickered black: untextured, part of their
+  vertices at rhw 0). Such a draw now gets rhw 1 on every vertex when untextured, else the
+  draw's smallest valid rhw on the bad ones. (A draw with rhw 0 everywhere was already
+  handled.) d3d7test checks it, though Wine's Direct3D draws it right either way.
+
 ## 0.9.19
 - **`desktopbpp=` (16, 24 or 32; default 32): the desktop colour depth DirectDraw
   reports** before the game sets its own mode (GetDisplayMode, the windowed primary
