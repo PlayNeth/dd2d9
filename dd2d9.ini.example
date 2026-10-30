@@ -73,8 +73,8 @@ cpus=1
 
 ; Mipmaps for textures the game gave none (most of DX7 and older): the GPU makes the smaller
 ; levels and filters with them, so textures don't shimmer and crawl in the distance. Softer
-; than the hardware of the era showed. Colour-keyed textures are left alone (their
-; transparent texels would fringe the smaller levels). off (default) / on
+; than the hardware of the era showed. Cut-outs (colour-keyed or with an alpha channel) are
+; left alone: their transparent texels would fringe the smaller levels. off (default) / on
 mipmaps=off
 
 ; Anisotropic filtering: 0 (off, default), 2, 4, 8 or 16 (at most what the GPU can).

@@ -419,11 +419,13 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
         t->convert = native == D3DFMT_UNKNOWN || keyed;
         t->fmt = t->convert ? D3DFMT_A8R8G8B8 : native;
         // mipmaps=on: a texture the game gave one level, made with the rest by the GPU. Not
-        // colour-keyed ones (the keyed texels would blur into the smaller levels: fringes), not
+        // cut-outs, colour-keyed or with an alpha channel (the transparent texels blur into
+        // the smaller levels: dark fringes and lines in the distance, NFS III's corn), not
         // block-compressed ones (D3D9 can't), not 1x1.
         HRESULT hr = E_FAIL;
         t->autogen = false;
-        if (g_config.mipmaps && chain.size() == 1 && !keyed && !s->buf->fmt.fourcc && (s->buf->w > 1 || s->buf->h > 1) &&
+        if (g_config.mipmaps && chain.size() == 1 && !keyed && !s->buf->fmt.a && !s->buf->fmt.fourcc &&
+            (s->buf->w > 1 || s->buf->h > 1) &&
             CanAutogen(d, t->fmt)) {
             hr = d->CreateTexture(s->buf->w, s->buf->h, 0, D3DUSAGE_AUTOGENMIPMAP, t->fmt, D3DPOOL_MANAGED, &t->tex, nullptr);
             t->autogen = SUCCEEDED(hr);

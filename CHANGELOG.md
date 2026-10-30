@@ -3,6 +3,11 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.6
+- `mipmaps=on` leaves textures with an alpha channel alone too, as it did colour-keyed
+  ones: their transparent texels blurred into the smaller levels and drew lines through
+  NFS III's corn field in the distance.
+
 ## 0.9.5
 - `anisotropy` leaves cut-out textures alone (colour-keyed, or with an alpha channel):
   its longer footprint reached past their edges and wrapped round, drawing thin vertical

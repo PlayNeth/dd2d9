@@ -175,7 +175,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `vram` | `512`: MB of video memory DirectDraw reports (`GetCaps`, `GetAvailableVidMem`), `1`–`2047` |
 | `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
 | `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
-| `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance) |
+| `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance); cut-outs (colour-keyed or with alpha) are left alone |
 | `anisotropy` | `0` (off); `2`, `4`, `8` or `16`: anisotropic filtering on textures the game filters smoothly (linear), sharper at grazing angles (floors, roads); point-filtered and cut-out ones (colour-keyed or with alpha: trees, sprites) stay as they are |
 | `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered (lines at the edges of textures in 2D drawn through Direct3D) |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
