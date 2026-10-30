@@ -536,9 +536,12 @@ static int RunFullscreen8(int modeW, int modeH) {
     CHECK(SUCCEEDED(dd->SetDisplayMode(modeW, modeH, 8, 0, 0)), "SetDisplayMode %dx%dx8", modeW, modeH);
     // A game changing its window's frame in exclusive mode (JJ2+ while starting up): the
     // client area still covers the screen.
-    for (LONG style : {LONG(WS_OVERLAPPEDWINDOW), LONG(WS_POPUP)}) {
+    // Then sizing it to its own idea of fullscreen (Unreal after a style change): still covering.
+    for (LONG style : {LONG(WS_OVERLAPPEDWINDOW), LONG(WS_POPUP), LONG(WS_OVERLAPPEDWINDOW)}) {
+        static int pass = 0;
         SetWindowLongA(hwnd, GWL_STYLE, style | WS_VISIBLE);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        if (pass++ == 2) SetWindowPos(hwnd, nullptr, 0, 0, modeW, modeH - 40, SWP_NOZORDER);
         Pump();
         // The real window (dd2d9 shows a scaled mode's window to the game as its screen).
         using RectFn = BOOL(WINAPI*)(HWND, RECT*);

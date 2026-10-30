@@ -3,6 +3,14 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.8.1
+- **The taskbar no longer shows over Unreal engine games in fullscreen** (Nerf
+  ArenaBlast). After restyling its window, the game sized it back to its own idea of
+  fullscreen every time dd2d9 covered the screen again, until dd2d9 gave up with part of
+  the screen uncovered. Those re-covers are now hidden from the game (its window procedure
+  doesn't see the move). The game's own moves and sizes still stand, as in `ddraw.dll`
+  (Wine's test_window_position).
+
 ## 0.8.0
 **Direct3D 7 in dd2d9 itself**, no D7VK needed: `IDirect3D7`, `IDirect3DDevice7` and
 `IDirect3DVertexBuffer7` (`src/d3d7.cpp`), matched to XP SP3's `d3dim700.dll`

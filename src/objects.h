@@ -508,6 +508,7 @@ public:
     bool InOwnMode() const;  // the display is in the mode this object set and switched to
     bool EmulatedMode() const;  // exclusive, in a mode set but not switched to (scaled or windowed)
     bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
+    bool QuietMove() const { return quietMove_; }  // CheckCover's move: hidden from the game
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
     // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which
     // then presents itself): while any exist, dd2d9 doesn't present.
@@ -576,6 +577,7 @@ private:
     bool cursorConfined_ = false;  // ConfineCursor
     bool foregroundLocked_ = false;  // ConfineCursor: LockSetForegroundWindow
     SIZE coverSize_ = {};        // its size, frame included
+    volatile bool quietMove_ = false;  // inside CheckCover's CoverMonitor
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
     bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)
     int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used

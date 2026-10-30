@@ -450,6 +450,11 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 LeaveCriticalSection(&g_displayLock);
             }
         }
+    } else if ((msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED || msg == WM_SIZE || msg == WM_MOVE) &&
+               h == g_hook.hwnd && g_hook.owner && g_hook.owner->QuietMove()) {
+        // dd2d9 covering the screen again behind the game's back (see CheckCover): the
+        // window's own handling only, so that the game doesn't size it back.
+        return g_hook.unicode ? DefWindowProcW(h, msg, wp, lp) : DefWindowProcA(h, msg, wp, lp);
     } else if (msg == WM_GETMINMAXINFO) {
         // A window covering its monitor has its frame outside the screen (see CoverMonitor):
         // the default maximum tracking size would shrink it.
@@ -741,7 +746,11 @@ void DDraw::CheckCover(HWND h) {
     if (++recoverCount_ > 5) return;
     DD2D9_LOG("the window no longer covers the screen (client %ld,%ld-%ld,%ld): covering it again", c.left, c.top,
               c.right, c.bottom);
+    // Without the game seeing the move: Unreal answers it by sizing its window back to its
+    // own idea of fullscreen (after a style change), leaving the taskbar showing.
+    quietMove_ = true;
     CoverMonitor(nullptr, SWP_NOZORDER | SWP_NOACTIVATE);
+    quietMove_ = false;
 }
 
 // For WM_GETMINMAXINFO: the window may grow past the screen by its frame.
