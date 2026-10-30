@@ -162,7 +162,7 @@ void DDraw::DisplayMode(DWORD* w, DWORD* h, DWORD* bpp) const {
     }
     *w = DWORD(GetSystemMetrics(SM_CXSCREEN));
     *h = DWORD(GetSystemMetrics(SM_CYSCREEN));
-    *bpp = 32;
+    *bpp = DWORD(g_config.desktopBpp);  // desktopbpp= (dd2d9 shows any depth on any desktop)
 }
 
 HWND DDraw::PresentWindow() const {

@@ -3,6 +3,13 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.19
+- **`desktopbpp=` (16, 24 or 32; default 32): the desktop colour depth DirectDraw
+  reports** before the game sets its own mode (GetDisplayMode, the windowed primary
+  surface). Moto Racer calls GetDisplayMode at startup and stops with "16 bit screen mode
+  required !" unless it says 16, even though it then switches to its own mode;
+  `desktopbpp=16` in its section lets it start (as Windows' "Reduced color mode" did).
+
 ## 0.9.18 (optimizations)
 No behaviour changes intended; each one checked with the full test set.
 - **Presenter: the frame is converted before taking the GPU lock**, which now covers only

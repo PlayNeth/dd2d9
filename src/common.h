@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.18"
+#define DD2D9_VERSION "0.9.19"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -37,6 +37,7 @@ struct Config {
     int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
     int cpus = 1;                  // processors the game runs on and is told about; 0: all
+    int desktopBpp = 32;           // the desktop's colour depth DirectDraw reports (16, 24 or 32)
     int fpsLimit = 0;              // frames per second at most (Flip, full blits to the primary); 0: off
     bool texLinear = false;        // texfilter=linear: point-filtered textures drawn linear
     int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off

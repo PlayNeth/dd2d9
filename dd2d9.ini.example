@@ -71,6 +71,12 @@ cpu=2000
 ; One logical processor per physical core is taken, the first core last (it handles most of
 ; the system's interrupts). dd2d9's own presenting thread shares them. 0: all.
 cpus=1
+; The desktop's colour depth DirectDraw reports before the game sets its own mode: 32
+; (default), 24 or 16. Some games refuse to start unless the desktop is 16-bit, even ones
+; that then switch to their own mode (Moto Racer: "16 bit screen mode required"): set 16 for
+; them, best in their own section ([game.exe]). A windowed game then draws in 16 bits, as on
+; a 16-bit desktop; dd2d9 shows it either way.
+desktopbpp=32
 
 ; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too
 ; fast without vsync or busy a whole core. Paced at Flip, and at blits covering half the

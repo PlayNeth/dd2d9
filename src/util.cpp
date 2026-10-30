@@ -145,6 +145,12 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
             else if (x < n.lo || x > n.hi) ok = false;
             else *n.field = int(x);
         }
+    } else if (key == "desktopbpp" || key == "desktopdepth") {
+        // Games that check the desktop is 16-bit before switching to their own mode (Moto
+        // Racer: GetDisplayMode before SetCooperativeLevel, "16 bit screen mode required").
+        const long x = strtol(v.c_str(), nullptr, 10);
+        if (v == "16" || v == "24" || v == "32") g_config.desktopBpp = int(x);
+        else ok = false;
     } else if (key == "fpslimit" || key == "fps") {
         char* end = nullptr;
         const long x = v == "off" ? 0 : strtol(v.c_str(), &end, 10);
@@ -339,8 +345,8 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
-    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s wbuffer=%s overlaybias=%d", g_config.fpsLimit, g_config.ramMB,
-        g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
+    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s wbuffer=%s overlaybias=%d", g_config.fpsLimit, g_config.ramMB,
+        g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.desktopBpp, g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
         g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa,
         g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off",
         g_config.overlayBias);
