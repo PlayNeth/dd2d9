@@ -431,9 +431,11 @@ static int Run(int w, int h, int bpp) {
                     if (pixel(x, y) & 0xFF0000) red++;
             CHECK(true, "coplanar floor cut two ways (%s): %d of 4802 sampled pixels lost to z-fighting",
                   wcap ? "W buffering" : "Z buffering", red);
-            // Z buffering with depth a Z buffer interpolates exactly (affine in 1/w): the two
-            // cuts differ only by rounding, which a 16-bit buffer hid and a deeper one shows
-            // as a fine hatch, unless the overlay gets a step of slack (overlaybias=on).
+            // NFS III's light maps: everything alpha blended with depth writes on, the road a
+            // grid (red), then two lights added on top (green, blue), each cut differently and
+            // writing depth too. Their depths differ from the road's only by rounding (affine
+            // in 1/w, as a Z buffer interpolates), which a 16-bit buffer hid and a deeper one
+            // shows as a fine hatch, unless overlays get slack (overlaybias=on): all white then.
             dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_TRUE);
             dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
             auto vtx2 = [](float fx, float fy, DWORD c) {
@@ -441,23 +443,31 @@ static int Run(int w, int h, int bpp) {
                 const float rhw = 1.0f / 100 + fy * (1.0f / 2 - 1.0f / 100);
                 return Vertex{x, y, 1.0f - rhw, rhw, c};
             };
+            auto grid = [&](int n, DWORD c) {
+                for (int gy = 0; gy < n; gy++)
+                    for (int gx = 0; gx < n; gx++) {
+                        const float x0 = float(gx) / n, x1 = float(gx + 1) / n, y0 = float(gy) / n, y1 = float(gy + 1) / n;
+                        Vertex q[4] = {vtx2(x0, y0, c), vtx2(x1, y0, c), vtx2(x0, y1, c), vtx2(x1, y1, c)};
+                        dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, q, 4, 0);
+                    }
+            };
+            dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
+            dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
+            dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
             dev->BeginScene();
-            for (int gy = 0; gy < 8; gy++)
-                for (int gx = 0; gx < 8; gx++) {
-                    const float x0 = gx / 8.0f, x1 = (gx + 1) / 8.0f, y0 = gy / 8.0f, y1 = (gy + 1) / 8.0f;
-                    Vertex q[4] = {vtx2(x0, y0, 0xFFFF0000), vtx2(x1, y0, 0xFFFF0000), vtx2(x0, y1, 0xFFFF0000), vtx2(x1, y1, 0xFFFF0000)};
-                    dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, q, 4, 0);
-                }
-            dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-            Vertex big2[4] = {vtx2(0, 0, 0xFF00FF00), vtx2(1, 0, 0xFF00FF00), vtx2(0, 1, 0xFF00FF00), vtx2(1, 1, 0xFF00FF00)};
-            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, big2, 4, 0);
-            dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+            grid(8, 0xFFFF0000);
+            dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ONE);
+            grid(1, 0xFF00FF00);
+            grid(3, 0xFF0000FF);
             dev->EndScene();
+            dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, FALSE);
+            dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ZERO);
+            dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_ONE);
             int red2 = 0;
             for (int y = 202; y < 298; y += 2)
                 for (int x = 102; x < 298; x += 2)
-                    if (pixel(x, y) & 0xFF0000) red2++;
-            CHECK(true, "an overlay on a floor cut differently (Z buffering): %d of 4802 sampled pixels lost to z-fighting", red2);
+                    if ((pixel(x, y) & 0xFFFF) != 0xFFFF) red2++;
+            CHECK(true, "two lights added on a floor cut differently (Z buffering): %d of 4802 sampled pixels lost to z-fighting", red2);
             dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_FALSE);
             back->DeleteAttachedSurface(0, zbuf);
             dev->SetRenderTarget(back, 0);

@@ -91,7 +91,8 @@ depth24=off
 ; their edges don't pick up a line from the texture's other side.
 antialiasing=0
 
-; Overlays (light maps, decals: passes that don't write depth or that blend) pulled forward
+; Overlays (light maps, decals: passes that don't write depth, or that add or multiply
+; colours; plain alpha blending doesn't count) pulled forward
 ; one step of the depth precision the game asked for. They differ from the surface under
 ; them only by rounding, which the 16-bit depth buffers of the era rounded the same way;
 ; deeper ones show it as hatched z-fighting (NFS III's headlights on the road), plus more

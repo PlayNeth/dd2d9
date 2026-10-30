@@ -3,6 +3,16 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.14
+- **`overlaybias` finds NFS III's light maps**: its trace showed every world draw alpha
+  blended with depth writes on, so "blends" took in everything and the bias moved it all
+  alike. An overlay is now a pass that doesn't write depth, or that adds or multiplies
+  (DESTBLEND ONE or a colour factor, SRCBLEND ZERO or DESTCOLOR); ordinary alpha blending
+  doesn't count. Overlays don't write depth while drawn: two lights laid on the same spot
+  fought each other's depth as they fought the road's.
+- `d3d7test`'s overlay check is NFS III's pattern: all blended, a road and two additive
+  lights cut differently, all writing depth.
+
 ## 0.9.13
 - `drawtrace=on` (diagnostic): every 600 scenes (about 10 s), one whole frame's draws are
   logged with their depth, blend and alpha-test states, texture, the depth bias dd2d9 put on

@@ -180,7 +180,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `depth24` | `off`; `on`: 16-bit Z buffers made 24-bit on the GPU (less z-fighting in the distance) |
 | `antialiasing` | `0` (off); `2`, `4`, `8`: multisample antialiasing for Direct3D (render targets drawn in 32 bits and Z in 24 then); 2D written between 3D draws is kept |
 | `wbuffer` | `on`: W buffering offered and emulated where the GPU lacks it (no z-fighting of light maps on roads in NFS III); `force`: Z buffering of transformed vertices treated the same; `off` |
-| `overlaybias` | `on`: light maps and decals (passes that don't write depth or that blend) pulled forward one 16-bit depth step (and a pixel's depth change on slopes), as 16-bit depth buffers rounded them (no hatched z-fighting); `off`; a number for more steps |
+| `overlaybias` | `on`: light maps and decals (passes that don't write depth, or that add or multiply) drawn without writing depth and pulled forward one 16-bit depth step (and a pixel's depth change on slopes), as 16-bit depth buffers rounded them (no hatched z-fighting); `off`; a number for more steps |
 | `texfilter` | `game`; `linear`: point-filtered textures drawn bilinear (cut-outs keep the game's filtering) |
 | `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance); cut-outs (colour-keyed or with alpha) are left alone |
 | `anisotropy` | `0` (off); `2`, `4`, `8` or `16`: anisotropic filtering on textures the game filters smoothly (linear), sharper at grazing angles (floors, roads); point-filtered and cut-out ones (colour-keyed or with alpha: trees, sprites) stay as they are |

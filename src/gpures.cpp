@@ -752,7 +752,8 @@ struct GpuContext::Impl final : Gpu::Owner {
     bool cutoutStage[8] = {};
     bool wEmulate = false;  // ZENABLE = D3DZB_USEW on a GPU without W buffering
     DWORD rsMirror[256] = {};  // render states as last set through this context (drawtrace)
-    bool zWrite = true;     // ZWRITEENABLE
+    bool zWrite = true;     // ZWRITEENABLE as the game set it; zWriteSet: as D3D9 has it
+    bool zWriteSet = true;
     bool alphaBlend = false;  // ALPHABLENDENABLE
     float gameBias = 0.0f;  // the game's depth bias (ZBIAS); biasSet: as D3D9 has it
     float biasSet = 0.0f;
@@ -831,7 +832,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
             }
         }
     }
-    if (state == D3DRS_ZWRITEENABLE) p_->zWrite = value != 0;
+    if (state == D3DRS_ZWRITEENABLE) p_->zWrite = p_->zWriteSet = value != 0;
     if (state == D3DRS_ALPHABLENDENABLE) p_->alphaBlend = value != 0;
     if (state == 195) {  // D3DRS_DEPTHBIAS (from ZBIAS): the game's, before the overlay tolerance
         memcpy(&p_->gameBias, &value, 4);
@@ -1145,19 +1146,26 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // alternatepixelcenter: everything half a pixel up and left, so that pixel centres fall
     // where the drivers that offered it put them (texel centres for 2D drawn 1:1, no lines at
     // texture edges): transformed vertices moved, the projection of the others too.
-    // overlaybias: a pass laid on a surface already drawn (it doesn't write depth, or it
-    // blends: light maps, decals) is pulled forward by one step of the depth precision the
-    // game asked for. Its depth equals the surface's only to within rounding (the polygons
-    // are cut differently), which the 16-bit depth buffers of the era rounded the same way,
-    // and the overlay won; with today's 24 bits less-or-equal fails on half its pixels, in
-    // a fine hatch (NFS III's headlights and light maps on the road). overlaybias=N 16-bit
-    // steps (on: one) whatever the Z buffer (the games' depth maths was made for that precision, NFS3+
-    // asks for 32 bits), and a slope-scaled one pixel's depth change: the polygons'
-    // mismatch grows with the depth gradient (a road at a grazing angle).
+    // overlaybias: a pass laid on a surface already drawn is pulled forward by N 16-bit
+    // depth steps (on: one) and a slope-scaled one pixel's depth change. Its depth equals
+    // the surface's only to within rounding (the polygons are cut differently), which the
+    // 16-bit depth buffers of the era rounded the same way, and the overlay won; with
+    // today's 24 bits less-or-equal fails on half its pixels, in a fine hatch (NFS III's
+    // headlights and light maps on the road). The games' depth maths was made for 16 bits,
+    // whatever Z buffer they ask for now (NFS3+: 32 bits). An overlay is a pass that
+    // doesn't write depth, or one that adds or multiplies (D3DRS_DESTBLEND ONE or a colour
+    // factor, or SRCBLEND ZERO or DESTCOLOR): ordinary alpha blending doesn't count (NFS III
+    // blends everything). Overlays that would write depth don't, meanwhile: the next light
+    // laid on the same spot would fight the first's depth as the first fought the road's.
     {
-        const bool overlay = g_config.overlayBias > 0 && zEnabled && (!p.zWrite || p.alphaBlend);
+        const DWORD src = p.rsMirror[D3DRS_SRCBLEND], dst = p.rsMirror[D3DRS_DESTBLEND];
+        const bool combines = p.alphaBlend && (dst == D3DBLEND_ONE || dst == D3DBLEND_SRCCOLOR ||
+                                               dst == D3DBLEND_INVSRCCOLOR || dst == D3DBLEND_DESTCOLOR ||
+                                               src == D3DBLEND_ZERO || src == D3DBLEND_DESTCOLOR);
+        const bool overlay = g_config.overlayBias > 0 && zEnabled && (!p.zWrite || combines);
         const float bias = p.gameBias - (overlay ? float(g_config.overlayBias) / 65535.0f : 0.0f);
         const float slope = overlay ? -1.0f : 0.0f;  // D3DRS_SLOPESCALEDEPTHBIAS: a pixel's depth change
+        const bool write = p.zWrite && !overlay;
         if (bias != p.biasSet) {
             DWORD b;
             memcpy(&b, &bias, 4);
@@ -1169,6 +1177,10 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
             memcpy(&b, &slope, 4);
             p.dev->SetRenderState(D3DRENDERSTATETYPE(175), b);
             p.slopeSet = slope;
+        }
+        if (write != p.zWriteSet) {
+            p.dev->SetRenderState(D3DRS_ZWRITEENABLE, write);
+            p.zWriteSet = write;
         }
     }
     const bool shift = g_config.pixelCenter;
