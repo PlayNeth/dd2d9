@@ -253,7 +253,7 @@ public:
         if (!d->initialized) return DDERR_NOTINITIALIZED; \
     } while (0)
 
-    STDMETHOD(QueryInterface)(REFIID r, void** p) override { return d->QueryInterface(r, p); }
+    STDMETHOD(QueryInterface)(REFIID r, void** p) override { return d->QueryInterface(r, p, V); }
     STDMETHOD_(ULONG, AddRef)() override { return d->AddRef(V); }
     STDMETHOD_(ULONG, Release)() override { return d->Release(V); }
     STDMETHOD(Compact)() { return d->Exclusive() ? DD_OK : DDERR_NOEXCLUSIVEMODE; }  // as ddraw.dll

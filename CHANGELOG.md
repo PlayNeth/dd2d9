@@ -3,6 +3,34 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.8.0
+**Direct3D 7 in dd2d9 itself**, no D7VK needed: `IDirect3D7`, `IDirect3DDevice7` and
+`IDirect3DVertexBuffer7` (`src/d3d7.cpp`), matched to XP SP3's `d3dim700.dll`
+(`re/spec/d3d7-*.md`), drawing through the Direct3D 9 device dd2d9 presents with
+(`src/gpures.cpp`), so on Windows' own Direct3D 9 and on DXVK alike.
+- EnumDevices lists RGB, HAL and T&L HAL with XP's names; the hardware devices' caps come
+  from the Direct3D 9 adapter, RGB's are XP's fixed table. CreateDevice checks the render
+  target and its attached Z buffer as XP does, and sets the x87 FPU to single precision
+  unless DDSCL_FPUPRESERVE.
+- Render states, texture stages (and the sampler states D3D9 moved them to, with
+  MAGFILTER/MIPFILTER's changed values), transforms, lights, material, viewport, clip planes,
+  clip status, state blocks (XP's own, handles from 1), Clear, scenes, every Draw*
+  call, Load, ComputeSphereVisibility, and ProcessVertices on the CPU (transform, clip
+  codes, lighting, vertex fog, vertex blending).
+- Textures, render targets and Z buffers get a GPU copy (P8 and colour-keyed textures
+  converted, the key becoming alpha while COLORKEYENABLE is on); what Direct3D drew is read
+  back whenever DirectDraw touches the pixels, so 2D over a 3D frame works.
+- Quirks for D3D9: D3DFVF_RESERVED1 (D3D9's PSIZE) is skipped; transformed vertices with
+  ZENABLE off have their z clamped (D3D9 always clips it); rhw 0 on every vertex becomes 1
+  (DXVK); lit vertices without a normal get a zero one.
+- Deliberate differences: `ValidateDevice` reports one pass (XP returns E_NOTIMPL without
+  a driver callback); render targets can't be palettized (D3D9 can't render to P8).
+- DirectDraw objects made by DirectDrawCreateEx report 3D support (DDCAPS_3D and
+  friends); Direct3D 1-6 aren't implemented yet, so DirectDrawCreate objects don't.
+- DirectDraw side: Z buffers with an 8-bit stencil (24+8) can be created; DirectDraw 7
+  managed textures take the system-memory textures' lock fast path; CreateSurface with an
+  unwritable out pointer returns DDERR_INVALIDPARAMS (XP faults inside its handler).
+
 ## 0.7.19
 - **In the background after Alt+Tab, the primary surface (and the other surfaces lost by
   the focus loss alone) can still be locked**, though it reports lost as in `ddraw.dll`

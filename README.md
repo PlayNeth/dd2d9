@@ -1,7 +1,6 @@
 # dd2d9
 
-DirectDraw (DirectX 1–7) for 2D games, implemented on Direct3D 9. Behind D7VK it covers
-the 2D half (menus, movies, 2D games) that D7VK leaves to the system's DirectDraw. See
+DirectDraw (DirectX 1–7) and Direct3D 7, implemented on Direct3D 9. See
 `CHANGELOG.md` for what changed and why.
 
 ## How it works
@@ -69,21 +68,26 @@ the 2D half (menus, movies, 2D games) that D7VK leaves to the system's DirectDra
   let the driver switch the display back to the desktop mode. `d3d9=game` uses the
   game's.
 
-## Direct3D and D7VK
-dd2d9 doesn't render 3D. For 3D games, install it behind D7VK (D7VK as `ddraw.dll`, dd2d9
-as `ddraw_.dll`, which `install-dd2d9.sh --d7vk` does). D7VK builds its Direct3D 3–7 on
-the DirectDraw it wraps, so in that setup dd2d9 provides the Direct3D objects D7VK needs
-(devices, viewports, materials, textures, with `Clear` and `Load` applied to the
-DirectDraw surfaces). D7VK renders and presents while a 3D device exists, and dd2d9
-presents 2D the rest of the time (menus, movies, 2D-only games). Loaded on its own,
-dd2d9 answers Direct3D queries with `E_NOINTERFACE`, so games fall back to their other
-renderers. The `d3d=` ini key overrides this.
+## Direct3D
+dd2d9 implements **Direct3D 7** itself (`IDirect3D7`, `IDirect3DDevice7`,
+`IDirect3DVertexBuffer7`, matched to XP SP3's `d3dim700.dll`: `re/spec/d3d7-*.md`), drawing
+through the same Direct3D 9 device it presents with, so 3D works on Windows' own Direct3D 9
+and on DXVK alike. Textures, render targets and Z buffers get a GPU copy; whenever
+DirectDraw touches their pixels (Lock, Blt, GetDC, the screen after Flip) what Direct3D drew
+is read back first, so 2D drawn over a 3D frame (HUDs, menus) works. Direct3D 1–6 (`d3dim.dll`'s
+interfaces, for DirectDraw objects made by `DirectDrawCreate`) aren't implemented yet: those
+objects report no 3D support, and games fall back to their other renderers.
 
-D7VK presents its 3D frames itself, through its own swap chain filling the game's
-window, so `stretch` and `filter` don't apply to them: with `display=borderless`, a 4:3
-mode is stretched over a wide screen. For 3D games keep `display=switch` (the default):
-the display really changes mode, and the graphics driver's scaling setting (keep aspect
-ratio, or centered) decides how it fills the screen.
+Not done yet: cube maps, rendering to textures used later as textures is read back
+through the CPU, and Z buffers can't be read or copied by DirectDraw (only cleared with
+`DDBLT_DEPTHFILL`). `GetClipStatus` reflects `ProcessVertices` and `SetClipStatus` only.
+
+**Behind D7VK** (D7VK as `ddraw.dll`, dd2d9 as `ddraw_.dll`, which `install-dd2d9.sh --d7vk`
+does) dd2d9 instead provides the Direct3D objects D7VK builds on (devices, viewports,
+materials, textures, with `Clear` and `Load` applied to the DirectDraw surfaces), and D7VK
+renders and presents while a 3D device exists. D7VK presents through its own swap chain,
+so `stretch` and `filter` don't apply to its frames: keep `display=switch` there. The `d3d=`
+ini key overrides which Direct3D is offered.
 
 ## Differences from ddraw.dll on purpose
 - **The window's frame sits just off the screen in fullscreen.** `ddraw.dll` leaves the
@@ -142,7 +146,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `point`, `linear`, `sharp` (bilinear-sharp: whole-multiple point scaling, then linear) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
-| `d3d` | `auto` (Direct3D objects for a wrapper when loaded as `ddraw_.dll`), `on`, `off` |
+| `d3d` | `auto`: dd2d9's own Direct3D 7, or the objects a wrapper needs when loaded as `ddraw_.dll`; `on`: always the wrapper's objects; `off`: no Direct3D |
 | `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
@@ -198,7 +202,8 @@ the frame it converted and how long the game had to wait for it.
 stays subclassed by a wrapper, as D7VK does when a game switches between Direct3D and software.
 
 `build/d3d7test.exe [w h [bpp]]` renders a Direct3D 7 triangle with DirectDraw fills
-and GDI text on top, then flips. It's meant to run behind D7VK and writes `d3d7test.txt`.
+and GDI text on top, then flips, through dd2d9's own Direct3D 7 or behind D7VK. It writes
+`d3d7test.txt`.
 
 ## Reverse-engineering notes
 `re/` has the vtable map of the XP SP3 `ddraw.dll` (5.3.2600.5512), along with

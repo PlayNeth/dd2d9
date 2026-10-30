@@ -1090,7 +1090,10 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     if (CantDraw() && !background) return DDERR_SURFACELOST;
     auto* d = static_cast<DDSURFACEDESC2*>(outDesc);
     const DWORD caps = desc.ddsCaps.dwCaps;
-    const bool fast = ddVersion == 7 && sysmemRequested && (caps & DDSCAPS_TEXTURE);
+    // XP's fast path for DirectDraw 7 system-memory textures (spec section 1.4); managed
+    // textures, kept in system memory too, get it as well (Wine's test on Windows).
+    const bool managed = (desc.ddsCaps.dwCaps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) != 0;
+    const bool fast = ddVersion == 7 && (sysmemRequested || managed) && (caps & DDSCAPS_TEXTURE);
     RECT area = {0, 0, buf->w, buf->h};
     if (fast) {
         if (!d) return DDERR_INVALIDPARAMS;

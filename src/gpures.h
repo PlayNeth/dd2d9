@@ -77,6 +77,7 @@ public:
     void SetClipPlane(DWORD index, const float* plane);
     void SetTexture(DWORD stage, Surface* top);  // bound (and uploaded) at the next draw
     void SetTargets(Surface* rt, Surface* z);
+    void SetColorKeyEnable(bool on);  // D3DRENDERSTATE_COLORKEYENABLE: textures' keys become alpha
 
     // flags: D3DCLEAR_TARGET 1, ZBUFFER 2, STENCIL 4. rects as RECT (= D3DRECT), clipped
     // to the viewport already; n = 0: the whole viewport.

@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ddraw.h>
+#include <d3d.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -124,12 +125,25 @@ static int RunUnit() {
     CHECK(SUCCEEDED(dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL)), "SetCooperativeLevel(NORMAL)");
 
     {
-        // Alone (as ddraw.dll), no Direct3D is offered, so no 3D support may be reported.
+        // A DirectDrawCreateEx object offers dd2d9's Direct3D 7: 3D is reported.
         DDCAPS caps = {};
         caps.dwSize = sizeof(caps);
         hr = dd->GetCaps(&caps, nullptr);
-        CHECK(SUCCEEDED(hr) && !(caps.dwCaps & DDCAPS_3D) && !(caps.ddsCaps.dwCaps & DDSCAPS_3DDEVICE),
-              "GetCaps reports no 3D support on its own (dwCaps 0x%08lx)", caps.dwCaps);
+        CHECK(SUCCEEDED(hr) && (caps.dwCaps & DDCAPS_3D) && (caps.ddsCaps.dwCaps & DDSCAPS_3DDEVICE),
+              "GetCaps reports 3D with Direct3D 7 (dwCaps 0x%08lx)", caps.dwCaps);
+        IDirect3D7* d3d = nullptr;
+        hr = dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d));
+        CHECK(SUCCEEDED(hr) && d3d, "IDirect3D7 offered (0x%08lx)", hr);
+        if (d3d) d3d->Release();
+        // A DirectDrawCreate one doesn't yet (Direct3D 1-3 aren't implemented).
+        IDirectDraw* dd1 = nullptr;
+        if (SUCCEEDED(DirectDrawCreate(nullptr, &dd1, nullptr))) {
+            DDCAPS c1 = {};
+            c1.dwSize = sizeof(c1);
+            dd1->GetCaps(&c1, nullptr);
+            CHECK(!(c1.dwCaps & DDCAPS_3D), "no 3D reported without Direct3D 1-3 (dwCaps 0x%08lx)", c1.dwCaps);
+            dd1->Release();
+        }
     }
 
     const DWORD A = 0x00112233, B = 0x00445566, C = 0x00778899, D = 0x00AABBCC, K = 0x00FF00FF;

@@ -3,6 +3,7 @@
 #include "gpu.h"
 
 #include "d3dproxy.h"
+#include "d3d7.h"
 
 #include <mmsystem.h>
 #include <windowsx.h>
@@ -63,7 +64,7 @@ void* DDraw::Iface(int v) {
     }
 }
 
-HRESULT DDraw::QueryInterface(REFIID r, void** out) {
+HRESULT DDraw::QueryInterface(REFIID r, void** out, int fromVersion) {
     if (IsBadReadPtr(&r, sizeof(IID)) || !out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
     int v = 0;
@@ -76,7 +77,8 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out) {
         *out = Iface(v);
         return S_OK;
     }
-    HRESULT hr = D3DProxyQueryDDraw(this, r, out);  // Direct3D objects for a wrapper such as D7VK
+    // Direct3D: objects for a wrapper such as D7VK when one loaded dd2d9, else dd2d9's own.
+    HRESULT hr = D3DProxyEnabled() ? D3DProxyQueryDDraw(this, r, out) : D3D7Query(this, r, out, fromVersion);
     if (hr != E_NOINTERFACE) return hr;
     DD2D9_LOG("DDraw::QueryInterface(%s): not supported", GuidName(r));
     return E_NOINTERFACE;
@@ -129,6 +131,7 @@ void DDraw::TearDown() {
         }
         Guard l;
         alive = false;
+        D3D7Destroy(this);  // before the surfaces, as ddraw.dll releases its Direct3D object
         if (primary) {
             primary->isPrimary = false;
             primary = nullptr;
@@ -1413,10 +1416,10 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.ddsCaps.dwCaps = DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER |
                        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE | DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY |
                        DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_VISIBLE;
-    if (D3DProxyEnabled()) {
-        // A Direct3D wrapper (D7VK) renders 3D on top of dd2d9 and passes these caps
-        // on to the game: report a 3D accelerator, as ddraw does with a 3D driver.
-        // Games check this before they try Direct3D at all.
+    if (D3DProxyEnabled() || (dd7 && g_config.d3d != kD3DOff)) {
+        // A 3D accelerator, as ddraw does with a 3D driver: dd2d9's own Direct3D 7 (on
+        // DirectDrawCreateEx objects; Direct3D 1-3 aren't implemented yet), or a wrapper
+        // (D7VK) rendering on top of dd2d9. Games check this before they try Direct3D.
         c.dwCaps |= DDCAPS_3D;
         c.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
         c.dwZBufferBitDepths = DDBD_16 | DDBD_24 | DDBD_32;
@@ -1961,7 +1964,12 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
             if (complex || (F & DDSD_ZBUFFERBITDEPTH) || !(F & DDSD_PIXELFORMAT) || pf.dwSize != sizeof(DDPIXELFORMAT) ||
                 !(pf.dwFlags & DDPF_ZBUFFER) || !pf.dwZBitMask)
                 return DDERR_INVALIDPARAMS;
-            if (pf.dwFlags & DDPF_STENCILBUFFER) return DDERR_UNSUPPORTED;  // no stencil formats here
+            // With stencil: the 24+8 layouts Direct3D enumerates (EnumZBufferFormats), as
+            // ddraw.dll takes only those its driver lists.
+            if ((pf.dwFlags & DDPF_STENCILBUFFER) &&
+                (pf.dwZBufferBitDepth != 32 || pf.dwStencilBitDepth != 8 || __builtin_popcount(pf.dwStencilBitMask) != 8 ||
+                 __builtin_popcount(pf.dwZBitMask) != 24 || (pf.dwZBitMask & pf.dwStencilBitMask)))
+                return DDERR_UNSUPPORTED;
             depth = pf.dwZBufferBitDepth;
         }
         if (depth < 8) return DDERR_INVALIDPARAMS;
@@ -2020,7 +2028,7 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         return DDERR_INVALIDPARAMS;
     if (!DescIn(inDesc, &in)) return DDERR_INVALIDPARAMS;
     if (outer) return CLASS_E_NOAGGREGATION;
-    if (!out) return DDERR_INVALIDPARAMS;
+    if (!out || IsBadWritePtr(out, sizeof(*out))) return DDERR_INVALIDPARAMS;  // XP faults inside its handler
     *out = nullptr;
     UpdateLostSurfaces();  // the surfaces lost so far, not this new one
     DD2D9_LOG("CreateSurface(flags 0x%lx, caps 0x%lx, %lux%lu, backbuffers %lu)", in.dwFlags, in.ddsCaps.dwCaps,

@@ -402,7 +402,8 @@ public:
     static DDraw* From(void* iface) { return static_cast<DDraw*>(ImplFromIface(iface)); }
     void* Iface(int version);
 
-    HRESULT QueryInterface(REFIID riid, void** out);
+    // fromVersion: the interface version called (Direct3D 7 forwards its references there).
+    HRESULT QueryInterface(REFIID riid, void** out, int fromVersion = 7);
     // Every interface version (1, 2, 4, 7) counts its own references, as in
     // ddraw.dll; the object is torn down when all of them are released.
     ULONG AddRef(int version);

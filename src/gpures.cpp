@@ -280,7 +280,7 @@ static const Palette* TexturePalette(const Surface* s) {
 }
 
 // The texture's GPU copy, uploaded where the CPU copy changed. Gpu lock held.
-static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s) {
+static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, bool colorKey) {
     if (s->gpuTex && s->gpuTex->gpu != &gpu) return nullptr;
     if (!s->gpuTex) {
         s->gpuTex = new GpuTex(&gpu, s);
@@ -290,7 +290,8 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s) {
     std::vector<Surface*> chain;
     for (Surface* l = s; l && chain.size() < 16; l = l->NextMipLevel()) chain.push_back(l);
     const Palette* pal = s->buf->fmt.pal8 ? TexturePalette(s) : nullptr;
-    const bool keyed = s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc;
+    // The colour key becomes alpha only while D3DRENDERSTATE_COLORKEYENABLE is on.
+    const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc;
     const DWORD key = keyed ? s->ck[kCkSrcBlt].dwColorSpaceLowValue : 0;
     bool all = false;
     if (!t->tex || t->levels != chain.size() || keyed != t->keyed) {
@@ -320,6 +321,11 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s) {
     const PALETTEENTRY* entries = pal ? pal->entries : s->dd->defaultPalette;
     for (UINT i = 0; i < chain.size(); i++) {
         Buffer* b = chain[i]->buf;
+        // Rendered into by Direct3D (a render target used as a texture): read back first.
+        if (b->gpu && b->cpuStale && b->gpu->surf) {
+            ReadBack(gpu, d, b->gpu);
+            b->gpuStale = true;
+        }
         if (!all && !b->gpuStale && t->levelBufs[i] == b) continue;
         D3DLOCKED_RECT lr;
         if (FAILED(t->tex->LockRect(i, &lr, nullptr, 0))) continue;
@@ -440,12 +446,14 @@ struct GpuContext::Impl final : Gpu::Owner {
     IDirect3DSurface9* boundRt = nullptr;  // what D3D9 has (compared only)
     IDirect3DSurface9* boundZ = nullptr;
     Surface* tex[8] = {};
+    bool colorKey = false;
     D3DVIEWPORT9 vp = {0, 0, 1, 1, 0.0f, 1.0f};
     std::unordered_map<DWORD, IDirect3DVertexDeclaration9*> decls;
     std::vector<uint8_t> scratch;
 
     explicit Impl(Gpu& g) : gpu(g) { gpu.AddOwner(this); }
     ~Impl() {
+        GpuGuard l(gpu);
         ReleaseGpuResources();
         gpu.RemoveOwner(this);
     }
@@ -517,6 +525,8 @@ void GpuContext::SetTexture(DWORD stage, Surface* top) {
     if (stage < 8) p_->tex[stage] = top;
 }
 
+void GpuContext::SetColorKeyEnable(bool on) { p_->colorKey = on; }
+
 void GpuContext::SetTargets(Surface* rt, Surface* z) {
     p_->rt = rt;
     p_->z = z;
@@ -567,7 +577,7 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
 
 void GpuContext::Impl::BindTextures() {
     for (DWORD i = 0; i < 8; i++) {
-        IDirect3DTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i]) : nullptr;
+        IDirect3DTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
         dev->SetTexture(i, t);
     }
 }

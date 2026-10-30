@@ -40,10 +40,10 @@ vsync=auto
 ;   auto - when loaded behind a Direct3D wrapper such as D7VK (as ddraw_.dll), give it the
 ;          Direct3D objects it builds on; it renders and presents the 3D frames, and dd2d9
 ;          takes over again for 2D once the game releases its 3D device. Loaded on its
-;          own (as ddraw.dll), dd2d9 offers no Direct3D, so games use their 2D or
-;          software renderers (default)
-;   on   - offer them even when not loaded as ddraw_.dll (a wrapper under another name)
-;   off  - never offer them
+;          own (as ddraw.dll), dd2d9's own Direct3D 7 (default)
+;   on   - offer a wrapper's objects even when not loaded as ddraw_.dll (a wrapper under
+;          another name)
+;   off  - no Direct3D at all: games use their 2D or software renderers
 d3d=auto
 
 ; The mouse, when the game's display mode is shown scaled or in a window (display=borderless

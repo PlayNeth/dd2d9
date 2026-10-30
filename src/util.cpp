@@ -490,6 +490,11 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         f.zbuf = true;
         f.bpp = pf.dwZBufferBitDepth;
         if (f.bpp != 16 && f.bpp != 24 && f.bpp != 32) return false;
+        // Depth and stencil masks, kept only when not the plain all-depth layout (r: depth,
+        // a: stencil), so that the usual Z formats compare equal however they were described.
+        const DWORD all = f.bpp >= 32 ? 0xFFFFFFFFu : ((1u << f.bpp) - 1);
+        if ((pf.dwFlags & DDPF_STENCILBUFFER) && pf.dwStencilBitMask) f.a = pf.dwStencilBitMask;
+        if (pf.dwZBitMask && (pf.dwZBitMask != all || f.a)) f.r = pf.dwZBitMask;
     } else if (pf.dwFlags & DDPF_PALETTEINDEXED8) {
         f.pal8 = true;
         f.bpp = 8;
@@ -519,7 +524,12 @@ void Format::ToDDPF(DDPIXELFORMAT* pf) const {
     } else if (zbuf) {
         pf->dwFlags = DDPF_ZBUFFER;
         pf->dwZBufferBitDepth = bpp;
-        pf->dwZBitMask = bpp >= 32 ? 0xFFFFFFFFu : ((1u << bpp) - 1);
+        pf->dwZBitMask = r ? r : bpp >= 32 ? 0xFFFFFFFFu : ((1u << bpp) - 1);
+        if (a) {
+            pf->dwFlags |= DDPF_STENCILBUFFER;
+            pf->dwStencilBitDepth = DWORD(__builtin_popcount(a));
+            pf->dwStencilBitMask = a;
+        }
     } else if (pal8) {
         pf->dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
         pf->dwRGBBitCount = 8;

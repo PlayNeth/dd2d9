@@ -1,5 +1,8 @@
 # dd2d9 Direct3D: design
 
+Status (0.8.0): Direct3D 7 done (`src/d3d7.cpp`, `src/gpures.cpp`); present from the GPU copy
+(§2, a readback at Flip for now), cube maps, Direct3D 1-6 and the D7VK removal still to do.
+
 Goal: Direct3D 3/5/6/7 (IDirect3D..IDirect3D7, devices, viewports, materials, lights, textures,
 vertex buffers, execute buffers) implemented in dd2d9 on Direct3D 9, matched to XP SP3's
 `d3dim700.dll` (DX7) and `d3dim.dll` (DX3-6) the way the 2D side is matched to `ddraw.dll`.
