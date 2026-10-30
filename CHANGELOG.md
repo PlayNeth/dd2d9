@@ -3,6 +3,15 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.7.19
+- **In the background after Alt+Tab, the primary surface (and the other surfaces lost by
+  the focus loss alone) can still be locked**, though it reports lost as in `ddraw.dll`
+  (a deliberate difference: dd2d9 keeps the pixels). Captain Claw locks its primary while
+  in the background (taking a picture of the screen for its pause menu), ignores the
+  failure and writes through the null pointer: it crashed when Alt+Tabbed during play.
+- Groundwork for Direct3D, not used yet: GPU copies of render targets, Z buffers and
+  textures (`src/gpures.cpp`), read back before DirectDraw touches the pixels.
+
 ## 0.7.18
 - **Back from Alt+Tab, the game's surfaces other than the primary and its back buffers
   can still be drawn with** (Blt, BltFast, Lock, GetDC), though they report lost as in

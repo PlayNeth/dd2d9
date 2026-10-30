@@ -1,6 +1,7 @@
 // Direct3D 9 presentation of the primary surface.
 #include "objects.h"
 #include "gpu.h"
+#include "gpures.h"
 
 #include <d3d9.h>
 
@@ -427,6 +428,7 @@ void Presenter::Loop() {
                 if (all) area = src;
                 else if (!IntersectRect(&area, &changed, &src)) SetRectEmpty(&area);
                 if (!IsRectEmpty(&area)) {
+                    GpuCpuAccess(p, false);  // Direct3D drew into it: read that back first
                     snap.buf = p->buf;
                     snap.buf->AddRef();
                     snap.fmt = snap.buf->fmt;
@@ -452,6 +454,7 @@ void Presenter::Loop() {
         // taking the staging surface with it.
         Gpu& gpu = dd_->GetGpu();
         gpu.Lock();
+        gpu.CloseScene();  // a game's Direct3D scene: D3D9 presents only outside one
         IDirect3DDevice9* const d = gpu.Device();
         IDirect3DSwapChain9* const swap = gpu.SwapChain(hwnd, bw, bh);
         if (!d || !staging_ || !swap) {

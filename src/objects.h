@@ -13,6 +13,8 @@ namespace dd2d9 {
 
 class DDraw;
 class Surface;
+struct GpuSurf;
+struct GpuTex;
 class Palette;
 class Presenter;
 class Gpu;
@@ -42,6 +44,11 @@ struct Buffer {
     HANDLE kmtBitmap = nullptr;  // dc came from D3DKMTCreateDCFromMemory
     void CopyToShadow();
     uint8_t* Row(int y) const { return bits + y * pitch; }
+    // Direct3D: the GPU copy of a render target or Z buffer (gpures.h), and which copy is
+    // behind. g_lock (and the Gpu lock for gpu).
+    GpuSurf* gpu = nullptr;
+    bool gpuStale = true;   // the CPU copy changed since the GPU copy was made
+    bool cpuStale = false;  // the GPU copy changed since the CPU copy was read back
 };
 
 // ---------------------------------------------------------------- Palette
@@ -280,6 +287,9 @@ public:
     DDGAMMARAMP* gammaRamp = nullptr;  // the primary's ramp (SetGammaRamp), applied while exclusive
     HRESULT ManagedTextureCheck() const;  // Set/GetPriority, Set/GetLOD
     void* d3dTexture = nullptr;  // Direct3D texture object (d3dproxy.cpp), created on demand
+    GpuTex* gpuTex = nullptr;    // Direct3D's GPU copy of this texture and its mip levels (gpures.h)
+    // The CPU copy is about to be read (written): Direct3D's drawing read back first.
+    void CpuAccess(bool write);
 
 private:
     struct PrivateData {
@@ -511,6 +521,9 @@ public:
     std::vector<Surface*> surfaces;
     PALETTEENTRY defaultPalette[256];
     void* d3dObject = nullptr;  // Direct3D object (d3dproxy.cpp), shared by its interfaces
+    void* d3d7 = nullptr;       // dd2d9's own Direct3D 7 object (d3d7.cpp), while it lives
+    bool dd7 = false;           // made by DirectDrawCreateEx (ddraw.dll's DDRAWILCL_DIRECTDRAW7)
+    DWORD CoopFlags() const { return coop_; }
     bool alive = true;
     bool initialized = true;
 

@@ -151,6 +151,8 @@ IDirect3DDevice9* Gpu::Ensure() {
             return nullptr;
         }
         DD2D9_LOG("D3D9 device created");
+        generation_++;
+        inScene_ = false;
         return dev_;
     }
     const HRESULT coop = dev_->TestCooperativeLevel();
@@ -167,6 +169,8 @@ IDirect3DDevice9* Gpu::Ensure() {
             return nullptr;
         }
         DD2D9_LOG("D3D9 device reset after a loss");
+        generation_++;
+        inScene_ = false;
         return dev_;
     }
     if (FAILED(coop)) {  // D3DERR_DRIVERINTERNALERROR: start over
@@ -207,6 +211,17 @@ IDirect3DSwapChain9* Gpu::SwapChain(HWND hwnd, UINT w, UINT h) {
     return swap_;
 }
 
+void Gpu::OpenScene() {
+    if (inScene_ || !dev_) return;
+    inScene_ = SUCCEEDED(dev_->BeginScene());
+}
+
+void Gpu::CloseScene() {
+    if (!inScene_) return;
+    inScene_ = false;
+    if (dev_) dev_->EndScene();
+}
+
 void Gpu::DropSwapChain() {
     if (swap_) swap_->Release();
     swap_ = nullptr;
@@ -222,6 +237,7 @@ void Gpu::AddOwner(Owner* o) {
 void Gpu::RemoveOwner(Owner* o) { owners_.erase(std::remove(owners_.begin(), owners_.end(), o), owners_.end()); }
 
 void Gpu::ReleaseResources() {
+    CloseScene();
     // An owner may remove itself while releasing: iterate over a copy.
     const std::vector<Owner*> owners = owners_;
     for (Owner* o : owners) o->ReleaseGpuResources();
@@ -229,8 +245,11 @@ void Gpu::ReleaseResources() {
 }
 
 void Gpu::Release() {
-    ReleaseResources();
+    CloseScene();
+    const std::vector<Owner*> owners = owners_;  // an owner may remove itself meanwhile
     owners_.clear();
+    for (Owner* o : owners) o->GpuReleased();
+    DropSwapChain();
     if (dev_) dev_->Release();
     dev_ = nullptr;
     if (d3d_) d3d_->Release();

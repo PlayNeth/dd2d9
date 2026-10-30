@@ -100,6 +100,8 @@ ratio, or centered) decides how it fills the screen.
   keeps their pixels, so Blt, BltFast, Lock and GetDC on them still work, and games that
   don't restore all of theirs keep working (Captain Claw). The primary and its back
   buffers are lost as usual; after a display mode change nothing is drawable until restored.
+- **In the background after Alt+Tab, lost surfaces can still be locked** (`ddraw.dll`
+  fails the lock): Captain Claw writes through the pointer of a failed lock there.
 - **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2
   keeps drawing to its old back buffer).
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).

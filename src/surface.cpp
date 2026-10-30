@@ -1,5 +1,6 @@
 // Surfaces, surface memory, palettes, clippers and gamma control.
 #include "wrappers.h"
+#include "gpures.h"
 
 #include "d3dproxy.h"
 
@@ -136,6 +137,7 @@ UINT KmtFormat(const Format& f) {
 
 void Buffer::Release() {
     if (InterlockedDecrement(&ref) != 0) return;
+    if (gpu) GpuBufferGone(this);
     if (kmtBitmap) {
         KmtDestroyDC d = {dc, kmtBitmap};
         g_kmtDestroy(&d);
@@ -257,6 +259,7 @@ Surface::~Surface() {
     for (auto& p : priv_)
         if (p.unk) p.unk->Release();
     D3DProxySurfaceDestroyed(this);
+    if (gpuTex) GpuSurfaceGone(this);
     buf->Release();
     delete static_cast<SurfaceWrap<1>*>(wraps_[0]);
     delete static_cast<SurfaceWrap<2>*>(wraps_[1]);
@@ -838,6 +841,7 @@ HRESULT Surface::GetDC(HDC* out) {
     if (dcOut) return DDERR_DCALREADYCREATED;  // *out left alone, as ddraw.dll
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
+    CpuAccess(true);  // what Direct3D drew is read back first
     HDC dc = buf->GetDC();
     if (!dc) return DDERR_CANTCREATEDC;
     if (buf->fmt.pal8) {
@@ -1078,7 +1082,12 @@ void Surface::FillLockDesc(void* outDesc, uint8_t* bits) const {
 // any descriptor size, no checks, no nesting.
 HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     Guard l;
-    if (CantDraw()) return DDERR_SURFACELOST;
+    // Lost, as in ddraw.dll, except while the game is in the background after Alt+Tab
+    // only: dd2d9 still has the pixels, so the lock works (a deliberate difference).
+    // Captain Claw locks its primary there, ignores the failure and writes through the
+    // null pointer.
+    const bool background = dd->DevState() == DDraw::kDevLost && dd->FocusLossOnly() && (!lost || drawableLost);
+    if (CantDraw() && !background) return DDERR_SURFACELOST;
     auto* d = static_cast<DDSURFACEDESC2*>(outDesc);
     const DWORD caps = desc.ddsCaps.dwCaps;
     const bool fast = ddVersion == 7 && sysmemRequested && (caps & DDSCAPS_TEXTURE);
@@ -1112,6 +1121,7 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
         }
     }
     GdiFlush();
+    CpuAccess(!(flags & DDLOCK_READONLY));  // what Direct3D drew is read back first
     uint8_t* p = buf->bits + area.top * buf->pitch + area.left * LONG(buf->fmt.Bytes());
     if (fast) {
     } else if (r) {
@@ -1270,6 +1280,11 @@ void Surface::FillRect(const RECT& r, DWORD value) {
     MarkDirtyIfVisible(&c);
 }
 
+void Surface::CpuAccess(bool write) {
+    if (buf->gpu) GpuCpuAccess(this, write);  // reads back what Direct3D drew, if newer
+    else if (write) buf->gpuStale = true;     // a texture's GPU copy is made from its levels' buffers
+}
+
 Surface* Surface::NextMipLevel() const {
     const Surface* family = root ? root : this;
     for (Surface* a : attached)
@@ -1321,6 +1336,8 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
             for (size_t i = 0; i + 1 < chain.size(); i++) chain[i]->buf = chain[i + 1]->buf;
             chain.back()->buf = first;
         }
+        // What Direct3D drew is shown from the CPU copy: read back now, on the game's thread.
+        if (isPrimary) chain[0]->CpuAccess(false);
         // As ddraw.dll: only the front and the buffer it swapped with count as changed.
         chain[0]->BumpUniqueness();
         chain[target ? k : 1]->BumpUniqueness();

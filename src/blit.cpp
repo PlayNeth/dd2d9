@@ -1,5 +1,6 @@
 // Software blitter: Blt / BltFast / color fill.
 #include "objects.h"
+#include "gpures.h"
 
 #include <emmintrin.h>
 
@@ -293,6 +294,9 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     // GDI may still be drawing on a surface whose DC is out (ReleaseDC flushes).
     if (dcOut || (src && src->dcOut)) GdiFlush();
     if (buf->fmt.fourcc) return DDERR_UNSUPPORTED;
+    // What Direct3D drew into either surface is read back first.
+    if (src && src != this) src->CpuAccess(false);
+    CpuAccess(true);
     const RECT bounds = {0, 0, buf->w, buf->h};
     RECT d = dstRect ? *dstRect : bounds;
     if (d.right <= d.left || d.bottom <= d.top) return DDERR_INVALIDRECT;
@@ -314,7 +318,10 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     if (flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL)) {
         if (!fx) return DDERR_INVALIDPARAMS;
         const DWORD value = (flags & DDBLT_COLORFILL) ? fx->dwFillColor : fx->dwFillDepth;
-        for (RECT& c : clips) FillCore(&c, value);
+        for (RECT& c : clips) {
+            FillCore(&c, value);
+            if (flags & DDBLT_DEPTHFILL) GpuDepthFill(this, c, value);  // a Z buffer Direct3D uses
+        }
         MarkClipsDirty(this, clips);
         return DD_OK;
     }

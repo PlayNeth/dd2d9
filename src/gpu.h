@@ -25,6 +25,8 @@ public:
     // Reset (device lost) or when the device is released.
     struct Owner {
         virtual void ReleaseGpuResources() = 0;
+        // The device itself goes (Release): its resources go, and the owner is no longer one.
+        virtual void GpuReleased() { ReleaseGpuResources(); }
     };
 
     Gpu() { InitializeCriticalSection(&lock_); }
@@ -47,6 +49,14 @@ public:
     IDirect3DSwapChain9* SwapChain(HWND hwnd, UINT w, UINT h);
     void DropSwapChain();  // Lock held: another device (a wrapper's) presents into the window
 
+    // Counts device creations and resets: the device's states and D3DPOOL_DEFAULT resources
+    // are new since a different value. Lock held.
+    unsigned Generation() const { return generation_; }
+    // Direct3D 9 draws only inside BeginScene/EndScene, and presents only outside: a scene
+    // opens with the first draw and closes before anything presents or reads back. Lock held.
+    void OpenScene();
+    void CloseScene();
+
     void AddOwner(Owner* o);     // Lock held
     void RemoveOwner(Owner* o);  // Lock held
     bool Unused() const { return owners_.empty(); }  // Lock held
@@ -65,6 +75,8 @@ private:
     UINT swapW_ = 0, swapH_ = 0;
     int swapInterval_ = -1;
     std::vector<Owner*> owners_;
+    unsigned generation_ = 0;
+    bool inScene_ = false;
     bool failed_ = false;  // creation failed: not retried every frame
     DWORD failedAt_ = 0;
 };

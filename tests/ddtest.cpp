@@ -626,6 +626,16 @@ static int RunFullscreen8(int modeW, int modeH) {
     SendMessageA(hwnd, WM_ACTIVATEAPP, FALSE, 0);
     Pump();
     const bool minimized = IsIconic(hwnd) != FALSE;
+    // In the background the primary is lost, but can still be locked (a deliberate
+    // difference: Captain Claw writes through the pointer of a failed lock).
+    {
+        CHECK(front->IsLost() == DDERR_SURFACELOST, "primary lost in the background");
+        DDSURFACEDESC2 ld = {};
+        ld.dwSize = sizeof(ld);
+        hr = front->Lock(nullptr, &ld, DDLOCK_WAIT, nullptr);
+        CHECK(hr == DD_OK && ld.lpSurface, "primary still lockable in the background (0x%08lx)", hr);
+        if (SUCCEEDED(hr)) front->Unlock(nullptr);
+    }
     SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
     Pump();
     CHECK(!IsIconic(hwnd), "window restored after focus returns (was minimized: %d)", minimized);

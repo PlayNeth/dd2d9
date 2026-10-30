@@ -9,6 +9,7 @@ namespace {
 HRESULT CreateDDraw(REFIID riid, void** out, bool initialized, const GUID* guid = nullptr) {
     auto* dd = new DDraw();
     dd->initialized = initialized;
+    dd->dd7 = IsEqualGUID(riid, IID_IDirectDraw7);  // Direct3D 7 (not 1-3) belongs to these
     const ULONG_PTR special = reinterpret_cast<ULONG_PTR>(guid);
     if (special == DDCREATE_HARDWAREONLY) dd->capsSide = DDraw::kHardwareOnly;
     else if (special == DDCREATE_EMULATIONONLY) dd->capsSide = DDraw::kEmulationOnly;
