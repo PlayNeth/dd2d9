@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.6"
+#define DD2D9_VERSION "0.9.7"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -37,6 +37,11 @@ struct Config {
     int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
     int cpus = 1;                  // processors the game runs on and is told about; 0: all
+    int fpsLimit = 0;              // frames per second at most (Flip, full blits to the primary); 0: off
+    bool texLinear = false;        // texfilter=linear: point-filtered textures drawn linear
+    int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off
+    bool render32 = false;         // 16-bit render targets drawn in 32 bits on the GPU
+    bool depth24 = false;          // 16-bit Z buffers made 24-bit on the GPU
     bool mipmaps = false;          // the GPU makes smaller levels for textures the game gave none
     int anisotropy = 0;            // anisotropic filtering forced on smooth (linear) textures: 2-16; 0/1 off
     bool pixelCenter = false;      // alternatepixelcenter: Direct3D drawn half a pixel up and left
@@ -181,6 +186,9 @@ void InstallMouseHooks();
 // ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
 // sets the affinity too) and again for each new DirectDraw object (DLLs loaded since).
 void InstallCompatHooks(bool inLoaderLock);
+// fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
+// covering most of the primary). Called without g_lock.
+void LimitFrame();
 // The game's view of a point on the real screen and back; false when 1:1.
 bool MouseToGame(POINT* p);
 bool MouseFromGame(POINT* p);

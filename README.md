@@ -175,6 +175,11 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `vram` | `512`: MB of video memory DirectDraw reports (`GetCaps`, `GetAvailableVidMem`), `1`–`2047` |
 | `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
 | `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
+| `fpslimit` | `0` (off); frames per second at most, for games that run too fast or use a whole core: paced at Flip, and at blits covering half the primary or more |
+| `render32` | `off`; `on`: 16-bit render targets drawn in 32 bits on the GPU (no banding in blending and fog), converted when the game reads them |
+| `depth24` | `off`; `on`: 16-bit Z buffers made 24-bit on the GPU (less z-fighting in the distance) |
+| `antialiasing` | `0` (off); `2`, `4`, `8`: multisample antialiasing for Direct3D (render targets drawn in 32 bits and Z in 24 then); 2D written between 3D draws is kept |
+| `texfilter` | `game`; `linear`: point-filtered textures drawn bilinear (cut-outs keep the game's filtering) |
 | `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance); cut-outs (colour-keyed or with alpha) are left alone |
 | `anisotropy` | `0` (off); `2`, `4`, `8` or `16`: anisotropic filtering on textures the game filters smoothly (linear), sharper at grazing angles (floors, roads); point-filtered and cut-out ones (colour-keyed or with alpha: trees, sprites) stay as they are |
 | `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered (lines at the edges of textures in 2D drawn through Direct3D) |

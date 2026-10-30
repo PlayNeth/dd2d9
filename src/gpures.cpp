@@ -106,8 +106,25 @@ struct PaletteMap {
     }
 };
 
+// A8R8G8B8 to an RGB layout, as ARGBToPixel converts (rounded to nearest), by table: one
+// entry per channel value, OR-ed together.
+struct ToPixel {
+    uint32_t lut[4][256];  // blue, green, red, alpha
+    explicit ToPixel(const Format& f) {
+        for (uint32_t i = 0; i < 256; i++) {
+            lut[0][i] = ARGBToPixel(f, i);
+            lut[1][i] = ARGBToPixel(f, i << 8);
+            lut[2][i] = ARGBToPixel(f, i << 16);
+            lut[3][i] = ARGBToPixel(f, i << 24);
+        }
+    }
+    uint32_t operator()(uint32_t c) const {
+        return lut[0][c & 0xFF] | lut[1][(c >> 8) & 0xFF] | lut[2][(c >> 16) & 0xFF] | lut[3][c >> 24];
+    }
+};
+
 // One row of a render target back into the CPU copy.
-static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, PaletteMap* pal) {
+static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, PaletteMap* pal, const ToPixel* to) {
     uint8_t* dst = b->Row(y);
     const DWORD bytes = b->fmt.Bytes();
     if (!convert) {
@@ -119,12 +136,18 @@ static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, Palet
         for (int x = 0; x < b->w; x++) dst[x] = pal ? pal->Index(in[x]) : 0;
         return;
     }
-    for (int x = 0; x < b->w; x++, dst += bytes) WritePixel(dst, bytes, ARGBToPixel(b->fmt, in[x]));
+    if (to && bytes == 2) {
+        auto* d16 = reinterpret_cast<uint16_t*>(dst);
+        for (int x = 0; x < b->w; x++) d16[x] = uint16_t((*to)(in[x]));
+        return;
+    }
+    for (int x = 0; x < b->w; x++, dst += bytes) WritePixel(dst, bytes, to ? (*to)(in[x]) : ARGBToPixel(b->fmt, in[x]));
 }
 
-// The Z buffer's Direct3D 9 format: closest depth, with stencil if it has some.
+// The Z buffer's Direct3D 9 format: closest depth, with stencil if it has some. depth24=on:
+// 24 bits for a 16-bit one too (less z-fighting in the distance).
 static D3DFORMAT DepthFormat(const Format& f) {
-    if (f.bpp == 16) return D3DFMT_D16;
+    if (f.bpp == 16) return g_config.depth24 ? D3DFMT_D24X8 : D3DFMT_D16;
     if (f.a) return D3DFMT_D24S8;  // Format keeps a Z buffer's stencil mask in `a`
     return D3DFMT_D24X8;
 }
@@ -140,7 +163,14 @@ struct GpuSurf final : Gpu::Owner {
     bool depth;
     D3DFORMAT fmt = D3DFMT_UNKNOWN;
     bool convert = false;
-    IDirect3DSurface9* surf = nullptr;     // the render target or depth-stencil surface
+    IDirect3DSurface9* surf = nullptr;     // the render target or depth-stencil surface (antialiasing:
+                                           // a Z buffer's is multisampled; a render target's is the resolved image)
+    // antialiasing=N, render targets: the multisampled surface Direct3D draws into, resolved
+    // into `surf` before anything reads that; and the CPU's changes on their way into it.
+    IDirect3DSurface9* ms = nullptr;
+    IDirect3DTexture9* msCopy = nullptr;
+    bool msNewer = false;  // `ms` has drawing `surf` lacks
+    bool msStale = false;  // `surf` has the CPU's changes `ms` lacks
     IDirect3DSurface9* sysmem = nullptr;   // read-back staging
     IDirect3DSurface9* upload = nullptr;   // upload staging (D3DPOOL_DEFAULT, lockable)
     // A DDBLT_DEPTHFILL waiting for the Z buffer's next use (it can't be written directly).
@@ -149,10 +179,14 @@ struct GpuSurf final : Gpu::Owner {
     float clearZ = 1.0f;
     // A palettized render target's palette (its surface's when last bound or read back).
     PaletteMap* pal = nullptr;
+    ToPixel* toPixel = nullptr;  // a converted RGB render target's read-back table
     unsigned serial = 0;  // counts what Direct3D drew into it (a texture copy of it is current while equal)
 
     GpuSurf(Gpu* g, Buffer* b, bool d) : gpu(g), buf(b), depth(d) {}
-    ~GpuSurf() { delete pal; }
+    ~GpuSurf() {
+        delete pal;
+        delete toPixel;
+    }
     void SetPalette(const Surface* s) {
         if (!buf->fmt.pal8) return;
         const PALETTEENTRY* p = s->EffectivePalette();
@@ -164,7 +198,11 @@ struct GpuSurf final : Gpu::Owner {
         if (surf) surf->Release();
         if (sysmem) sysmem->Release();
         if (upload) upload->Release();
-        surf = sysmem = upload = nullptr;
+        if (ms) ms->Release();
+        if (msCopy) msCopy->Release();
+        surf = sysmem = upload = ms = nullptr;
+        msCopy = nullptr;
+        msNewer = msStale = false;
     }
     // Device reset: D3DPOOL_DEFAULT goes, and what only the GPU had with it.
     void ReleaseGpuResources() override {
@@ -178,6 +216,30 @@ struct GpuSurf final : Gpu::Owner {
     }
 };
 
+// antialiasing=N: the multisample type every render target and Z buffer gets (they are made
+// 32-bit and 24-bit then, the formats every GPU multisamples), the largest the GPU has up
+// to N; D3DMULTISAMPLE_NONE without the option or support. Decided once.
+static D3DMULTISAMPLE_TYPE MsaaType(IDirect3DDevice9* d) {
+    static int known = -1;  // Gpu lock
+    if (known >= 0) return D3DMULTISAMPLE_TYPE(known);
+    known = 0;
+    if (g_config.msaa < 2) return D3DMULTISAMPLE_NONE;
+    IDirect3D9* d3d = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp;
+    if (FAILED(d->GetCreationParameters(&cp)) || FAILED(d->GetDirect3D(&d3d))) return D3DMULTISAMPLE_NONE;
+    const D3DFORMAT fmts[] = {D3DFMT_X8R8G8B8, D3DFMT_A8R8G8B8, D3DFMT_D24X8, D3DFMT_D24S8};
+    for (int n = std::min(g_config.msaa, 16); n >= 2 && !known; n--) {
+        bool all = true;
+        for (D3DFORMAT f : fmts)
+            if (FAILED(d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, cp.DeviceType, f, TRUE, D3DMULTISAMPLE_TYPE(n), nullptr)))
+                all = false;
+        if (all) known = n;
+    }
+    d3d->Release();
+    DD2D9_LOG("antialiasing: %dx%s", known, known ? "" : " (none: the GPU has no multisampling for these formats)");
+    return D3DMULTISAMPLE_TYPE(known);
+}
+
 // The buffer's render-target (or Z) surface, made if needed. Gpu lock held, device usable.
 static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth) {
     if (b->gpu && b->gpu->gpu != &gpu) return nullptr;  // another object's device (not expected)
@@ -188,10 +250,12 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
     GpuSurf* g = b->gpu;
     if (g->surf) return g;
     HRESULT hr;
+    const D3DMULTISAMPLE_TYPE msaa = MsaaType(d);
     if (depth) {
         g->fmt = DepthFormat(b->fmt);
-        hr = d->CreateDepthStencilSurface(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
-        if (FAILED(hr) && g->fmt != D3DFMT_D16) {
+        if (msaa) g->fmt = b->fmt.a ? D3DFMT_D24S8 : D3DFMT_D24X8;
+        hr = d->CreateDepthStencilSurface(b->w, b->h, g->fmt, msaa, 0, FALSE, &g->surf, nullptr);
+        if (FAILED(hr) && g->fmt != D3DFMT_D16 && !msaa) {
             g->fmt = D3DFMT_D16;
             hr = d->CreateDepthStencilSurface(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
         }
@@ -199,8 +263,18 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
     } else {
         const D3DFORMAT native = NativeFormat(b->fmt);
         g->convert = !IsRenderTargetFormat(native);
-        g->fmt = g->convert ? D3DFMT_X8R8G8B8 : native;
+        // render32=on: a 16-bit render target drawn in 32 bits (blending, fog and gradients
+        // without 16-bit banding), converted when the CPU reads it.
+        if ((g_config.render32 || msaa) && b->fmt.bpp == 16 && !b->fmt.pal8) g->convert = true;
+        g->fmt = g->convert ? (b->fmt.a && !b->fmt.pal8 ? D3DFMT_A8R8G8B8 : D3DFMT_X8R8G8B8) : native;
         hr = d->CreateRenderTarget(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
+        if (SUCCEEDED(hr) && msaa &&
+            FAILED(d->CreateRenderTarget(b->w, b->h, g->fmt, msaa, 0, FALSE, &g->ms, nullptr))) {
+            g->surf->Release();  // the Z buffers are multisampled: no target without it
+            g->surf = g->ms = nullptr;
+            hr = E_FAIL;
+        }
+        DD2D9_TRACE("Direct3D: render target %dx%d, %d-bit, as D3D9 format %d", b->w, b->h, int(b->fmt.bpp), int(g->fmt));
     }
     if (FAILED(hr)) {
         DD2D9_LOG("Direct3D: %s %dx%d (format %d) failed: 0x%08lx", depth ? "CreateDepthStencilSurface" : "CreateRenderTarget",
@@ -209,6 +283,68 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
         return nullptr;
     }
     return g;
+}
+
+// antialiasing: the CPU's changes (in `surf`) into the multisampled surface, drawn as a
+// quad from a texture copy of `surf` (StretchRect can't write a multisampled surface). The
+// device's state is kept around it (a state block): it happens in the middle of the game's
+// drawing. Gpu lock held.
+static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
+    g->msStale = false;
+    const Buffer* b = g->buf;
+    if (!g->msCopy && FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &g->msCopy, nullptr))) {
+        g->msCopy = nullptr;
+        return;
+    }
+    IDirect3DSurface9* level = nullptr;
+    if (FAILED(g->msCopy->GetSurfaceLevel(0, &level))) return;
+    gpu.CloseScene();
+    const HRESULT hr = d->StretchRect(g->surf, nullptr, level, nullptr, D3DTEXF_NONE);
+    level->Release();
+    if (FAILED(hr)) return;
+    IDirect3DStateBlock9* sb = nullptr;
+    if (FAILED(d->CreateStateBlock(D3DSBT_ALL, &sb))) return;
+    d->SetRenderTarget(0, g->ms);
+    d->SetDepthStencilSurface(nullptr);
+    const D3DVIEWPORT9 vp = {0, 0, DWORD(b->w), DWORD(b->h), 0.0f, 1.0f};
+    d->SetViewport(&vp);
+    d->SetPixelShader(nullptr);
+    d->SetVertexShader(nullptr);
+    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    d->SetTexture(0, g->msCopy);
+    for (DWORD i = 1; i < 8; i++) d->SetTexture(i, nullptr);
+    const DWORD tss[][2] = {{D3DTSS_COLOROP, D3DTOP_SELECTARG1}, {D3DTSS_COLORARG1, D3DTA_TEXTURE},
+                            {D3DTSS_ALPHAOP, D3DTOP_SELECTARG1}, {D3DTSS_ALPHAARG1, D3DTA_TEXTURE},
+                            {D3DTSS_TEXCOORDINDEX, 0}, {D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE}};
+    for (const auto& t : tss) d->SetTextureStageState(0, D3DTEXTURESTAGESTATETYPE(t[0]), t[1]);
+    d->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    d->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    const DWORD ss[][2] = {{D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MAGFILTER, D3DTEXF_POINT},
+                           {D3DSAMP_MIPFILTER, D3DTEXF_NONE}, {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP},
+                           {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP}, {D3DSAMP_SRGBTEXTURE, FALSE}};
+    for (const auto& t : ss) d->SetSamplerState(0, D3DSAMPLERSTATETYPE(t[0]), t[1]);
+    const DWORD rs[][2] = {{D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE},
+                           {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_FOGENABLE, FALSE},
+                           {D3DRS_STENCILENABLE, FALSE}, {D3DRS_SCISSORTESTENABLE, FALSE},
+                           {D3DRS_COLORWRITEENABLE, 0xF}, {D3DRS_FILLMODE, D3DFILL_SOLID}, {D3DRS_SRGBWRITEENABLE, FALSE},
+                           {D3DRS_CLIPPLANEENABLE, 0}, {D3DRS_SPECULARENABLE, FALSE}, {D3DRS_WRAP0, 0},
+                           {D3DRS_TEXTUREFACTOR, 0xFFFFFFFF}};
+    for (const auto& t : rs) d->SetRenderState(D3DRENDERSTATETYPE(t[0]), t[1]);
+    const float w = float(b->w), h = float(b->h);
+    const float q[4][6] = {{-0.5f, -0.5f, 0, 1, 0, 0}, {w - 0.5f, -0.5f, 0, 1, 1, 0},
+                           {-0.5f, h - 0.5f, 0, 1, 0, 1}, {w - 0.5f, h - 0.5f, 0, 1, 1, 1}};
+    gpu.OpenScene();
+    d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+    sb->Apply();
+    sb->Release();
+}
+
+// antialiasing: what Direct3D drew, into the resolved image (before it is read).
+static void Resolve(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
+    if (!g->ms || !g->msNewer || !g->surf) return;
+    gpu.CloseScene();
+    d->StretchRect(g->ms, nullptr, g->surf, nullptr, D3DTEXF_NONE);
+    g->msNewer = false;
 }
 
 // The CPU copy into a render target.
@@ -228,6 +364,7 @@ static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     g->upload->UnlockRect();
     gpu.CloseScene();
     d->StretchRect(g->upload, nullptr, g->surf, nullptr, D3DTEXF_NONE);
+    if (g->ms) g->msStale = true;  // copied on into the multisampled one when drawn into
 }
 
 // A render target back into the CPU copy.
@@ -235,6 +372,7 @@ static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     Buffer* b = g->buf;
     b->cpuStale = false;
     if (g->depth || !g->surf) return;
+    Resolve(gpu, d, g);
     if (!g->sysmem &&
         FAILED(d->CreateOffscreenPlainSurface(b->w, b->h, g->fmt, D3DPOOL_SYSTEMMEM, &g->sysmem, nullptr))) {
         g->sysmem = nullptr;
@@ -244,8 +382,9 @@ static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     if (FAILED(d->GetRenderTargetData(g->surf, g->sysmem))) return;
     D3DLOCKED_RECT lr;
     if (FAILED(g->sysmem->LockRect(&lr, nullptr, D3DLOCK_READONLY))) return;
+    if (g->convert && !b->fmt.pal8 && !g->toPixel) g->toPixel = new ToPixel(b->fmt);
     for (int y = 0; y < b->h; y++)
-        RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal);
+        RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal, g->toPixel);
     g->sysmem->UnlockRect();
     b->cpuSerial++;  // the CPU copy changed: a texture made from it is behind
 }
@@ -265,6 +404,7 @@ void GpuCpuAccess(Surface* s, bool write) {
 IDirect3DSurface9* GpuNewestSurface(Buffer* b) {
     GpuSurf* g = b->gpu;
     if (!g || !g->gpu || g->depth || !g->surf || !b->cpuStale) return nullptr;
+    if (IDirect3DDevice9* d = g->gpu->Device()) Resolve(*g->gpu, d, g);
     g->gpu->CloseScene();
     return g->surf;
 }
@@ -395,6 +535,7 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
             }
             if (t->rtTex) {
                 if (t->rtSrc != g || t->rtSerial != g->serial) {
+                    Resolve(gpu, d, g);
                     IDirect3DSurface9* level = nullptr;
                     if (SUCCEEDED(t->rtTex->GetSurfaceLevel(0, &level))) {
                         gpu.CloseScene();  // StretchRect: outside a scene
@@ -593,6 +734,8 @@ struct GpuContext::Impl final : Gpu::Owner {
     // as D3D9 has them (linear minification becomes anisotropic). D3D9's defaults: point, 1.
     DWORD minFilter[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD minFilterSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    DWORD magFilter[8] = {1, 1, 1, 1, 1, 1, 1, 1};  // texfilter=linear (D3D9's default: point)
+    DWORD magFilterSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD maxAniso[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD anisoLimit = 0;  // anisotropy= within what the GPU can (0: not known yet, or none)
@@ -655,6 +798,7 @@ void GpuContext::SetSamplerState(DWORD stage, DWORD type, DWORD value) {
     if (stage < 8) {
         if (type == D3DSAMP_MIPFILTER) p_->mipFilter[stage] = p_->mipFilterSet[stage] = value;
         if (type == D3DSAMP_MINFILTER) p_->minFilter[stage] = p_->minFilterSet[stage] = value;
+        if (type == D3DSAMP_MAGFILTER) p_->magFilter[stage] = p_->magFilterSet[stage] = value;
         if (type == D3DSAMP_MAXANISOTROPY) p_->maxAniso[stage] = p_->maxAnisoSet[stage] = value;
     }
     if (p_->dev) p_->dev->SetSamplerState(stage, D3DSAMPLERSTATETYPE(type), value);
@@ -717,9 +861,15 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
         if (overwriteColor) rt->buf->gpuStale = false;
         else UploadSurf(gpu, dev, r);
     }
-    if (rebind || boundRt != r->surf) {
-        dev->SetRenderTarget(0, r->surf);
-        boundRt = r->surf;
+    if (r->ms && r->msStale) {
+        if (overwriteColor) r->msStale = false;
+        else CopyToMs(gpu, dev, r);
+        rebind = true;  // CopyToMs drew into it with no Z buffer
+    }
+    IDirect3DSurface9* target = r->ms ? r->ms : r->surf;
+    if (rebind || boundRt != target) {
+        dev->SetRenderTarget(0, target);
+        boundRt = target;
         dev->SetViewport(&vp);  // D3D9 resets it to the whole target; Direct3D 7 keeps its own
     }
     GpuSurf* zs = z ? EnsureSurf(gpu, dev, z->buf, true) : nullptr;
@@ -750,8 +900,8 @@ void GpuContext::Impl::BindTextures() {
     for (DWORD i = 0; i < 8; i++) {
         IDirect3DTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
         dev->SetTexture(i, t);
-        if (g_config.anisotropy > 1) {
-            if (!anisoLimit) {
+        if (g_config.anisotropy > 1 || g_config.texLinear) {
+            if (g_config.anisotropy > 1 && !anisoLimit) {
                 D3DCAPS9 caps = {};
                 anisoLimit = 1;
                 if (SUCCEEDED(dev->GetDeviceCaps(&caps)) && (caps.TextureFilterCaps & D3DPTFILTERCAPS_MINFANISOTROPIC))
@@ -760,19 +910,31 @@ void GpuContext::Impl::BindTextures() {
                           static_cast<unsigned long>(caps.MaxAnisotropy),
                           (caps.TextureFilterCaps & D3DPTFILTERCAPS_MINFANISOTROPIC) ? "anisotropic minification" : "none");
             }
-            // Only where the game filters smoothly: point (pixel art, sharp on purpose) stays.
-            // Not cut-outs either (colour-keyed or with alpha: trees, fences, sprites): the
-            // longer footprint reaches past their edges, wraps to the other side of the
-            // texture and draws a line of it into the transparent part (NFS III's trees), and
-            // they are mostly seen face-on, where anisotropy changes nothing.
+            // Cut-outs (colour-keyed or with alpha: trees, fences, sprites) keep the game's
+            // filtering: made linear, their transparent texels blend into the edges (dark
+            // fringes); made anisotropic, the longer footprint reaches past their edges, wraps
+            // to the other side of the texture and draws a line of it into the transparent part
+            // (NFS III's trees), and they are mostly seen face-on, where it changes nothing.
             const bool cutout = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->keyed));
+            DWORD wantMin = minFilter[i], wantMag = magFilter[i];
+            // texfilter=linear: point-filtered textures drawn linear.
+            if (g_config.texLinear && t && !cutout) {
+                if (wantMin == D3DTEXF_POINT) wantMin = D3DTEXF_LINEAR;
+                if (wantMag == D3DTEXF_POINT) wantMag = D3DTEXF_LINEAR;
+            }
+            // anisotropy=N: only where the filtering is smooth: point (pixel art, sharp on
+            // purpose) stays.
             const bool smooth = t && anisoLimit > 1 && !cutout &&
-                                (minFilter[i] == D3DTEXF_LINEAR || minFilter[i] == D3DTEXF_ANISOTROPIC);
-            const DWORD wantMin = smooth ? DWORD(D3DTEXF_ANISOTROPIC) : minFilter[i];
+                                (wantMin == D3DTEXF_LINEAR || wantMin == D3DTEXF_ANISOTROPIC);
+            if (smooth) wantMin = D3DTEXF_ANISOTROPIC;
             const DWORD wantAniso = smooth ? std::max(anisoLimit, maxAniso[i]) : maxAniso[i];
             if (wantMin != minFilterSet[i]) {
                 dev->SetSamplerState(i, D3DSAMP_MINFILTER, wantMin);
                 minFilterSet[i] = wantMin;
+            }
+            if (wantMag != magFilterSet[i]) {
+                dev->SetSamplerState(i, D3DSAMP_MAGFILTER, wantMag);
+                magFilterSet[i] = wantMag;
             }
             if (wantAniso != maxAnisoSet[i]) {
                 dev->SetSamplerState(i, D3DSAMP_MAXANISOTROPY, wantAniso);
@@ -803,6 +965,7 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
     if (flags & D3DCLEAR_TARGET) {
         p.rt->buf->cpuStale = true;
+        p.rt->buf->gpu->msNewer = p.rt->buf->gpu->ms != nullptr;
         p.rt->buf->gpu->serial = ++g_drawSerial;
         p.rt->buf->gpuStale = false;
     }
@@ -910,6 +1073,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     (void)indexCount;
     p.rt->buf->cpuStale = true;
     p.rt->buf->gpuStale = false;
+    p.rt->buf->gpu->msNewer = p.rt->buf->gpu->ms != nullptr;
     p.rt->buf->gpu->serial = ++g_drawSerial;
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
 }

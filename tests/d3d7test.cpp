@@ -279,6 +279,56 @@ static int Run(int w, int h, int bpp) {
                   hi - lo > 0x60 ? "stripes kept (anisotropic)" : "blurred (isotropic)");
         }
         if (checker) checker->Release();
+
+        // Eight additive passes of a faint blue (3 of 255): a 16-bit render target rounds
+        // each one back to nothing; drawn in 32 bits (render32=on) they add up (24). (Wine's
+        // OpenGL renderer keeps 16-bit targets at higher precision: they add up there too.)
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_ONE);
+        dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ONE);
+        dev->BeginScene();
+        for (int i = 0; i < 8; i++) {
+            Vertex f[4] = {{0, 0, 0.5f, 1, 0xFF000003}, {16, 0, 0.5f, 1, 0xFF000003},
+                           {0, 16, 0.5f, 1, 0xFF000003}, {16, 16, 0.5f, 1, 0xFF000003}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, f, 4, 0);
+        }
+        dev->EndScene();
+        dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, FALSE);
+        const DWORD acc = pixel(8, 8) & 0xFF;
+        CHECK(true, "eight faint additive passes: blue %lu, %s", acc,
+              acc >= 0x10 ? "accumulated (the target keeps more than 16 bits)" : "rounded away (16-bit precision)");
+
+        // A white triangle with a slanted edge on black: without antialiasing every pixel on
+        // the edge is black or white; with it (antialiasing=N) some are in between.
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+        dev->BeginScene();
+        Vertex tri[3] = {{0, 0, 0.5f, 1, 0xFFFFFFFF}, {40, 0, 0.5f, 1, 0xFFFFFFFF}, {0, 31, 0.5f, 1, 0xFFFFFFFF}};
+        dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, tri, 3, 0);
+        dev->EndScene();
+        int between = 0;
+        for (int y = 0; y < 30; y++)
+            for (int x = 0; x < 40; x++) {
+                const DWORD g = (pixel(x, y) >> 8) & 0xFF;
+                if (g > 0x10 && g < 0xF0) between++;
+            }
+        CHECK(true, "a slanted triangle edge: %d pixels in between, %s", between,
+              between ? "antialiased" : "not antialiased");
+
+        // 2D written into the back buffer between 3D draws, with no clear: the drawing after
+        // it keeps it (with antialiasing, it is copied into the multisampled surface).
+        DDBLTFX fill = {};
+        fill.dwSize = sizeof(fill);
+        fill.dwFillColor = 0xFFFFFFFF;  // white in any RGB layout
+        RECT block = {100, 100, 108, 108};
+        back->Blt(&block, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fill);
+        dev->BeginScene();
+        Vertex red[3] = {{200, 100, 0.5f, 1, 0xFFFF0000}, {240, 100, 0.5f, 1, 0xFFFF0000}, {200, 140, 0.5f, 1, 0xFFFF0000}};
+        dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, red, 3, 0);
+        dev->EndScene();
+        const DWORD kept = pixel(104, 104), drawn = pixel(205, 105), triangle = pixel(8, 4);
+        CHECK(kept == 0xFFFFFF && drawn == 0xFF0000 && triangle == 0xFFFFFF,
+              "2D between 3D draws kept: block 0x%06lx, new triangle 0x%06lx, earlier triangle 0x%06lx", kept, drawn, triangle);
     }
 
     int flipErrors = 0, sceneErrors = 0, gdiErrors = 0;

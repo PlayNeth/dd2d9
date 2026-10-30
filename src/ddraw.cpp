@@ -936,6 +936,31 @@ void DDraw::PaceFlip() {
     lastFlip_ = now.QuadPart;
 }
 
+// fpslimit=N: frames spaced 1/N s apart. A frame later than a whole period starts the
+// count again (no burst of frames to catch up).
+void LimitFrame() {
+    if (g_config.fpsLimit <= 0) return;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static int64_t next;
+    static LARGE_INTEGER freq;
+    AcquireSRWLockExclusive(&lock);
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    const int64_t period = freq.QuadPart / g_config.fpsLimit;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (!next || now.QuadPart > next + period) next = now.QuadPart;
+    for (;;) {
+        const int64_t left = next - now.QuadPart;
+        if (left <= 0) break;
+        const double ms = double(left) * 1000.0 / double(freq.QuadPart);
+        if (ms > 2.0) Sleep(DWORD(ms - 1.5));  // Sleep's granularity: the last bit spun
+        else Sleep(0);
+        QueryPerformanceCounter(&now);
+    }
+    next += period;
+    ReleaseSRWLockExclusive(&lock);
+}
+
 // ---------------------------------------------------------------- API
 
 HRESULT DDraw::Initialize(GUID*) {

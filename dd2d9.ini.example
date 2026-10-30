@@ -71,6 +71,29 @@ cpu=2000
 ; 0: all.
 cpus=1
 
+; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too
+; fast without vsync or busy a whole core. Paced at Flip, and at blits covering half the
+; primary or more (games that show frames that way).
+fpslimit=0
+
+; Direct3D in 32 bits for 16-bit games: their render targets are drawn in 32 bits on the
+; GPU (blending, fog and gradients without 16-bit banding) and converted when the game
+; reads them. off (default) / on
+render32=off
+; 24-bit Z buffers for games that ask for 16-bit ones: less z-fighting (flickering where
+; surfaces meet) in the distance. off (default) / on
+depth24=off
+
+; Antialiasing (MSAA): 0 (off, default), 2, 4 or 8 samples per pixel, at most what the GPU
+; can. Render targets are drawn in 32 bits and Z buffers in 24 then. 2D a game writes into
+; the back buffer between its 3D draws is kept; each time that happens costs a copy.
+antialiasing=0
+
+; Texture filtering: game (default) as the game sets it; linear: point-filtered textures
+; drawn bilinear (blocky textures smoothed). Cut-outs (colour-keyed or with alpha) keep the
+; game's filtering: their transparent texels would blend into the edges.
+texfilter=game
+
 ; Mipmaps for textures the game gave none (most of DX7 and older): the GPU makes the smaller
 ; levels and filters with them, so textures don't shimmer and crawl in the distance. Softer
 ; than the hardware of the era showed. Cut-outs (colour-keyed or with an alpha channel) are

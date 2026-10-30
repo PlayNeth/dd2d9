@@ -1359,6 +1359,7 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         dd->PaceFlip();
         for (int i = 1; i < intervals; i++) dd->PaceFlip();
     }
+    if (isPrimary) LimitFrame();
     return DD_OK;
 }
 

@@ -229,6 +229,13 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
                RectText(dstRect).s, static_cast<void*>(src), RectText(srcRect).s, flags, isPrimary ? " (primary)" : "",
                fx ? fx->dwDDFX : 0, fx ? fx->dwFillColor : 0);
     if (CantDraw() || (src && src->CantDraw(false))) return DDERR_SURFACELOST;
+    // fpslimit: a game that shows its frames by blitting them to the primary (windowed, or
+    // without a flip chain) is paced at blits covering half of it or more.
+    if (g_config.fpsLimit > 0 && isPrimary && src && src != this) {
+        const int64_t whole = int64_t(buf->w) * buf->h;
+        const int64_t area = dstRect ? int64_t(dstRect->right - dstRect->left) * (dstRect->bottom - dstRect->top) : whole;
+        if (area * 2 >= whole) RunWhenUnlocked([](void*) { LimitFrame(); }, nullptr);
+    }
     // 0x80000000 is the Direct3D 8/9 runtime's own flag (window clipping, with the
     // destination-alpha bits); ddraw.dll takes it off first.
     if (flags & 0x80000000) flags &= ~0x8000000Bu;

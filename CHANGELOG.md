@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.7
+- **`fpslimit=N`**: frames paced to N per second at Flip and at blits covering half the
+  primary or more; a frame later than a whole period starts the count again (no burst).
+- **`render32=on`**: 16-bit render targets drawn in 32 bits on the GPU, converted when the
+  CPU reads them. Read-back conversion to any RGB layout now goes through a table (the
+  same rounding as before).
+- **`depth24=on`**: 16-bit Z buffers made 24-bit on the GPU.
+- **`antialiasing=2|4|8`**: multisampled render targets and Z buffers (32-bit and 24-bit,
+  the formats every GPU multisamples; the largest sample count the GPU has, up to N).
+  Direct3D draws into the multisampled surface, resolved before anything reads it (the
+  CPU, the presenter, a texture copy). 2D the CPU writes between 3D draws is drawn back in
+  as a quad, the game's device state kept around it in a state block; a full clear skips it.
+- **`texfilter=linear`**: point-filtered textures drawn bilinear, cut-outs excepted.
+- `d3d7test` checks faint additive passes (16- vs 32-bit precision), a slanted triangle
+  edge (antialiased or not) and 2D written between 3D draws (kept).
+
 ## 0.9.6
 - `mipmaps=on` leaves textures with an alpha channel alone too, as it did colour-keyed
   ones: their transparent texels blurred into the smaller levels and drew lines through
