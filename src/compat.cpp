@@ -335,6 +335,96 @@ void SetAffinity() {
     DD2D9_LOG("cpus: the game runs on %d processor(s) (mask 0x%lx)", count, static_cast<unsigned long>(mask));
 }
 
+// ---------------------------------------------------------------- desktopbpp=
+
+// What a 16-bit (or 24-bit) desktop answered through GDI and EnumDisplaySettings: the colour
+// depth, for display device contexts and the current (or registry) display settings. Games
+// check it there too, as Moto Racer checks it through DirectDraw (GetDisplayMode, answered in
+// ddraw.cpp). While the game has a display mode of its own, that mode's depth, as on XP. A
+// palettized depth (8 bits) is never faked: GDI would then have to behave as a palette device.
+using GetDeviceCapsFn = int(WINAPI*)(HDC, int);
+using EnumDisplaySettingsAFn = BOOL(WINAPI*)(LPCSTR, DWORD, DEVMODEA*);
+using EnumDisplaySettingsWFn = BOOL(WINAPI*)(LPCWSTR, DWORD, DEVMODEW*);
+using EnumDisplaySettingsExAFn = BOOL(WINAPI*)(LPCSTR, DWORD, DEVMODEA*, DWORD);
+using EnumDisplaySettingsExWFn = BOOL(WINAPI*)(LPCWSTR, DWORD, DEVMODEW*, DWORD);
+GetDeviceCapsFn g_getDeviceCaps;
+EnumDisplaySettingsAFn g_enumDisplaySettingsA;
+EnumDisplaySettingsWFn g_enumDisplaySettingsW;
+EnumDisplaySettingsExAFn g_enumDisplaySettingsExA;
+EnumDisplaySettingsExWFn g_enumDisplaySettingsExW;
+
+int ShownBppOrZero() {
+    const int b = ShownDisplayBpp();
+    return b >= 16 ? b : 0;
+}
+
+int WINAPI HookGetDeviceCaps(HDC dc, int index) {
+    const int real = g_getDeviceCaps(dc, index);
+    if (index != BITSPIXEL && index != NUMCOLORS) return real;
+    const DWORD type = GetObjectType(dc);
+    if ((type != OBJ_DC && type != OBJ_MEMDC) || g_getDeviceCaps(dc, TECHNOLOGY) != DT_RASDISPLAY) return real;
+    const int bpp = ShownBppOrZero();
+    if (!bpp) return real;
+    return index == BITSPIXEL ? bpp : -1;  // NUMCOLORS: -1 above 8 bits
+}
+
+// The current or registry settings of the primary display (null or its name): the depth.
+template <typename Dev, typename Ch>
+void FixDepth(const Ch* device, DWORD mode, Dev* dm, BOOL ok) {
+    if (!ok || !dm || (mode != ENUM_CURRENT_SETTINGS && mode != ENUM_REGISTRY_SETTINGS)) return;
+    if (device && device[0]) {  // named: only if that is the primary display
+        bool primary = false;
+        DISPLAY_DEVICEW dd = {};
+        dd.cb = sizeof(dd);
+        for (DWORD n = 0; !primary && EnumDisplayDevicesW(nullptr, n, &dd, 0); n++, dd.cb = sizeof(dd)) {
+            if (!(dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) continue;
+            bool same = true;  // compared as text, case-insensitively (ASCII names)
+            for (int i = 0; i < 32 && same; i++) {
+                const wchar_t a = dd.DeviceName[i];
+                const wchar_t b = wchar_t(static_cast<unsigned>(device[i]) & (sizeof(Ch) == 1 ? 0xFFu : 0xFFFFu));
+                if (towupper(a) != towupper(b)) same = false;
+                else if (!a) break;
+            }
+            primary = same;
+        }
+        if (!primary) return;
+    }
+    if (const int bpp = ShownBppOrZero()) dm->dmBitsPerPel = DWORD(bpp);
+}
+
+BOOL WINAPI HookEnumDisplaySettingsA(LPCSTR device, DWORD mode, DEVMODEA* dm) {
+    const BOOL ok = g_enumDisplaySettingsA(device, mode, dm);
+    FixDepth(device, mode, dm, ok);
+    return ok;
+}
+BOOL WINAPI HookEnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW* dm) {
+    const BOOL ok = g_enumDisplaySettingsW(device, mode, dm);
+    FixDepth(device, mode, dm, ok);
+    return ok;
+}
+BOOL WINAPI HookEnumDisplaySettingsExA(LPCSTR device, DWORD mode, DEVMODEA* dm, DWORD flags) {
+    const BOOL ok = g_enumDisplaySettingsExA(device, mode, dm, flags);
+    FixDepth(device, mode, dm, ok);
+    return ok;
+}
+BOOL WINAPI HookEnumDisplaySettingsExW(LPCWSTR device, DWORD mode, DEVMODEW* dm, DWORD flags) {
+    const BOOL ok = g_enumDisplaySettingsExW(device, mode, dm, flags);
+    FixDepth(device, mode, dm, ok);
+    return ok;
+}
+
+ImportHook kDepthHooks[] = {
+    {"gdi32", "GetDeviceCaps", reinterpret_cast<void*>(HookGetDeviceCaps), reinterpret_cast<void**>(&g_getDeviceCaps)},
+    {"user32", "EnumDisplaySettingsA", reinterpret_cast<void*>(HookEnumDisplaySettingsA),
+     reinterpret_cast<void**>(&g_enumDisplaySettingsA)},
+    {"user32", "EnumDisplaySettingsW", reinterpret_cast<void*>(HookEnumDisplaySettingsW),
+     reinterpret_cast<void**>(&g_enumDisplaySettingsW)},
+    {"user32", "EnumDisplaySettingsExA", reinterpret_cast<void*>(HookEnumDisplaySettingsExA),
+     reinterpret_cast<void**>(&g_enumDisplaySettingsExA)},
+    {"user32", "EnumDisplaySettingsExW", reinterpret_cast<void*>(HookEnumDisplaySettingsExW),
+     reinterpret_cast<void**>(&g_enumDisplaySettingsExW)},
+};
+
 // Functions looked up at run time (games that also ran on Windows 95 find
 // GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's.
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
@@ -344,7 +434,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[3];
+HookTable g_tables[4];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = g_getProcAddress(m, name);
@@ -367,12 +457,17 @@ void InstallCompatHooks(bool inLoaderLock) {
     if (g_config.ramMB) n += PatchGameModules(kMemoryHooks, sizeof(kMemoryHooks) / sizeof(kMemoryHooks[0]), inLoaderLock);
     if (g_config.cpuMHz) n += PatchGameModules(kCpuHooks, sizeof(kCpuHooks) / sizeof(kCpuHooks[0]), inLoaderLock);
     if (g_affinity) n += PatchGameModules(kCpusHooks, sizeof(kCpusHooks) / sizeof(kCpusHooks[0]), inLoaderLock);
+    const bool depth = g_config.desktopBpp != 32;
+    if (depth) n += PatchGameModules(kDepthHooks, sizeof(kDepthHooks) / sizeof(kDepthHooks[0]), inLoaderLock);
     g_tables[0] = {kMemoryHooks, sizeof(kMemoryHooks) / sizeof(kMemoryHooks[0]), g_config.ramMB != 0};
     g_tables[1] = {kCpuHooks, sizeof(kCpuHooks) / sizeof(kCpuHooks[0]), g_config.cpuMHz != 0};
     g_tables[2] = {kCpusHooks, sizeof(kCpusHooks) / sizeof(kCpusHooks[0]), g_affinity != 0};
-    if (g_tables[0].on || g_tables[1].on || g_tables[2].on)
+    g_tables[3] = {kDepthHooks, sizeof(kDepthHooks) / sizeof(kDepthHooks[0]), depth};
+    if (g_tables[0].on || g_tables[1].on || g_tables[2].on || g_tables[3].on)
         n += PatchGameModules(kProcHooks, sizeof(kProcHooks) / sizeof(kProcHooks[0]), inLoaderLock);
-    if (n) DD2D9_LOG("compat: %u imports patched (ram=%d cpu=%d cpus=%d)", n, g_config.ramMB, g_config.cpuMHz, g_config.cpus);
+    if (n)
+        DD2D9_LOG("compat: %u imports patched (ram=%d cpu=%d cpus=%d desktopbpp=%d)", n, g_config.ramMB, g_config.cpuMHz,
+                  g_config.cpus, g_config.desktopBpp);
 }
 
 }  // namespace dd2d9

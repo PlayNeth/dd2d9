@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.0.0
+First public release. Since 0.9.21:
+- **`desktopbpp=` also answers GDI and EnumDisplaySettings** (`GetDeviceCaps` BITSPIXEL and
+  NUMCOLORS on display and memory device contexts, the current and registry settings of
+  the primary display), for games that check the desktop there rather than through
+  DirectDraw. While the game has a display mode of its own, its depth is reported, as on
+  XP; an 8-bit one is left real (GDI would have to act as a palette device). The imports
+  are patched only when `desktopbpp` isn't 32.
+- **`lockwhole=on`**: a Lock of a rectangle counts as a change to the whole surface (the
+  GPU copy and the screen). For a game that writes outside the rectangle it locked, as
+  XP's memory let it; off by default (since 0.9.18 only the rectangle reaches the GPU).
+- **log=2 logs Direct3D 3 execute buffers** (one line per Execute: vertices and the
+  instructions it holds) **and GetDisplayMode** (when its answer changes). Both of Moto
+  Racer's problems were invisible at log=2 before.
+- The Wine test baseline is brought up to date.
+
 ## 0.9.21
 - Moto Racer's menu, continued: rhw that are tiny but not 0 (denormals, which the GPU takes
   as 0) count as bad too, and an untextured draw whose rhw differ over 10000 times gets

@@ -1126,7 +1126,9 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
         }
     }
     GdiFlush();
-    CpuAccess(!(flags & DDLOCK_READONLY), &area);  // what Direct3D drew is read back first
+    // What Direct3D drew is read back first. lockwhole=on: the write may be anywhere (a game
+    // writing past the rectangle it locked, which XP's memory let it).
+    CpuAccess(!(flags & DDLOCK_READONLY), g_config.lockWhole ? nullptr : &area);
     uint8_t* p = buf->bits + area.top * buf->pitch + area.left * LONG(buf->fmt.Bytes());
     if (fast) {
     } else if (r) {
@@ -1137,7 +1139,9 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     }
     FillLockDesc(d, p);
     // While locked, the presenter treats this area as changing (see Presenter::Loop).
-    if (lockCount == 0 || (dcOut && lockCount == 1)) {
+    if (g_config.lockWhole) {
+        lockArea = {0, 0, buf->w, buf->h};
+    } else if (lockCount == 0 || (dcOut && lockCount == 1)) {
         lockArea = area;
     } else {
         lockArea = {std::min(lockArea.left, area.left), std::min(lockArea.top, area.top),
@@ -1198,9 +1202,10 @@ HRESULT Surface::Unlock(void* pointer, const RECT* rect, int version) {
     // The area still locked, for the presenter.
     lockArea = wholeLocked || fastLocked ? RECT{0, 0, buf->w, buf->h} : RECT{0, 0, 0, 0};
     for (const LockRec& k : rectLocks) UnionRect(&lockArea, &lockArea, &k.r);
+    if (g_config.lockWhole && lockCount > 0) lockArea = {0, 0, buf->w, buf->h};
     if (!readOnly) {
         BumpUniqueness();
-        MarkDirtyIfVisible(&area);
+        MarkDirtyIfVisible(g_config.lockWhole ? nullptr : &area);
     }
     return CantDraw() ? DDERR_SURFACELOST : DD_OK;  // unlocked either way, as ddraw.dll
 }

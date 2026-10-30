@@ -252,6 +252,24 @@ void TakeSnapshot(ULONGLONG now) {  // g_lock held
 }  // namespace
 
 void GameImageChanged() { g_snapDirty.store(true); }
+
+// desktopbpp=: the colour depth GDI and EnumDisplaySettings report (compat.cpp): the game's
+// display mode's while it has one, else the desktop's as desktopbpp= says. Never waits for
+// g_lock (GDI is called from window procedures): the last answer when another thread has it.
+int ShownDisplayBpp() {
+    static std::atomic<int> last{0};
+    if (TryEnterCriticalSection(&g_lock)) {
+        const DDraw* d = g_exclusiveDD;
+        DWORD w, h, bpp;
+        if (d) d->DisplayMode(&w, &h, &bpp);
+        else bpp = DWORD(g_config.desktopBpp);
+        LeaveCriticalSection(&g_lock);
+        last.store(int(bpp));
+        if (g_deferredCount && !LockHeldByMe()) RunDeferred();
+    }
+    const int b = last.load();
+    return b ? b : g_config.desktopBpp;
+}
 namespace {
 // GameImageChanged at the end of a scope that moves or resizes the game's window.
 struct ImageChangedAtExit {
@@ -1500,6 +1518,12 @@ HRESULT DDraw::GetDisplayMode(void* desc, int version) {
     dm.dmSize = sizeof(dm);
     d.dwRefreshRate = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 0;
     f.ToDDPF(&d.ddpfPixelFormat);
+    static DWORD lastLogged[3];  // g_lock: logged when the answer changes (games ask every frame)
+    if (lastLogged[0] != w || lastLogged[1] != h || lastLogged[2] != bpp) {
+        DD2D9_TRACE("GetDisplayMode -> %lux%lu, %lu bpp%s", w, h, bpp,
+                    modeSet_ ? " (the game's mode)" : g_config.desktopBpp != 32 ? " (the desktop, desktopbpp=)" : " (the desktop)");
+        lastLogged[0] = w, lastLogged[1] = h, lastLogged[2] = bpp;
+    }
     DescOut(d, desc);  // only as much as the caller's structure holds
     // ddraw.dll then reports the size of this interface version's structure.
     *static_cast<DWORD*>(desc) = version >= 4 ? sizeof(DDSURFACEDESC2) : sizeof(DDSURFACEDESC);

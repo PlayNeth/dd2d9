@@ -1146,6 +1146,36 @@ HRESULT Device::CreateExecuteBufferI(D3DEXECUTEBUFFERDESC* d, IDirect3DExecuteBu
 }
 
 // Execute (C §6.1): the viewport is current for the call.
+// log=2: one line per Execute, what its instruction stream holds (walked in order, branches
+// not followed): the opcodes with their record counts, triangles and vertices processed.
+static void TraceExecute(const ExecBuf* eb, DWORD flags) {
+    static const char* const kOps[] = {"?", "POINT", "LINE", "TRIANGLE", "MATRIXLOAD", "MATRIXMULTIPLY",
+                                       "STATETRANSFORM", "STATELIGHT", "STATERENDER", "PROCESSVERTICES",
+                                       "TEXTURELOAD", "EXIT", "BRANCHFORWARD", "SPAN", "SETSTATUS"};
+    DWORD counts[15] = {};
+    const D3DEXECUTEDATA& ed = eb->data;
+    const uint8_t* base = eb->mem.data();
+    const size_t size = eb->mem.size();
+    size_t pos = ed.dwInstructionOffset;
+    while (pos + sizeof(D3DINSTRUCTION) <= size) {
+        const auto* ins = reinterpret_cast<const D3DINSTRUCTION*>(base + pos);
+        const DWORD op = ins->bOpcode < 15 ? ins->bOpcode : 0;
+        counts[op] += ins->wCount;
+        if (ins->bOpcode == D3DOP_EXIT) break;
+        pos += sizeof(D3DINSTRUCTION) + size_t(ins->bSize) * ins->wCount;
+    }
+    std::string ops;
+    char part[48];
+    for (DWORD i = 1; i < 15; i++) {
+        if (!counts[i]) continue;
+        snprintf(part, sizeof(part), "%s%s x%lu", ops.empty() ? " " : ", ", kOps[i], static_cast<unsigned long>(counts[i]));
+        ops += part;
+    }
+    DD2D9_TRACE("Execute %p (%s): %lu vertices,%s", static_cast<const void*>(eb),
+                flags == D3DEXECUTE_CLIPPED ? "clipped" : "unclipped", static_cast<unsigned long>(ed.dwVertexCount),
+                ops.c_str());
+}
+
 HRESULT Device::ExecuteE(ExecBuf* eb, Viewport* vp, DWORD flags) {
     if (!eb) return DDERR_INVALIDOBJECT;
     Guard l;
@@ -1163,6 +1193,7 @@ HRESULT Device::ExecuteE(ExecBuf* eb, Viewport* vp, DWORD flags) {
     }
     // XP leaves the viewport current, unreferenced, on the errors below; restored here (a
     // later SetCurrentViewport would release a reference never taken).
+    if (LogLevel() >= 2) TraceExecute(eb, flags);
     HRESULT hr = eb->dev != this ? DDERR_INVALIDPARAMS : eb->locked ? D3DERR_EXECUTE_LOCKED : ExecuteI(eb, flags);
     cur = prev;
     return hr;

@@ -106,7 +106,9 @@ isn't needed or supported any more (0.9.0).
   would answer, through its imports (as for the mouse). `ram`: Windows reports 2 GB of
   memory and a 4 GB page file to programs that aren't large-address-aware, and old games
   overflow adding to them and claim there isn't enough memory; dd2d9 reports 1 GB by
-  default, and pins the game to one processor (`cpus=1`), as the PCs of the era had. `cpu` sets the clock in the registry (2 GHz by
+  default, and pins the game to one processor (`cpus=1`), as the PCs of the era had.
+  `desktopbpp=16` tells games that check for a 16-bit desktop that they have one. `cpu`
+  sets the clock in the registry (2 GHz by
   default), but games that time the processor with `RDTSC` measure the real one (an
   instruction a DLL can't intercept), and one that times itself with the registry's figure
   runs at the wrong speed: `cpu=0` gives it the real clock.
@@ -175,6 +177,8 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `vram` | `512`: MB of video memory DirectDraw reports (`GetCaps`, `GetAvailableVidMem`), `1`–`2047` |
 | `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
 | `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
+| `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about (DirectDraw's `GetDisplayMode`, GDI's `GetDeviceCaps`, `EnumDisplaySettings`), for games that refuse to start on a 32-bit desktop (Moto Racer); while the game has a display mode, that mode's depth |
+| `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside the rectangle it locked |
 | `fpslimit` | `0` (off); frames per second at most, for games that run too fast or use a whole core: paced at Flip, and at blits covering half the primary or more |
 | `render32` | `off`; `on`: 16-bit render targets drawn in 32 bits on the GPU (no banding in blending and fog), converted when the game reads them |
 | `depth24` | `off`; `on`: 16-bit Z buffers made 24-bit on the GPU (less z-fighting in the distance) |
@@ -185,7 +189,8 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance); cut-outs (colour-keyed or with alpha) are left alone |
 | `anisotropy` | `0` (off); `2`, `4`, `8` or `16`: anisotropic filtering on textures the game filters smoothly (linear), sharper at grazing angles (floors, roads); point-filtered and cut-out ones (colour-keyed or with alpha: trees, sprites) stay as they are |
 | `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered (lines at the edges of textures in 2D drawn through Direct3D) |
-| `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
+| `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, Direct3D 3 execute buffer and change of `GetDisplayMode`'s answer, the game window's messages and every failed call) |
+| `drawtrace` | `off`; `on`: one frame's Direct3D draws logged every 600 scenes (about 10 s), with their depth, blend and alpha-test states, texture and depth and rhw ranges |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
 
 `DD2D9_LOG=0|1|2` overrides `log`. Any other value of `DD2D9_LOG` is taken as a

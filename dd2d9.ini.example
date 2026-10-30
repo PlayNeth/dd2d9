@@ -76,7 +76,14 @@ cpus=1
 ; that then switch to their own mode (Moto Racer: "16 bit screen mode required"): set 16 for
 ; them, best in their own section ([game.exe]). A windowed game then draws in 16 bits, as on
 ; a 16-bit desktop; dd2d9 shows it either way.
+; Also what GDI (GetDeviceCaps) and EnumDisplaySettings report, for games that check there:
+; the game's own display mode's depth while it has one, else this.
 desktopbpp=32
+; A Lock of part of a surface counts as a change to all of it: off (default) or on. For a
+; game that locks a small rectangle and writes outside it (XP let it): with antialiasing or
+; Direct3D drawing into that surface, or on the screen, those writes would be left out.
+; Costs a whole-surface copy per lock.
+lockwhole=off
 
 ; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too
 ; fast without vsync or busy a whole core. Paced at Flip, and at blits covering half the

@@ -1272,16 +1272,14 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     }
     if ((fvf & 0x0E) == 0x04 && stride >= 16) {
         const auto* src = static_cast<const uint8_t*>(verts);
-        // rhw 0 (or negative, or not a number): hardware of the era interpolated colour
-        // across the screen without it, and used it for texture perspective only; Direct3D 9
-        // divides by it for every attribute, and a triangle of zeros comes out black (Moto
-        // Racer's menu letters: untextured, rhw 0 on part of the vertices). Such a draw gets
-        // one rhw for all its vertices when untextured (colour linear on the screen, as then),
-        // else the zeros the smallest valid rhw of the draw.
-        // Bad: 0, negative, not a number, or a denormal (the GPU takes it as 0). An untextured
-        // draw is also given one rhw where its rhw differ by more than 10000 times: the
-        // smallest weigh nothing in Direct3D 9's interpolation, and they flush to 0 as
-        // easily (Moto Racer's menu: 0.0039 beside values printed as 0.000000).
+        // Bad rhw: hardware of the era interpolated colour across the screen without rhw and
+        // used it for texture perspective only; Direct3D 9 weighs every attribute by it, and
+        // a triangle whose rhw are all 0 comes out black (Moto Racer's menu letters:
+        // untextured, rhw 0 or near it on part of the vertices). Bad: 0, negative, not a
+        // number, or a denormal (the GPU takes it as 0). A draw with any bad rhw gets rhw 1 on
+        // every vertex when untextured (colour linear on the screen, as then), else the bad
+        // ones the draw's smallest valid rhw. An untextured draw whose rhw differ over 10000
+        // times is flattened too: the smallest weigh nothing and flush to 0 as easily.
         bool clampZ = false, badRhw = false;
         float minRhw = 0.0f, maxRhw = 0.0f;
         for (UINT i = 0; i < vertexCount; i++) {

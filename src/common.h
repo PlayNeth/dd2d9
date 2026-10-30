@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.21"
+#define DD2D9_VERSION "1.0.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -38,6 +38,7 @@ struct Config {
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
     int cpus = 1;                  // processors the game runs on and is told about; 0: all
     int desktopBpp = 32;           // the desktop's colour depth DirectDraw reports (16, 24 or 32)
+    bool lockWhole = false;        // a Lock of a rectangle counts as a write to the whole surface
     int fpsLimit = 0;              // frames per second at most (Flip, full blits to the primary); 0: off
     bool texLinear = false;        // texfilter=linear: point-filtered textures drawn linear
     int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off
@@ -205,5 +206,7 @@ bool MouseFromGame(POINT* p);
 bool GameImage(RECT* image, SIZE* mode, HWND* window = nullptr, bool wait = true);
 // Something GameImage's result depends on changed (display state, the game window's place).
 void GameImageChanged();
+// desktopbpp=: the colour depth the game is told the screen has (its mode's, or desktopbpp=).
+int ShownDisplayBpp();
 
 }  // namespace dd2d9
