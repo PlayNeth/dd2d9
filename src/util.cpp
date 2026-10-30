@@ -151,6 +151,12 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (end && (end == v.c_str() || *end)) ok = false;
         else if (x < 0 || x > 1000) ok = false;
         else g_config.fpsLimit = int(x);
+    } else if (key == "wbuffer") {
+        int b;
+        if (v == "force") g_config.wbuffer = 2;
+        else if (v == "on" || v == "emulate") g_config.wbuffer = 1;
+        else if (ParseBool(v, &b)) g_config.wbuffer = b;
+        else ok = false;
     } else if (key == "texfilter") {
         if (v == "game" || v == "off" || v == "0") g_config.texLinear = false;
         else if (v == "linear" || v == "bilinear" || v == "on" || v == "1") g_config.texLinear = true;
@@ -314,10 +320,10 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
-    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s", g_config.fpsLimit, g_config.ramMB,
+    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s wbuffer=%s", g_config.fpsLimit, g_config.ramMB,
         g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
         g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa,
-        g_config.texLinear ? "linear" : "game");
+        g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off");
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }

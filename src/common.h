@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.8"
+#define DD2D9_VERSION "0.9.9"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -41,7 +41,8 @@ struct Config {
     bool texLinear = false;        // texfilter=linear: point-filtered textures drawn linear
     int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off
     bool render32 = false;         // 16-bit render targets drawn in 32 bits on the GPU
-    bool depth24 = false;          // 16-bit Z buffers made 24-bit on the GPU
+    bool depth24 = false;
+    int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too          // 16-bit Z buffers made 24-bit on the GPU
     bool mipmaps = false;          // the GPU makes smaller levels for textures the game gave none
     int anisotropy = 0;            // anisotropic filtering forced on smooth (linear) textures: 2-16; 0/1 off
     bool pixelCenter = false;      // alternatepixelcenter: Direct3D drawn half a pixel up and left

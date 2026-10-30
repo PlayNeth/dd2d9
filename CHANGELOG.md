@@ -3,6 +3,21 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.9
+- **W buffering** (`wbuffer=on`, default): Direct3D 3-7 devices report
+  `D3DPRASTERCAPS_WBUFFER` again, as most hardware of the era did, and `D3DZB_USEW` is
+  emulated where the GPU lacks it (every current one): the depth of transformed vertices
+  becomes 1 - k/w, linear across the screen over any flat surface, as a Z buffer
+  interpolates it. Coplanar polygons cut differently then agree, where the game's own z
+  (linear in w) fought: NFS III's headlights and light maps on the road, which every
+  wrapper showed hatched. A pass that doesn't write depth (light maps, decals) gets a
+  tolerance of 16 steps of a 24-bit depth buffer, which a 16-bit W buffer's coarser rounding
+  gave for free. 16-bit Z buffers are made 24-bit with it. `wbuffer=force` treats Z buffering
+  of transformed vertices the same way; `wbuffer=off` is the old behaviour. Untransformed
+  vertices drawn by Direct3D 7 with W buffering still use the Z buffer.
+- The log says when a game first draws with W buffering, and first uses ZBIAS.
+- `d3d7test` checks a floor drawn twice, cut two ways (z-fighting or not).
+
 ## 0.9.8
 - **`filter=sharp` on Windows**: Windows' Direct3D 9 refused its pixel shader (the texture
   read's coordinate register had components never written, which Wine doesn't check), and

@@ -96,6 +96,7 @@ inline D3DDEVICEDESC7 HalDesc(bool tnl) {
     p.dwMiscCaps = c.primMiscCaps & (D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW);
     p.dwRasterCaps = (c.rasterCaps & 0x0037A091) | D3DPRASTERCAPS_SUBPIXEL;  // DITHER ZTEST FOG* LODBIAS FOGRANGE ANISOTROPY WBUFFER WFOG ZFOG
     if (c.rasterCaps & 0x04000000) p.dwRasterCaps |= D3DPRASTERCAPS_ZBIAS;  // D3DPRASTERCAPS_DEPTHBIAS
+    if (g_config.wbuffer) p.dwRasterCaps |= D3DPRASTERCAPS_WBUFFER;  // emulated where D3D9 lacks it (gpures.cpp)
     p.dwZCmpCaps = c.zCmpCaps & 0xFF;
     p.dwSrcBlendCaps = c.srcBlendCaps & 0x1FFF;
     p.dwDestBlendCaps = c.destBlendCaps & 0x1FFF;

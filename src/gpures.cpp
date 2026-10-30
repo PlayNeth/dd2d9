@@ -147,7 +147,8 @@ static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, Palet
 // The Z buffer's Direct3D 9 format: closest depth, with stencil if it has some. depth24=on:
 // 24 bits for a 16-bit one too (less z-fighting in the distance).
 static D3DFORMAT DepthFormat(const Format& f) {
-    if (f.bpp == 16) return g_config.depth24 ? D3DFMT_D24X8 : D3DFMT_D16;
+    // (wbuffer=on: 24 bits too, the emulation's depths are 1/w, crowded near 1 in the distance.)
+    if (f.bpp == 16) return g_config.depth24 || g_config.wbuffer ? D3DFMT_D24X8 : D3DFMT_D16;
     if (f.a) return D3DFMT_D24S8;  // Format keeps a Z buffer's stencil mask in `a`
     return D3DFMT_D24X8;
 }
@@ -156,6 +157,9 @@ static D3DFORMAT DepthFormat(const Format& f) {
 
 // Counts drawing on every render target: a copy made at serial n is of that drawing alone.
 static unsigned g_drawSerial = 0;
+// Emulated W buffering's scale: 1/w times this is at most 1 for every vertex so far (it only
+// shrinks, when a nearer one comes). Gpu lock.
+static float g_wScale = 1.0f;
 
 struct GpuSurf final : Gpu::Owner {
     Gpu* gpu;
@@ -743,6 +747,10 @@ struct GpuContext::Impl final : Gpu::Owner {
     DWORD addrSet[8][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
     DWORD tci[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     bool cutoutStage[8] = {};
+    bool wEmulate = false;  // ZENABLE = D3DZB_USEW on a GPU without W buffering
+    bool zWrite = true;     // ZWRITEENABLE
+    float gameBias = 0.0f;  // the game's depth bias (ZBIAS); biasSet: as D3D9 has it
+    float biasSet = 0.0f;
     DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD anisoLimit = 0;  // anisotropy= within what the GPU can (0: not known yet, or none)
     // alternatepixelcenter: the game's projection, sent moved half a pixel at the next draw
@@ -794,6 +802,42 @@ bool GpuContext::Begin(bool* fresh) {
 }
 
 void GpuContext::SetRenderState(DWORD state, DWORD value) {
+    if (state == D3DRS_ZENABLE) {
+        // W buffering: D3D9's own where the GPU has it, else emulated for transformed
+        // vertices (Draw); the depth test itself is an ordinary Z buffer's.
+        p_->wEmulate = false;
+        if (value == D3DZB_USEW && p_->dev) {
+            static int logged;
+            D3DCAPS9 caps = {};
+            const bool native = SUCCEEDED(p_->dev->GetDeviceCaps(&caps)) && (caps.RasterCaps & D3DPRASTERCAPS_WBUFFER);
+            if (!native) {
+                p_->wEmulate = true;
+                value = D3DZB_TRUE;
+            }
+            if (!logged++) DD2D9_LOG("Direct3D: the game draws with W buffering (%s)", native ? "the GPU's" : "emulated");
+        } else if (value == D3DZB_TRUE && g_config.wbuffer == 2) {
+            p_->wEmulate = true;  // wbuffer=force: Z buffering taken as W buffering too
+            static bool logged;
+            if (!logged) {
+                logged = true;
+                DD2D9_LOG("Direct3D: the game draws with Z buffering (wbuffer=force: emulated W buffering instead)");
+            }
+        }
+    }
+    if (state == D3DRS_ZWRITEENABLE) p_->zWrite = value != 0;
+    if (state == 195) {  // D3DRS_DEPTHBIAS (from ZBIAS): the game's, before the overlay tolerance
+        memcpy(&p_->gameBias, &value, 4);
+        p_->biasSet = -1.0f;  // re-sent at the next draw
+    }
+    if (state == 195 && value) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            float f;
+            memcpy(&f, &value, 4);
+            DD2D9_LOG("Direct3D: the game uses ZBIAS (depth bias %g)", f);
+        }
+    }
     if (p_->dev) p_->dev->SetRenderState(D3DRENDERSTATETYPE(state), value);
 }
 
@@ -1092,6 +1136,20 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // alternatepixelcenter: everything half a pixel up and left, so that pixel centres fall
     // where the drivers that offered it put them (texel centres for 2D drawn 1:1, no lines at
     // texture edges): transformed vertices moved, the projection of the others too.
+    // Emulated W buffering: a pass that doesn't write depth (a light map or decal laid on a
+    // surface already drawn) is pulled forward by a few steps of a 24-bit depth buffer. Its
+    // depth equals the surface's only to within the GPU's rounding (the polygons are cut
+    // differently), where a 16-bit W buffer rounded both the same; without the slack,
+    // less-or-equal fails on half the pixels (NFS III's headlights on the road).
+    {
+        const float bias = p.gameBias + (p.wEmulate && !p.zWrite ? -16.0f / 16777216.0f : 0.0f);
+        if (bias != p.biasSet) {
+            DWORD b;
+            memcpy(&b, &bias, 4);
+            p.dev->SetRenderState(D3DRENDERSTATETYPE(195), b);
+            p.biasSet = bias;
+        }
+    }
     const bool shift = g_config.pixelCenter;
     if (shift && (fvf & 0x0E) != 0x04 && p.projDirty) {
         D3DMATRIX m = p.proj;
@@ -1111,12 +1169,23 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
             if (!zEnabled && (v[2] < 0.0f || v[2] > 1.0f)) clampZ = true;
             if (v[3] != 0.0f) allRhwZero = false;
         }
-        if (clampZ || allRhwZero || shift) {
+        const bool wz = p.wEmulate;
+        if (clampZ || allRhwZero || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
             for (UINT i = 0; i < vertexCount; i++) {
                 float* v = reinterpret_cast<float*>(p.scratch.data() + size_t(i) * stride);
                 if (clampZ) v[2] = std::clamp(v[2], 0.0f, 1.0f);
                 if (allRhwZero) v[3] = 1.0f;
+                // Emulated W buffering: depth from 1/w (rhw), which varies linearly across
+                // the screen over any flat surface, as the Z buffer interpolates it: front to
+                // back as a W buffer orders, and coplanar polygons agree however they are cut
+                // up (the game's own z may not: NFS III's light maps fought with the road).
+                // The scale keeps the nearest w seen within [0, 1], 24 bits for the rest.
+                if (wz) {
+                    const float rhw = v[3] > 0.0f ? v[3] : 0.0f;
+                    if (rhw * g_wScale > 1.0f) g_wScale = 0.5f / rhw;
+                    v[2] = 1.0f - rhw * g_wScale;
+                }
                 if (shift) {
                     v[0] -= 0.5f;
                     v[1] -= 0.5f;

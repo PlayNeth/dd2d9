@@ -379,6 +379,63 @@ static int Run(int w, int h, int bpp) {
             CHECK(lit == 0, "cut-out sprite's right edge: %d pixels lit past it (a line wrapped from the other side)", lit);
         }
         if (sprite) sprite->Release();
+
+        // W buffering (D3DZB_USEW): a slanted floor drawn twice, first cut into an 8x8 grid
+        // (red), then as two triangles (green, less-or-equal depth test), its depth linear in
+        // w as games computed it. A Z buffer interpolates that differently for the two cuts
+        // (they fight: red shows through); W buffering, the GPU's or dd2d9's emulation, takes
+        // the depth from 1/w and the green, laid on top without writing depth, covers it all.
+        DDSURFACEDESC2 zd = {};
+        zd.dwSize = sizeof(zd);
+        zd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        zd.dwWidth = DWORD(w);
+        zd.dwHeight = DWORD(h);
+        zd.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY;
+        zd.ddpfPixelFormat.dwSize = sizeof(zd.ddpfPixelFormat);
+        zd.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER;
+        zd.ddpfPixelFormat.dwZBufferBitDepth = 16;
+        zd.ddpfPixelFormat.dwZBitMask = 0xFFFF;
+        IDirectDrawSurface7* zbuf = nullptr;
+        hr = dd->CreateSurface(&zd, &zbuf, nullptr);
+        if (SUCCEEDED(hr) && zbuf && SUCCEEDED(back->AddAttachedSurface(zbuf))) {
+            dev->SetRenderTarget(back, 0);
+            D3DDEVICEDESC7 dc = {};
+            dev->GetCaps(&dc);
+            const bool wcap = (dc.dpcTriCaps.dwRasterCaps & D3DPRASTERCAPS_WBUFFER) != 0;
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, wcap ? D3DZB_USEW : D3DZB_TRUE);
+            dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
+            dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+            // The floor: screen rows 200 (far, w 100) to 300 (near, w 2), 1/w linear in y.
+            auto vtx = [](float fx, float fy, DWORD c) {
+                const float x = 100 + 200 * fx, y = 200 + 100 * fy;
+                const float rhw = 1.0f / 100 + fy * (1.0f / 2 - 1.0f / 100);
+                return Vertex{x, y, (1.0f / rhw) / 200.0f, rhw, c};
+            };
+            dev->BeginScene();
+            for (int gy = 0; gy < 8; gy++)
+                for (int gx = 0; gx < 8; gx++) {
+                    const float x0 = gx / 8.0f, x1 = (gx + 1) / 8.0f, y0 = gy / 8.0f, y1 = (gy + 1) / 8.0f;
+                    Vertex q[4] = {vtx(x0, y0, 0xFFFF0000), vtx(x1, y0, 0xFFFF0000), vtx(x0, y1, 0xFFFF0000), vtx(x1, y1, 0xFFFF0000)};
+                    dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, q, 4, 0);
+                }
+            // The second pass as the game's light maps: laid on top without writing depth.
+            dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
+            Vertex big[4] = {vtx(0, 0, 0xFF00FF00), vtx(1, 0, 0xFF00FF00), vtx(0, 1, 0xFF00FF00), vtx(1, 1, 0xFF00FF00)};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, big, 4, 0);
+            dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+            dev->EndScene();
+            int red = 0;
+            for (int y = 202; y < 298; y += 2)
+                for (int x = 102; x < 298; x += 2)
+                    if (pixel(x, y) & 0xFF0000) red++;
+            CHECK(!wcap || red < 50, "coplanar floor cut two ways (%s): %d of 4802 sampled pixels lost to z-fighting",
+                  wcap ? "W buffering" : "Z buffering", red);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_FALSE);
+            back->DeleteAttachedSurface(0, zbuf);
+            dev->SetRenderTarget(back, 0);
+        }
+        if (zbuf) zbuf->Release();
     }
 
     int flipErrors = 0, sceneErrors = 0, gdiErrors = 0;
