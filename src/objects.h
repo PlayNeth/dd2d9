@@ -370,7 +370,10 @@ private:
     IDirect3DTexture9* sharpTex_ = nullptr;
     IDirect3DPixelShader9* sharpPs_ = nullptr;
     UINT sharpW_ = 0, sharpH_ = 0;
-    bool sharpFailed_ = false;  // no pixel shaders: linear instead
+    bool sharpFailed_ = false;  // no pixel shaders: prescaled_ instead
+    IDirect3DSurface9* prescaled_ = nullptr;  // without shaders: the frame enlarged by a whole factor
+    UINT preW_ = 0, preH_ = 0;
+    bool EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h);
     bool DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r, IDirect3DSurface9* bb, const RECT& dst);
     // The gamma ramp on frames presented from a render target: the frame copied into a
     // texture, drawn through a pixel shader that looks each channel up in a 256x1 ramp.

@@ -329,6 +329,56 @@ static int Run(int w, int h, int bpp) {
         const DWORD kept = pixel(104, 104), drawn = pixel(205, 105), triangle = pixel(8, 4);
         CHECK(kept == 0xFFFFFF && drawn == 0xFF0000 && triangle == 0xFFFFFF,
               "2D between 3D draws kept: block 0x%06lx, new triangle 0x%06lx, earlier triangle 0x%06lx", kept, drawn, triangle);
+
+        // A cut-out sprite (alpha tested) whose texture is transparent except a white column
+        // at its left edge, drawn with its right edge at a fractional position: nothing may
+        // show past that edge. (With antialiasing, the edge pixels' texture coordinate falls
+        // just past 1, and wrapping reads the white column there unless dd2d9 clamps.)
+        DDSURFACEDESC2 a = {};
+        a.dwSize = sizeof(a);
+        a.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        a.dwWidth = a.dwHeight = 16;
+        a.ddsCaps.dwCaps = DDSCAPS_TEXTURE;
+        a.ddpfPixelFormat.dwSize = sizeof(a.ddpfPixelFormat);
+        a.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_ALPHAPIXELS;
+        a.ddpfPixelFormat.dwRGBBitCount = 32;
+        a.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+        a.ddpfPixelFormat.dwGBitMask = 0xFF00;
+        a.ddpfPixelFormat.dwBBitMask = 0xFF;
+        a.ddpfPixelFormat.dwRGBAlphaBitMask = 0xFF000000;
+        IDirectDrawSurface7* sprite = nullptr;
+        hr = dd->CreateSurface(&a, &sprite, nullptr);
+        DDSURFACEDESC2 sl = {};
+        sl.dwSize = sizeof(sl);
+        if (SUCCEEDED(hr) && sprite && SUCCEEDED(sprite->Lock(nullptr, &sl, DDLOCK_WAIT, nullptr))) {
+            for (int y = 0; y < 16; y++)
+                for (int x = 0; x < 16; x++)
+                    reinterpret_cast<DWORD*>(static_cast<BYTE*>(sl.lpSurface) + y * sl.lPitch)[x] = x == 0 ? 0xFFFFFFFF : 0;
+            sprite->Unlock(nullptr);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->SetTexture(0, sprite);
+            dev->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, TRUE);
+            dev->SetRenderState(D3DRENDERSTATE_ALPHAREF, 0x80);
+            dev->SetRenderState(D3DRENDERSTATE_ALPHAFUNC, D3DCMP_GREATER);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            dev->SetTextureStageState(0, D3DTSS_ADDRESS, D3DTADDRESS_WRAP);
+            dev->BeginScene();
+            TV spr[4] = {{300.3f, 100, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {364.3f, 100, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                         {300.3f, 164, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {364.3f, 164, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, spr, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            dev->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            int lit = 0;
+            for (int y = 104; y < 160; y++)
+                for (int x = 362; x < 368; x++)
+                    if (pixel(x, y)) lit++;
+            CHECK(lit == 0, "cut-out sprite's right edge: %d pixels lit past it (a line wrapped from the other side)", lit);
+        }
+        if (sprite) sprite->Release();
     }
 
     int flipErrors = 0, sceneErrors = 0, gdiErrors = 0;

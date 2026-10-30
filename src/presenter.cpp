@@ -151,6 +151,9 @@ void Presenter::ReleaseGpuResources() {
     gammaPs_ = nullptr;
     gammaW_ = gammaH_ = 0;
     gammaTexVersion_ = 0;
+    if (prescaled_) prescaled_->Release();
+    prescaled_ = nullptr;
+    preW_ = preH_ = 0;
     if (sharpTex_) sharpTex_->Release();
     if (sharpPs_) sharpPs_->Release();
     sharpTex_ = nullptr;
@@ -297,25 +300,43 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     return gammaOut_;
 }
 
+// filter=sharp without pixel shaders: the frame enlarged by a whole factor (a render
+// target: StretchRect filters only into one).
+bool Presenter::EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h) {
+    if (prescaled_ && preW_ == w && preH_ == h) return true;
+    if (prescaled_) prescaled_->Release();
+    prescaled_ = nullptr;
+    preW_ = preH_ = 0;
+    if (FAILED(d->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &prescaled_, nullptr))) {
+        prescaled_ = nullptr;
+        return false;
+    }
+    preW_ = w;
+    preH_ = h;
+    return true;
+}
+
 // ps_2_0, sharp bilinear: within each source pixel, flat colour, blended with the neighbour
 // only over the last output pixel at its edge (libretro's sharp-bilinear-simple). Any
 // enlargement, whole or not. c0 = source size, c1 = 0.5 - 0.5/scale (the flat region's
 // half-width), c2 = scale, c3 = 1/source size. Assembled from:
-//   def c4, 0.5, 0, 0, 0 / dcl t0.xy / dcl_2d s0
+//   def c4, 0.5, 0, 0, 0 / dcl t0.xy / dcl_2d s0 / mov r3, c4.y
 //   r0 = t0 * c0 (the texel position) / r1 = frc(r0) / r0 -= r1 / r1 -= 0.5
-//   r2 = min(max(r1, -c1), c1) / r1 = (r1 - r2) * c2 + 0.5 / r0 = (r0 + r1) * c3
-//   texld r0, r0, s0 / oC0 = r0
+//   r2 = min(max(r1, -c1), c1) / r1 = (r1 - r2) * c2 + 0.5 / r3.xy = (r0 + r1) * c3
+//   texld r0, r3, s0 / oC0 = r0
+// (r3 set whole first: Windows' validator refuses a texld from a register with components
+// never written, which Wine doesn't check.)
 static const DWORD kSharpPs[] = {0xffff0200,0x0200001f,0x80000000,0xb0030000,0x0200001f,0x90000000,
 0xa00f0800,0x05000051,0xa00f0004,0x3f000000,0x00000000,0x00000000,
-0x00000000,0x03000005,0x80030000,0xb0e40000,0xa0e40000,0x02000013,
-0x80030001,0x80e40000,0x03000002,0x80030000,0x80e40000,0x81e40001,
-0x03000002,0x80030001,0x80e40001,0xa1000004,0x0300000b,0x80030002,
-0x80e40001,0xa1e40001,0x0300000a,0x80030002,0x80e40002,0xa0e40001,
-0x03000002,0x80030001,0x80e40001,0x81e40002,0x04000004,0x80030001,
-0x80e40001,0xa0e40002,0xa0000004,0x03000002,0x80030000,0x80e40000,
-0x80e40001,0x03000005,0x80030000,0x80e40000,0xa0e40003,0x03000042,
-0x800f0000,0x80e40000,0xa0e40800,0x02000001,0x800f0800,0x80e40000,
-0x0000ffff,
+0x00000000,0x02000001,0x800f0003,0xa0550004,0x03000005,0x80030000,
+0xb0e40000,0xa0e40000,0x02000013,0x80030001,0x80e40000,0x03000002,
+0x80030000,0x80e40000,0x81e40001,0x03000002,0x80030001,0x80e40001,
+0xa1000004,0x0300000b,0x80030002,0x80e40001,0xa1e40001,0x0300000a,
+0x80030002,0x80e40002,0xa0e40001,0x03000002,0x80030001,0x80e40001,
+0x81e40002,0x04000004,0x80030001,0x80e40001,0xa0e40002,0xa0000004,
+0x03000002,0x80030000,0x80e40000,0x80e40001,0x03000005,0x80030003,
+0x80e40000,0xa0e40003,0x03000042,0x800f0000,0x80e40003,0xa0e40800,
+0x02000001,0x800f0800,0x80e40000,0x0000ffff,
 };
 
 // The frame (src's rectangle r) drawn into bb's rectangle dst through kSharpPs; false when it
@@ -323,11 +344,14 @@ static const DWORD kSharpPs[] = {0xffff0200,0x0200001f,0x80000000,0xb0030000,0x0
 bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r, IDirect3DSurface9* bb, const RECT& dst) {
     if (sharpFailed_) return false;
     const UINT w = UINT(r.right - r.left), h = UINT(r.bottom - r.top);
-    if (!sharpPs_ && FAILED(d->CreatePixelShader(kSharpPs, &sharpPs_))) {
-        sharpPs_ = nullptr;
-        sharpFailed_ = true;
-        DD2D9_LOG("filter=sharp: no pixel shader, linear instead");
-        return false;
+    if (!sharpPs_) {
+        const HRESULT hr = d->CreatePixelShader(kSharpPs, &sharpPs_);
+        if (FAILED(hr)) {
+            sharpPs_ = nullptr;
+            sharpFailed_ = true;
+            DD2D9_LOG("filter=sharp: no pixel shader (0x%08lx), point scaling then linear instead", hr);
+            return false;
+        }
     }
     if (!sharpTex_ || sharpW_ != w || sharpH_ != h) {
         if (sharpTex_) sharpTex_->Release();
@@ -724,6 +748,14 @@ void Presenter::Loop() {
                 d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_POINT);
             } else if (g_config.filter == 2 && dw > sw && dh > sh && DrawSharp(d, source, sourceRect, bb, dst)) {
                 // Sharp bilinear: drawn.
+            } else if (g_config.filter == 2 && dw > sw && dh > sh &&
+                       EnsurePrescaled(d, sw * ((std::max(dw, dh * sw / sh) + sw - 1) / sw),
+                                       sh * ((std::max(dw, dh * sw / sh) + sw - 1) / sw))) {
+                // Without pixel shaders: enlarged with point sampling by the whole factor at
+                // or above the scale (sharp pixels), then linear down to the size: only the
+                // pixel edges blend, as near as StretchRect gets to the shader.
+                d->StretchRect(source, &sourceRect, prescaled_, nullptr, D3DTEXF_POINT);
+                d->StretchRect(prescaled_, nullptr, bb, &dst, D3DTEXF_LINEAR);
             } else {
                 d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_LINEAR);
             }

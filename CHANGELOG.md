@@ -3,6 +3,19 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.8
+- **`filter=sharp` on Windows**: Windows' Direct3D 9 refused its pixel shader (the texture
+  read's coordinate register had components never written, which Wine doesn't check), and
+  the frame was shown with plain linear filtering. Fixed; the log gives the error if a
+  shader is refused again. Without pixel shaders, sharp now enlarges with point sampling by
+  the whole factor at or above the scale, then linear down (no longer plain linear below 2x).
+- **`antialiasing`: no lines at the edges of cut-out sprites** (NFS III's trees and corn):
+  multisampling takes the texture coordinate at the pixel's centre, past the sprite's edge
+  where it covers only part of the pixel, and wrapping read the other side of the texture
+  there. A cut-out texture (colour-keyed or with alpha) drawn within its own coordinates
+  (0 to 1, not tiled) is addressed clamped for that draw; tiled ones keep the game's.
+- `d3d7test` checks a cut-out sprite's edge.
+
 ## 0.9.7
 - **`fpslimit=N`**: frames paced to N per second at Flip and at blits covering half the
   primary or more; a frame later than a whole period starts the count again (no burst).

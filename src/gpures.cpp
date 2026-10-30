@@ -737,6 +737,12 @@ struct GpuContext::Impl final : Gpu::Owner {
     DWORD magFilter[8] = {1, 1, 1, 1, 1, 1, 1, 1};  // texfilter=linear (D3D9's default: point)
     DWORD magFilterSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD maxAniso[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    // antialiasing: each stage's addressing as the game set it and as D3D9 has it, its
+    // texture coordinate set, and whether its texture is a cut-out (see ClampCutouts).
+    DWORD addr[8][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
+    DWORD addrSet[8][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
+    DWORD tci[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    bool cutoutStage[8] = {};
     DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD anisoLimit = 0;  // anisotropy= within what the GPU can (0: not known yet, or none)
     // alternatepixelcenter: the game's projection, sent moved half a pixel at the next draw
@@ -766,6 +772,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     IDirect3DVertexDeclaration9* Decl(DWORD fvf);
     bool BindTargets(bool overwriteColor, bool overwriteZ);
     void BindTextures();
+    void ClampCutouts(DWORD fvf, const void* verts, UINT stride, UINT count);
     bool CoversTarget() const;
 };
 
@@ -791,6 +798,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
 }
 
 void GpuContext::SetTextureStageState(DWORD stage, DWORD type, DWORD value) {
+    if (type == D3DTSS_TEXCOORDINDEX && stage < 8) p_->tci[stage] = value;
     if (p_->dev) p_->dev->SetTextureStageState(stage, D3DTEXTURESTAGESTATETYPE(type), value);
 }
 
@@ -799,6 +807,8 @@ void GpuContext::SetSamplerState(DWORD stage, DWORD type, DWORD value) {
         if (type == D3DSAMP_MIPFILTER) p_->mipFilter[stage] = p_->mipFilterSet[stage] = value;
         if (type == D3DSAMP_MINFILTER) p_->minFilter[stage] = p_->minFilterSet[stage] = value;
         if (type == D3DSAMP_MAGFILTER) p_->magFilter[stage] = p_->magFilterSet[stage] = value;
+        if (type == D3DSAMP_ADDRESSU) p_->addr[stage][0] = p_->addrSet[stage][0] = value;
+        if (type == D3DSAMP_ADDRESSV) p_->addr[stage][1] = p_->addrSet[stage][1] = value;
         if (type == D3DSAMP_MAXANISOTROPY) p_->maxAniso[stage] = p_->maxAnisoSet[stage] = value;
     }
     if (p_->dev) p_->dev->SetSamplerState(stage, D3DSAMPLERSTATETYPE(type), value);
@@ -900,6 +910,7 @@ void GpuContext::Impl::BindTextures() {
     for (DWORD i = 0; i < 8; i++) {
         IDirect3DTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
         dev->SetTexture(i, t);
+        cutoutStage[i] = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->keyed));
         if (g_config.anisotropy > 1 || g_config.texLinear) {
             if (g_config.anisotropy > 1 && !anisoLimit) {
                 D3DCAPS9 caps = {};
@@ -915,7 +926,7 @@ void GpuContext::Impl::BindTextures() {
             // fringes); made anisotropic, the longer footprint reaches past their edges, wraps
             // to the other side of the texture and draws a line of it into the transparent part
             // (NFS III's trees), and they are mostly seen face-on, where it changes nothing.
-            const bool cutout = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->keyed));
+            const bool cutout = cutoutStage[i];
             DWORD wantMin = minFilter[i], wantMag = magFilter[i];
             // texfilter=linear: point-filtered textures drawn linear.
             if (g_config.texLinear && t && !cutout) {
@@ -948,6 +959,55 @@ void GpuContext::Impl::BindTextures() {
             dev->SetSamplerState(i, D3DSAMP_MIPFILTER, want);
             mipFilterSet[i] = want;
         }
+    }
+}
+
+// antialiasing: a cut-out texture (trees, sprites) drawn within its own coordinates (0 to 1,
+// not tiled) is addressed clamped for that draw. Multisampling takes a pixel's texture
+// coordinate at its centre even where the polygon only covers part of it: past the
+// sprite's edge, a little outside 0..1, where wrapping reaches the other side of the
+// texture and draws a line of it at the edge (NFS III's trees and corn). Clamped, it reads
+// the edge's own transparent texels; inside, nothing changes. Tiled ones keep the game's.
+void GpuContext::Impl::ClampCutouts(DWORD fvf, const void* verts, UINT stride, UINT count) {
+    // Where each texture coordinate set sits in the vertex (as Decl lays it out).
+    const DWORD pos = fvf & 0x0E;
+    UINT off = pos == 0x04 ? 16 : 12 + (pos >= 0x06 ? (pos - 0x04) / 2 : 0) * 4;
+    if (fvf & 0x10) off += 12;
+    if (fvf & 0x20) off += 4;
+    if (fvf & 0x40) off += 4;
+    if (fvf & 0x80) off += 4;
+    const DWORD sets = std::min<DWORD>((fvf >> 8) & 0xF, 8);
+    UINT setOff[8] = {};
+    bool set2d[8] = {};
+    static const UINT kSize[] = {8, 12, 16, 4};
+    for (DWORD k = 0; k < sets; k++) {
+        const DWORD f = (fvf >> (16 + 2 * k)) & 3;
+        setOff[k] = off;
+        set2d[k] = f == 0;
+        off += kSize[f];
+    }
+    for (DWORD i = 0; i < 8; i++) {
+        DWORD want[2] = {addr[i][0], addr[i][1]};
+        const DWORD k = tci[i];  // generated coordinates (high bits) and missing sets: the game's
+        if (cutoutStage[i] && k < sets && set2d[k] && setOff[k] + 8 <= stride && verts && count) {
+            float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+            const auto* base = static_cast<const uint8_t*>(verts) + setOff[k];
+            for (UINT v = 0; v < count; v++) {
+                const float* uv = reinterpret_cast<const float*>(base + size_t(v) * stride);
+                for (int a = 0; a < 2; a++) {
+                    lo[a] = std::min(lo[a], uv[a]);
+                    hi[a] = std::max(hi[a], uv[a]);
+                }
+            }
+            for (int a = 0; a < 2; a++)
+                if ((want[a] == D3DTADDRESS_WRAP || want[a] == D3DTADDRESS_MIRROR) && lo[a] >= -0.001f && hi[a] <= 1.001f)
+                    want[a] = D3DTADDRESS_CLAMP;
+        }
+        for (int a = 0; a < 2; a++)
+            if (want[a] != addrSet[i][a]) {
+                dev->SetSamplerState(i, a ? D3DSAMP_ADDRESSV : D3DSAMP_ADDRESSU, want[a]);
+                addrSet[i][a] = want[a];
+            }
     }
 }
 
@@ -1022,6 +1082,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     if (!p.dev || !primCount || !verts || !vertexCount) return;
     if (!p.BindTargets(false, false)) return;
     p.BindTextures();
+    if (MsaaType(p.dev) != D3DMULTISAMPLE_NONE) p.ClampCutouts(fvf, verts, stride, vertexCount);
     IDirect3DVertexDeclaration9* decl = p.Decl(fvf);
     if (!decl) return;
     p.dev->SetVertexDeclaration(decl);

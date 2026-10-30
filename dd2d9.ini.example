@@ -87,6 +87,8 @@ depth24=off
 ; Antialiasing (MSAA): 0 (off, default), 2, 4 or 8 samples per pixel, at most what the GPU
 ; can. Render targets are drawn in 32 bits and Z buffers in 24 then. 2D a game writes into
 ; the back buffer between its 3D draws is kept; each time that happens costs a copy.
+; Cut-out sprites (trees) drawn within their texture are addressed clamped meanwhile, so
+; their edges don't pick up a line from the texture's other side.
 antialiasing=0
 
 ; Texture filtering: game (default) as the game sets it; linear: point-filtered textures
