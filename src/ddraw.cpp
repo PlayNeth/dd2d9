@@ -398,12 +398,12 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     const UINT checkCover = CheckCoverMsg();
     if (checkCover && msg == checkCover) {
         if (TryEnterCriticalSection(&g_displayLock)) {
-            if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->CheckCover(h);
+            if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->CheckCover(h, lp != 0);
             LeaveCriticalSection(&g_displayLock);
         } else if (wp < 500) {
             // Another thread has the display (the presenter setting a device up or down):
             // later, rather than never.
-            PostMessageW(h, checkCover, wp + 1, 0);
+            PostMessageW(h, checkCover, wp + 1, lp);
         }
         return 0;
     }
@@ -413,8 +413,12 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     const bool frameChanged =
         msg == WM_STYLECHANGED ||
         (msg == WM_WINDOWPOSCHANGED && lp && (reinterpret_cast<const WINDOWPOS*>(lp)->flags & SWP_FRAMECHANGED));
-    if (checkCover && frameChanged && h == g_hook.hwnd && g_hook.owner && g_hook.owner->Exclusive())
-        PostMessageW(h, checkCover, 0, 0);
+    // A move or resize by the game (not dd2d9's own quiet one): checked too, lParam 1.
+    const bool resized = msg == WM_WINDOWPOSCHANGED && lp &&
+                         (reinterpret_cast<const WINDOWPOS*>(lp)->flags & (SWP_NOSIZE | SWP_NOMOVE)) != (SWP_NOSIZE | SWP_NOMOVE);
+    if (checkCover && (frameChanged || resized) && h == g_hook.hwnd && g_hook.owner && g_hook.owner->Exclusive() &&
+        !g_hook.owner->QuietMove())
+        PostMessageW(h, checkCover, 0, frameChanged ? 0 : 1);
     if (msg == WM_ACTIVATEAPP || (deferred && msg == deferred)) {
         // Another thread may hold the display lock while it waits for this
         // thread (SetWindowPos on our window): never block here, retry later.
@@ -500,16 +504,16 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc) {
 
 }  // namespace
 
-// As ddraw.dll: about every 1.5 s while a game holds exclusive mode in front, its window is
-// made topmost again if something took that away (the game itself changing its extended
-// style, or hiding and showing its window around a mode change: Jazz Jackrabbit 2 then
-// sat under the taskbar until Alt+Enter); a hidden window stays hidden. A timer on the
-// window, run by the game's own message loop.
-static const UINT_PTR kTopmostTimer = 0x64643239;  // "dd29"
-
-static void CALLBACK TopmostTimerProc(HWND h, UINT, UINT_PTR, DWORD) {
+// As ddraw.dll's timer: about every 1.5 s while a game holds exclusive mode in front, its
+// window is made topmost again if something took that away (the game changing its
+// extended style, or hiding and showing its window around a mode change); a hidden window
+// stays hidden. A thread-pool timer (not a timer on the window: its ticks would go through
+// the game's message loop, and some games react to any WM_TIMER), started with the first
+// hooked window and kept (the DLL is pinned then), only trying for the display lock; the
+// window is changed asynchronously, by its own thread.
+static void CALLBACK TopmostTick(void*, BOOLEAN) {
     if (!TryEnterCriticalSection(&g_displayLock)) return;  // next time
-    if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->KeepTopmost();
+    if (g_hook.hwnd && g_hook.owner) g_hook.owner->KeepTopmost();
     LeaveCriticalSection(&g_displayLock);
 }
 
@@ -521,7 +525,7 @@ void DDraw::KeepTopmost() {
     if ((modeSet_ ? activeDisplay_ : g_config.display) == kDisplayWindow) return;
     if (GetWindowLongW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST) return;
     DD2D9_LOG("window %p was no longer topmost: made topmost again", static_cast<void*>(hwnd_));
-    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 }
 
 void DDraw::HookWindow() {
@@ -538,7 +542,6 @@ void DDraw::HookWindow() {
     (void)noGhosting;
     if (g_hook.hwnd == hwnd_) {  // already in this window's chain (maybe from an earlier DirectDraw object)
         g_hook.owner = this;
-        SetTimer(hwnd_, kTopmostTimer, 1500, TopmostTimerProc);  // (again: harmless)
         return;
     }
     if (g_hook.hwnd && IsWindow(g_hook.hwnd)) {
@@ -564,8 +567,9 @@ void DDraw::HookWindow() {
     g_hook.orig = reinterpret_cast<WNDPROC>(prev);
     g_hook.hwnd = hwnd_;
     g_hook.owner = this;
-    // (Only from the window's own thread; elsewhere SetTimer refuses, and there is none.)
-    SetTimer(hwnd_, kTopmostTimer, 1500, TopmostTimerProc);
+    static HANDLE topmostTimer;
+    if (!topmostTimer && !CreateTimerQueueTimer(&topmostTimer, nullptr, TopmostTick, nullptr, 1500, 1500, WT_EXECUTEDEFAULT))
+        topmostTimer = nullptr;
     // HookProc may stay in the window's chain for good (see UnhookWindow), and
     // wrappers such as D7VK free and reload this DLL (Direct3D <-> software
     // switches): keep the code loaded for the rest of the process.
@@ -582,7 +586,6 @@ void DDraw::UnhookWindow() {
     if (g_hook.owner != this) return;
     g_hook.owner = nullptr;
     HWND h = g_hook.hwnd;
-    if (h && IsWindow(h)) KillTimer(h, kTopmostTimer);
     if (h && IsWindow(h)) {
         // Something subclassed the window after us: stay in its chain, forwarding only.
         if (GetProc(h, g_hook.unicode) != reinterpret_cast<LONG_PTR>(HookProc)) return;
@@ -743,10 +746,13 @@ void DDraw::ConfineCursor(bool on) {
 // g_displayLock held). CoverMonitor fitted the client area to the screen for the old frame:
 // JJ2+ takes its frame away while starting up, which left the client area larger than the
 // screen and the image off-center (a black bar at the top). The window covers the screen
-// again for the new frame. A move or resize alone stays the game's (ddraw.dll leaves it
-// alone), and a game that keeps changing the frame wins after a few tries rather than the
-// two fighting.
-void DDraw::CheckCover(HWND h) {
+// again for the new frame. A move or resize alone (`moved`) stays the game's, as ddraw.dll
+// leaves it, unless the game's display mode is shown scaled (borderless): a window that
+// covers the game's screen there (at its corner, at least the mode's size: JJ2+ sizes its
+// window to 661x544 now and then in a 640x480 mode, which a real 640x480 display shows as
+// fullscreen) covers the real one again. A game that keeps changing it wins after a few
+// tries rather than the two fighting.
+void DDraw::CheckCover(HWND h, bool moved) {
     if (!Exclusive() || !alive || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
         (coop_ & DDSCL_NOWINDOWCHANGES) || IsIconic(h) || !IsWindowVisible(h))
         return;
@@ -757,6 +763,13 @@ void DDraw::CheckCover(HWND h) {
     GetClientRect(h, &c);
     MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&c), 2);
     if (EqualRect(&c, &mi.rcMonitor)) return;
+    if (moved) {
+        if (!modeSet_ || activeDisplay_ != kDisplayBorderless) return;
+        RECT w = {};
+        GetWindowRect(h, &w);
+        const LONG x = mi.rcMonitor.left, y = mi.rcMonitor.top;
+        if (w.left > x || w.top > y || w.right < x + LONG(modeW_) || w.bottom < y + LONG(modeH_)) return;  // smaller: windowed
+    }
     const DWORD now = GetTickCount();
     if (now - recoverStart_ > 2000) {
         recoverStart_ = now;

@@ -3,13 +3,16 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
-## 0.9.15
+## 0.9.16 (0.9.15 had the timer on the window)
 - **The exclusive window is made topmost again every 1.5 s** if something took that away,
   as `ddraw.dll`'s timer does (a hidden window stays hidden; not while the game is in the
-  background, or with `DDSCL_NOWINDOWCHANGES`). Jazz Jackrabbit 2 hides its window and
-  changes its extended style around the mode change when a level starts after the first
-  boot: it then sat under the taskbar, looking windowed, until Alt+Enter. Wine's
-  `test_window_style` "Expected WS_EX_TOPMOST" passes now (ddraw1/2/4/7).
+  background, or with `DDSCL_NOWINDOWCHANGES`). A thread-pool timer, not one on the window:
+  its ticks would go through the game's message loop. Wine's `test_window_style`
+  "Expected WS_EX_TOPMOST" passes now (ddraw1/2/4/7).
+- **A game resizing its own window in a scaled (borderless) mode, to a size that covers
+  its screen, covers the real one again**: Jazz Jackrabbit 2 Plus sizes its window to
+  661x544 now and then in its 640x480 mode (fullscreen on a real 640x480 display) and sat
+  in a window until Alt+Enter or its next mode change. A smaller size stays a window.
 
 ## 0.9.14
 - **`overlaybias` finds NFS III's light maps**: its trace showed every world draw alpha

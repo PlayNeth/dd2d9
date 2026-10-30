@@ -498,7 +498,7 @@ public:
     void OnActivate(bool active, DWORD thread);  // WM_ACTIVATEAPP while exclusive (thread: its lParam)
     void KeepTopmost();  // the 1.5 s timer while exclusive: topmost again if that was taken away
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
-    void CheckCover(HWND h);       // the window moved in exclusive mode; g_displayLock held
+    void CheckCover(HWND h, bool moved);  // the window's frame changed (or it moved) in exclusive mode; g_displayLock held
     void OnPrimaryReleased();
     // The primary's gamma ramp while this object is exclusive, as ddraw.dll applies it;
     // the identity otherwise. g_lock held.
