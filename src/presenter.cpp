@@ -407,6 +407,7 @@ void Presenter::Loop() {
         // pixels: they are converted without it, so the game's Blt, Lock and Flip
         // never wait for the conversion.
         Snapshot snap;
+        bool gpuFrame = false;     // snap.buf's render target is the newest copy: presented from it
         RECT area = {0, 0, 0, 0};  // what to convert, in primary surface coordinates
         uint64_t seq = 0;
         bool primaryExists = false;
@@ -427,8 +428,14 @@ void Presenter::Loop() {
                 else if (p->lockCount) UnionRect(&changed, &changed, &p->lockArea);  // being written right now
                 if (all) area = src;
                 else if (!IntersectRect(&area, &changed, &src)) SetRectEmpty(&area);
+                // Direct3D drew into it since the CPU copy was made: shown straight from
+                // its render target, the whole frame (the staging surface no longer holds it).
+                if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale) {
+                    gpuFrame = true;
+                    area = src;
+                    stagingStale_ = true;
+                }
                 if (!IsRectEmpty(&area)) {
-                    GpuCpuAccess(p, false);  // Direct3D drew into it: read that back first
                     snap.buf = p->buf;
                     snap.buf->AddRef();
                     snap.fmt = snap.buf->fmt;
@@ -440,7 +447,7 @@ void Presenter::Loop() {
                 lastSrc_ = src;
                 lastPrimary_ = p;
                 lastBuf_ = p->buf;
-                stagingStale_ = false;
+                if (!gpuFrame) stagingStale_ = false;
                 DD2D9_TRACE("present #%llu: primary %p, area %ld,%ld-%ld,%ld, palette %p v%lu",
                            static_cast<unsigned long long>(seq), static_cast<void*>(p), area.left, area.top,
                            area.right, area.bottom, static_cast<const void*>(p->ShownPalette()),
@@ -465,6 +472,18 @@ void Presenter::Loop() {
             continue;
         }
         double convertTime = 0;
+        // The frame's source: the render target as it is, or the staging surface the CPU copy
+        // is converted into (also when the render target went meanwhile: read back then).
+        IDirect3DSurface9* source = staging_;
+        RECT sourceRect = {0, 0, LONG(sw), LONG(sh)};
+        if (gpuFrame && snap.buf) {
+            if (IDirect3DSurface9* rt = GpuNewestSurface(snap.buf)) {
+                source = rt;
+                sourceRect = src;
+                snap.buf->Release();
+                snap.buf = nullptr;
+            }
+        }
         if (snap.buf) {
             RECT dst = {area.left - src.left, area.top - src.top, area.right - src.left, area.bottom - src.top};
             D3DLOCKED_RECT lr;
@@ -497,20 +516,20 @@ void Presenter::Loop() {
             const UINT dw = UINT(dst.right - dst.left), dh = UINT(dst.bottom - dst.top);
             const bool same = dw == sw && dh == sh;
             if (same || g_config.filter == 0) {
-                d->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_POINT);
+                d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_POINT);
             } else if (g_config.filter == 2 && dw >= 2 * sw && dh >= 2 * sh) {
                 // Sharp bilinear: enlarged by the largest whole factor with point sampling (sharp
                 // pixels), the rest of the way with linear (no uneven pixel sizes, only the
                 // pixel edges blended).
                 const UINT k = std::min(dw / sw, dh / sh);
                 if (EnsurePrescaled(d, sw * k, sh * k)) {
-                    d->StretchRect(staging_, nullptr, prescaled_, nullptr, D3DTEXF_POINT);
+                    d->StretchRect(source, &sourceRect, prescaled_, nullptr, D3DTEXF_POINT);
                     d->StretchRect(prescaled_, nullptr, bb, &dst, D3DTEXF_LINEAR);
                 } else {
-                    d->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                    d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_LINEAR);
                 }
             } else {
-                d->StretchRect(staging_, nullptr, bb, &dst, D3DTEXF_LINEAR);
+                d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_LINEAR);
             }
             bb->Release();
         }

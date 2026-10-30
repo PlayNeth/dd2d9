@@ -3,6 +3,14 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.8.3
+- **Direct3D frames are presented straight from the GPU**: a flipped-in render target the
+  GPU holds the newest copy of is stretched into the window as it is, instead of being
+  read back into system memory at every Flip and converted again. Frames with DirectDraw
+  or GDI drawing on top (the CPU copy is then the newest) still go through system memory.
+  The gamma ramp isn't applied to frames presented this way yet.
+- `d3d7test ... 3d` draws without the 2D on top (frames presented from the GPU).
+
 ## 0.8.2
 - **Entering exclusive mode brings the game's window to the foreground** past Windows'
   foreground lock, as `ddraw.dll` does (FUN_7375d557: the lock timeout zeroed for the

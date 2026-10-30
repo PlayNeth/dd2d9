@@ -40,6 +40,8 @@ struct Vertex {
     DWORD color;
 };
 
+static bool g_hud = true;
+
 static int Run(int w, int h, int bpp) {
     WNDCLASSA wc = {};
     wc.lpfnWndProc = WndProc;
@@ -109,6 +111,10 @@ static int Run(int w, int h, int bpp) {
         } else {
             sceneErrors++;
         }
+        if (!g_hud) {
+            if (FAILED(front->Flip(nullptr, DDFLIP_WAIT))) flipErrors++;
+            continue;
+        }
         // 2D on top of the 3D frame: a DirectDraw fill and GDI text, as HUDs and menus do.
         DDBLTFX fx = {};
         fx.dwSize = sizeof(fx);
@@ -152,6 +158,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     g_out = fopen(path, "a");
     int w = 640, h = 480, bpp = 32;
     sscanf(cmd, "%d %d %d", &w, &h, &bpp);
+    g_hud = !strstr(cmd, "3d");  // "3d": no 2D on top (the frames are presented from the GPU)
     fprintf(g_out, "== d3d7test %dx%dx%d\n", w, h, bpp);
     int r = Run(w, h, bpp);
     fprintf(g_out, "== %d failure(s)\n", g_fail);

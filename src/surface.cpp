@@ -1339,8 +1339,6 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
             for (size_t i = 0; i + 1 < chain.size(); i++) chain[i]->buf = chain[i + 1]->buf;
             chain.back()->buf = first;
         }
-        // What Direct3D drew is shown from the CPU copy: read back now, on the game's thread.
-        if (isPrimary) chain[0]->CpuAccess(false);
         // As ddraw.dll: only the front and the buffer it swapped with count as changed.
         chain[0]->BumpUniqueness();
         chain[target ? k : 1]->BumpUniqueness();

@@ -218,6 +218,13 @@ void GpuCpuAccess(Surface* s, bool write) {
     if (write) b->gpuStale = true;
 }
 
+IDirect3DSurface9* GpuNewestSurface(Buffer* b) {
+    GpuSurf* g = b->gpu;
+    if (!g || !g->gpu || g->depth || !g->surf || !b->cpuStale) return nullptr;
+    g->gpu->CloseScene();
+    return g->surf;
+}
+
 bool GpuDepthFill(Surface* s, const RECT& r, DWORD value) {
     GpuSurf* g = s->buf->gpu;
     if (!g || !g->gpu || !g->depth) return false;

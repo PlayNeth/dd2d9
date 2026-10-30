@@ -78,7 +78,7 @@ is read back first, so 2D drawn over a 3D frame (HUDs, menus) works. Direct3D 1â
 interfaces, for DirectDraw objects made by `DirectDrawCreate`) aren't implemented yet: those
 objects report no 3D support, and games fall back to their other renderers.
 
-Not done yet: cube maps, rendering to textures used later as textures is read back
+Not done yet: the gamma ramp on 3D frames presented from the GPU, cube maps, rendering to textures used later as textures is read back
 through the CPU, and Z buffers can't be read or copied by DirectDraw (only cleared with
 `DDBLT_DEPTHFILL`). `GetClipStatus` reflects `ProcessVertices` and `SetClipStatus` only.
 
