@@ -3,6 +3,14 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.8.2
+- **Entering exclusive mode brings the game's window to the foreground** past Windows'
+  foreground lock, as `ddraw.dll` does (FUN_7375d557: the lock timeout zeroed for the
+  call, and a do-nothing mouse event so the process counts as the last to get input).
+  Nerf ArenaBlast, started from Explorer, stayed behind it after its splash window
+  closed: no keyboard or mouse input until Alt+Tab, and Windows' cursor showing in the
+  middle of the screen.
+
 ## 0.8.1
 - **The taskbar no longer shows over Unreal engine games in fullscreen** (Nerf
   ArenaBlast). After restyling its window, the game sized it back to its own idea of

@@ -1083,6 +1083,20 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     if (acquire) {
         const bool foreign = GetWindowThreadProcessId(hwnd, nullptr) != GetCurrentThreadId();
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | (foreign ? SWP_ASYNCWINDOWPOS : 0));
+        // As ddraw.dll (FUN_7375d557): into the foreground past Windows' foreground lock, its
+        // timeout zeroed and a do-nothing mouse event making this process the last to get
+        // input. Without it a game started from Explorer can stay behind it, the keyboard
+        // going there (Nerf ArenaBlast ignored all input until Alt+Tab).
+        if (GetForegroundWindow() != hwnd) {
+            PVOID timeout = nullptr;
+            SystemParametersInfoA(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &timeout, 0);
+            SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, nullptr, 0);
+            mouse_event(MOUSEEVENTF_WHEEL, 0, 0, 0, 0);
+            SetForegroundWindow(hwnd);
+            SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeout, 0);
+            DD2D9_LOG("exclusive mode: window %p brought to the foreground (%s)", static_cast<void*>(hwnd),
+                      GetForegroundWindow() == hwnd ? "done" : "refused");
+        }
     }
     NoteDisplayMode();  // leaving exclusive mode may have put the desktop's back
     MarkDirty();
