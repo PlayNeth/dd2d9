@@ -40,6 +40,7 @@ struct Vertex {
     DWORD color;
 };
 
+static bool g_gamma = false;
 static bool g_hud = true;
 
 static int Run(int w, int h, int bpp) {
@@ -91,10 +92,78 @@ static int Run(int w, int h, int bpp) {
     hr = d3d->CreateDevice(IID_IDirect3DHALDevice, back, &dev);
     CHECK(SUCCEEDED(hr) && dev, "CreateDevice(HAL) -> 0x%08lx", hr);
     if (!dev) return 1;
+    if (g_gamma) {  // "gamma": an inverting ramp on the primary (Direct3D frames shown through it)
+        IDirectDrawGammaControl* gc = nullptr;
+        if (SUCCEEDED(front->QueryInterface(IID_IDirectDrawGammaControl, reinterpret_cast<void**>(&gc)))) {
+            DDGAMMARAMP ramp;
+            for (int i = 0; i < 256; i++) ramp.red[i] = ramp.green[i] = ramp.blue[i] = WORD((255 - i) * 257);
+            hr = gc->SetGammaRamp(0, &ramp);
+            CHECK(SUCCEEDED(hr), "SetGammaRamp -> 0x%08lx", hr);
+            gc->Release();
+        }
+    }
     D3DVIEWPORT7 vp = {0, 0, DWORD(w), DWORD(h), 0.0f, 1.0f};
     dev->SetViewport(&vp);
     dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
     dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+
+    // Render to texture: a red clear and a green quad into a texture surface, then that
+    // texture drawn onto the back buffer (twice, the second time after drawing into it
+    // again: the GPU copy must follow).
+    {
+        DDSURFACEDESC2 t = {};
+        t.dwSize = sizeof(t);
+        t.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        t.dwWidth = t.dwHeight = 64;
+        t.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+        IDirectDrawSurface7* tex = nullptr;
+        hr = dd->CreateSurface(&t, &tex, nullptr);
+        CHECK(SUCCEEDED(hr) && tex, "render-target texture -> 0x%08lx", hr);
+        auto pixel = [&](int x, int y) {
+            DDSURFACEDESC2 l = {};
+            l.dwSize = sizeof(l);
+            DWORD c = 0;
+            if (SUCCEEDED(back->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                const BYTE* row = static_cast<BYTE*>(l.lpSurface) + y * l.lPitch;
+                if (l.ddpfPixelFormat.dwRGBBitCount == 16) {  // 565 to 888 (bits replicated)
+                    const DWORD v = reinterpret_cast<const WORD*>(row)[x];
+                    const DWORD r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+                    c = (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
+                } else {
+                    c = reinterpret_cast<const DWORD*>(row)[x] & 0xFFFFFF;
+                }
+                back->Unlock(nullptr);
+            }
+            return c;
+        };
+        struct TV { float x, y, z, rhw; DWORD c; float u, v; };
+        for (int pass = 0; tex && pass < 2; pass++) {
+            const DWORD col = pass ? 0x0000FF : 0x00FF00;
+            dev->SetRenderTarget(tex, 0);
+            D3DVIEWPORT7 tv = {0, 0, 64, 64, 0.0f, 1.0f};
+            dev->SetViewport(&tv);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFFFF0000, 1.0f, 0);
+            dev->BeginScene();
+            Vertex q[4] = {{0, 0, 0.5f, 1, col | 0xFF000000}, {32, 0, 0.5f, 1, col | 0xFF000000},
+                           {0, 64, 0.5f, 1, col | 0xFF000000}, {32, 64, 0.5f, 1, col | 0xFF000000}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, q, 4, 0);
+            dev->EndScene();
+            dev->SetRenderTarget(back, 0);
+            D3DVIEWPORT7 bv = {0, 0, DWORD(w), DWORD(h), 0.0f, 1.0f};
+            dev->SetViewport(&bv);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->SetTexture(0, tex);
+            dev->BeginScene();
+            TV quad[4] = {{0, 0, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {128, 0, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                          {0, 128, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {128, 128, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, quad, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            const DWORD l = pixel(16, 64), r = pixel(112, 64);
+            CHECK(l == col && r == 0xFF0000, "render to texture, pass %d: left 0x%06lx, right 0x%06lx", pass + 1, l, r);
+        }
+        if (tex) tex->Release();
+    }
 
     int flipErrors = 0, sceneErrors = 0, gdiErrors = 0;
     const int frames = 150;
@@ -158,7 +227,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     g_out = fopen(path, "a");
     int w = 640, h = 480, bpp = 32;
     sscanf(cmd, "%d %d %d", &w, &h, &bpp);
-    g_hud = !strstr(cmd, "3d");  // "3d": no 2D on top (the frames are presented from the GPU)
+    g_hud = !strstr(cmd, "3d");
+    g_gamma = strstr(cmd, "gamma") != nullptr;  // "3d": no 2D on top (the frames are presented from the GPU)
     fprintf(g_out, "== d3d7test %dx%dx%d\n", w, h, bpp);
     int r = Run(w, h, bpp);
     fprintf(g_out, "== %d failure(s)\n", g_fail);

@@ -311,9 +311,14 @@ void Device::PushStageOps9() {
     // Colour keying works on the texel alone on XP: with the game's alpha unused (no blending,
     // no alpha test), the alpha test of the key emulation gets the texture's alpha
     // (Wine's test_colorkey_precision: MODULATEALPHA with a vertex alpha of 0).
-    if (rs[41] == TRUE && tex && tex->hasCk[kCkSrcBlt] && rs[27] != TRUE && rs[15] != TRUE &&
-        s0[D3DTSS_COLOROP] != D3DTOP_DISABLE) {
+    const bool keyOn = rs[41] == TRUE && tex && tex->hasCk[kCkSrcBlt] && s0[D3DTSS_COLOROP] != D3DTOP_DISABLE;
+    if (keyOn && rs[27] != TRUE && rs[15] != TRUE) {
         alphaOp = D3DTOP_SELECTARG1;
+        ctx.SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    } else if (keyOn && !tex->buf->fmt.a && alphaOp == D3DTOP_SELECTARG2) {
+        // With blending, the vertex alpha kept but keyed texels still dropped: the texture's
+        // alpha is 1 except there, so MODULATE gives the same alpha everywhere else.
+        alphaOp = D3DTOP_MODULATE;
         ctx.SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
     }
     if (alphaOp != 0xFFFFFFFF) ctx.SetTextureStageState(0, D3DTSS_ALPHAOP, alphaOp);
@@ -348,8 +353,9 @@ void Device::BindTextures9() {
 // A render state as the driver gets it (B §1.4).
 void Device::DrvRS(DWORD s, DWORD v) {
     switch (s) {
-    case 1:  // TEXTUREHANDLE
+    case 1:  // TEXTUREHANDLE: the stage-0 texture (0: none)
         dTexHandle = v;
+        dtex[0] = nullptr;
         PushStageOps9();
         PushAlpha9();
         return;
@@ -949,6 +955,7 @@ HRESULT Device::F2::SetRenderTarget(IDirectDrawSurface* s, DWORD) {
     if (!s) return DDERR_INVALIDOBJECT;
     Guard l;
     Surface* x = Surface::From(s);
+    if (!x) return DDERR_INVALIDOBJECT;
     int v = 1;
     for (int k : {1, 2, 3, 4, 7})
         if (x->Iface(k) == s) v = k;

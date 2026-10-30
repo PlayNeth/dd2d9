@@ -159,7 +159,8 @@ class VertexBuffer7 final : public IDirect3DVertexBuffer7 {
 public:
     VertexBuffer7(Direct3D7* d3d, const D3DVERTEXBUFFERDESC& d) : d3d_(d3d), caps_(d.dwCaps), fvf_(d.dwFVF), count_(d.dwNumVertices) {
         stride_ = FvfSize(fvf_);
-        mem_.assign(size_t(stride_) * std::max<DWORD>(count_, 1), 0);
+        // 16 bytes more: vertex blending reads weights past the FVF, as XP (V §9).
+        mem_.assign(size_t(stride_) * std::max<DWORD>(count_, 1) + 16, 0);
         if ((fvf_ & 0x0E) == D3DFVF_XYZRHW && !(caps_ & D3DVBCAPS_DONOTCLIP)) clip_.assign(count_, 0);
         d3d_->AddRef();  // its buffer surface holds the DirectDraw interface (D §CreateVertexBuffer)
     }
@@ -457,6 +458,7 @@ private:
     Palette* pal_;
     GpuContext ctx_;
     DWORD tss_[8][64];
+    DWORD addrU_[8] = {1, 1, 1, 1, 1, 1, 1, 1}, addrV_[8] = {1, 1, 1, 1, 1, 1, 1, 1};  // effective (WRAP)
     Surface* tex_[8] = {};
     D3DMATRIX texm_[8];
     float planes_[kMaxPlanes][4] = {};
@@ -631,12 +633,10 @@ void Device7::PushAlphaTest() {
 void Device7::PushTSS(DWORD stage, DWORD t) {
     const DWORD v = tss_[stage][t];
     switch (t) {
-    case D3DTSS_ADDRESS:
-        ctx_.SetSamplerState(stage, 1, v);
-        ctx_.SetSamplerState(stage, 2, v);
+    case D3DTSS_ADDRESS: case D3DTSS_ADDRESSU: case D3DTSS_ADDRESSV:
+        ctx_.SetSamplerState(stage, 1, addrU_[stage]);
+        ctx_.SetSamplerState(stage, 2, addrV_[stage]);
         break;
-    case D3DTSS_ADDRESSU: ctx_.SetSamplerState(stage, 1, v); break;
-    case D3DTSS_ADDRESSV: ctx_.SetSamplerState(stage, 2, v); break;
     case D3DTSS_BORDERCOLOR: ctx_.SetSamplerState(stage, 4, v); break;
     case D3DTSS_MAGFILTER: {
         static const DWORD kMap[] = {0, 1, 2, 2, 2, 3};  // FLAT/GAUSSIANCUBIC: linear; ANISOTROPIC 5 -> 3
@@ -717,6 +717,11 @@ HRESULT Device7::SetTSS(DWORD stage, DWORD t, DWORD v) {
     if (stage >= 8 || t >= 64) return D3D_OK;  // XP writes outside its array; ignored here
     if (tss_[stage][t] == v) return D3D_OK;
     tss_[stage][t] = v;
+    // XP hands ADDRESS to the driver as it is, which sets U and V: the last of the three
+    // set wins, also when everything is sent again after a reset.
+    if (t == D3DTSS_ADDRESS) addrU_[stage] = addrV_[stage] = v;
+    else if (t == D3DTSS_ADDRESSU) addrU_[stage] = v;
+    else if (t == D3DTSS_ADDRESSV) addrV_[stage] = v;
     Use u(this);
     if (u.ok) PushTSS(stage, t);
     return D3D_OK;
@@ -895,7 +900,7 @@ bool LightOk(const D3DLIGHT7* l) {
 }
 
 HRESULT Device7::SetLightI(DWORD i, const D3DLIGHT7& l) {
-    if (i >= 0x10000000) return E_OUTOFMEMORY;  // XP's array would not grow that far
+    if (i >= 0x10000) return E_OUTOFMEMORY;  // as XP when its array can't grow (not a C++ exception)
     if (i >= lights_.size()) lights_.resize(size_t(i) + 10);
     lights_[i].l = l;
     lights_[i].set = true;
@@ -1035,8 +1040,8 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
         s->W() > 2048 || s->H() > 2048)
         return DDERR_INVALIDPARAMS;
     if (s->buf->fmt.pal8 && !s->palette) return DDERR_NOPALETTEATTACHED;
-    if (s == rt_) return D3D_OK;
     Surface* z = AttachedZ(s);
+    if (s == rt_ && z == z_) return D3D_OK;  // the Z buffer is looked up again (S §SetRenderTarget)
     s->AddRef(Surface::kRefV7);
     if (z) z->AddRef(Surface::kRefV1);
     Surface* oldRt = rt_;
@@ -1083,6 +1088,7 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
     const UINT prims = PrimCount(t, idx ? ni : n);
     if (!prims || !n) return D3D_OK;
     if (!v || (idx == nullptr && ni)) return DDERR_INVALIDPARAMS;
+    if (n > 0x01000000 || ni > 0x01000000) return DDERR_INVALIDPARAMS;  // sizes that wrap a 32-bit size_t
     if (rt_->CantDraw(false)) {
         if (inScene_) lostInScene_ = true;
         return D3D_OK;
@@ -1105,7 +1111,9 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
         fvf |= D3DFVF_NORMAL;
     }
     Use u(this);
-    if (u.ok) ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE);
+    if (!u.ok) return D3D_OK;
+    if (rs_[41] == TRUE && tex_[0]) PushAlphaTest();  // the texture's colour key may have changed since
+    ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE);
     return D3D_OK;
 }
 
@@ -1124,7 +1132,7 @@ HRESULT Device7::DrawIndexedPrimitive(D3DPRIMITIVETYPE t, DWORD fvf, void* v, DW
 // Gathers strided data into interleaved vertices, in FVF order (V §3).
 static void Gather(DWORD fvf, const D3DDRAWPRIMITIVESTRIDEDDATA& d, DWORD n, std::vector<uint8_t>* out) {
     const UINT stride = FvfSize(fvf);
-    out->assign(size_t(stride) * n, 0);
+    out->assign(size_t(stride) * n + 16, 0);  // slack: see VertexBuffer7's memory
     const UINT posSize = FvfSize(fvf & 0x0E);
     const DWORD tex = (fvf >> 8) & 0xF;
     for (DWORD i = 0; i < n; i++) {
@@ -1147,7 +1155,7 @@ static void Gather(DWORD fvf, const D3DDRAWPRIMITIVESTRIDEDDATA& d, DWORD n, std
 
 HRESULT Device7::DrawPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWPRIMITIVESTRIDEDDATA* d, DWORD n, DWORD) {
     if ((fvf & 0x0E) == D3DFVF_XYZRHW) return D3DERR_INVALIDVERTEXTYPE;
-    if (!d) return DDERR_INVALIDPARAMS;
+    if (!d || n > 0x01000000) return DDERR_INVALIDPARAMS;  // sizes that wrap a 32-bit size_t
     Guard l;
     HoldVB(nullptr);
     std::vector<uint8_t> v;
@@ -1158,7 +1166,7 @@ HRESULT Device7::DrawPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWPRIM
 HRESULT Device7::DrawIndexedPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWPRIMITIVESTRIDEDDATA* d, DWORD n,
                                              WORD* idx, DWORD ni, DWORD) {
     if ((fvf & 0x0E) == D3DFVF_XYZRHW) return D3DERR_INVALIDVERTEXTYPE;
-    if (!d) return DDERR_INVALIDPARAMS;
+    if (!d || n > 0x01000000) return DDERR_INVALIDPARAMS;  // sizes that wrap a 32-bit size_t
     Guard l;
     HoldVB(nullptr);
     std::vector<uint8_t> v;
@@ -1231,6 +1239,7 @@ HRESULT Device7::ComputeSphereVisibility(D3DVECTOR* centers, D3DVALUE* radii, DW
             const float cy = x * wvp._12 + y * wvp._22 + z * wvp._32 + wvp._42;
             const float cz = x * wvp._13 + y * wvp._23 + z * wvp._33 + wvp._43;
             const float cw = x * wvp._14 + y * wvp._24 + z * wvp._34 + wvp._44;
+            const Vec3 wx = XformPoint({x, y, z}, world_);  // user clip planes are in world space
             // D3D's -w..w x/y volume as the front end's 0..w one.
             const float fx = (cx + cw) * 0.5f, fy = (cy + cw) * 0.5f;
             DWORD code = 0;
@@ -1241,7 +1250,7 @@ HRESULT Device7::ComputeSphereVisibility(D3DVECTOR* centers, D3DVALUE* radii, DW
             if (cz < 0) code |= 0x10;
             if (cz > cw) code |= 0x20;
             for (DWORD p = 0; p < 6; p++)
-                if ((planesOn & (1u << p)) && planes_[p][0] * x + planes_[p][1] * y + planes_[p][2] * z + planes_[p][3] < 0)
+                if ((planesOn & (1u << p)) && planes_[p][0] * wx.x + planes_[p][1] * wx.y + planes_[p][2] * wx.z + planes_[p][3] < 0)
                     code |= 0x40u << p;
             uni |= code;
             inter &= code;
@@ -1783,8 +1792,35 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
             }
             specular = ToArgb(s);
         }
+        // Vertex fog without lighting too (V §8.5 step 8): the factor in specular alpha.
+        bool fogged = false;
+        if (!light) {
+            const DWORD fogMode = dev->rs_[D3DRENDERSTATE_FOGVERTEXMODE];
+            if (dev->rs_[D3DRENDERSTATE_FOGENABLE] == TRUE && fogMode != D3DFOG_NONE && fogMode != 0xFFFFFFFF &&
+                out.specular >= 0) {
+                const Vec3 P = XformPoint(pos, blend ? dev->view_ : wv);
+                const float dist = dev->rs_[D3DRENDERSTATE_RANGEFOGENABLE] == TRUE ? sqrtf(Dot(P, P)) : P.z;
+                auto rsf = [&](DWORD st) {
+                    float f;
+                    memcpy(&f, &dev->rs_[st], 4);
+                    return f;
+                };
+                float f = 1.0f;
+                if (fogMode == D3DFOG_LINEAR) {
+                    const float st = rsf(D3DRENDERSTATE_FOGSTART), en = rsf(D3DRENDERSTATE_FOGEND);
+                    f = dist < st ? 1.0f : dist >= en ? 0.0f : (en - dist) / (en - st);
+                } else if (fogMode == D3DFOG_EXP) {
+                    f = expf(-dist * rsf(D3DRENDERSTATE_FOGDENSITY));
+                } else if (fogMode == D3DFOG_EXP2) {
+                    const float k = dist * rsf(D3DRENDERSTATE_FOGDENSITY);
+                    f = expf(-k * k);
+                }
+                specular = (specular & 0x00FFFFFF) | (DWORD(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f) << 24);
+                fogged = true;
+            }
+        }
         if (out.diffuse >= 0 && (light || !noCopy)) *reinterpret_cast<DWORD*>(o + out.diffuse) = diffuse;
-        if (out.specular >= 0 && (light || !noCopy)) *reinterpret_cast<DWORD*>(o + out.specular) = specular;
+        if (out.specular >= 0 && (light || fogged || !noCopy)) *reinterpret_cast<DWORD*>(o + out.specular) = specular;
         if (!noCopy)
             for (DWORD t = 0; t < in.texCount; t++)
                 memcpy(o + out.tex[t], v + in.tex[t], std::min(in.texSize[t], out.texSize[t]));
@@ -1854,6 +1890,8 @@ HRESULT VertexBuffer7::ProcessVerticesStrided(DWORD op, DWORD dst, DWORD count, 
     if (optimized_) return D3DERR_VERTEXBUFFEROPTIMIZED;
     // The texture coordinate count is the destination's (V §8.5).
     const DWORD srcFvf = (fvf & ~DWORD(D3DFVF_TEXCOUNT_MASK)) | (fvf_ & D3DFVF_TEXCOUNT_MASK);
+    if (dst >= count_) return D3D_OK;
+    count = std::min(count, count_ - dst);  // what fits the destination: gathered no further
     std::vector<uint8_t> v;
     Gather(srcFvf, *data, count, &v);
     return Process(this, op, dst, count, v.data(), FvfSize(srcFvf), srcFvf, static_cast<Device7*>(device), flags);

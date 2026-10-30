@@ -3,7 +3,6 @@
 #include "gpures.h"
 
 #include "d3d6.h"
-#include "d3dproxy.h"
 
 #include <algorithm>
 #include <new>
@@ -259,7 +258,6 @@ Surface::~Surface() {
     if (clipper) clipper->Release();
     for (auto& p : priv_)
         if (p.unk) p.unk->Release();
-    D3DProxySurfaceDestroyed(this);
     D3DLegacySurfaceGone(this);
     if (gpuTex) GpuSurfaceGone(this);
     buf->Release();
@@ -321,8 +319,8 @@ HRESULT Surface::QueryInterface(REFIID r, void** out, int version) {
         return S_OK;
     }
     if (IsEqualGUID(r, IID_IDirectDrawColorControl)) return E_NOINTERFACE;  // ddraw's own; not on these surfaces
-    // Textures and Direct3D 1 devices: a wrapper's when one loaded dd2d9, else dd2d9's own.
-    HRESULT hr = D3DProxyEnabled() ? D3DProxyQuerySurface(this, r, out) : D3DLegacyQuerySurface(this, r, out, version);
+    // Textures and Direct3D 1 devices (DirectDraw 1-4 objects).
+    HRESULT hr = D3DLegacyQuerySurface(this, r, out, version);
     if (hr != E_NOINTERFACE) return hr;
     DD2D9_LOG("Surface::QueryInterface(%s): not supported", GuidName(r));
     return E_NOINTERFACE;
@@ -1289,7 +1287,8 @@ void Surface::FillRect(const RECT& r, DWORD value) {
 
 void Surface::CpuAccess(bool write) {
     if (buf->gpu) GpuCpuAccess(this, write);  // reads back what Direct3D drew, if newer
-    else if (write) buf->gpuStale = true;     // a texture's GPU copy is made from its levels' buffers
+    else if (write) buf->gpuStale = true;
+    if (write) buf->cpuSerial++;              // a texture's GPU copy is made from its levels' buffers
 }
 
 Surface* Surface::NextMipLevel() const {

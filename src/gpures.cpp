@@ -2,6 +2,8 @@
 // context of a Direct3D 7 device (see gpures.h).
 #include "gpures.h"
 
+#include "convert.h"
+
 #include "gpu.h"
 #include "objects.h"
 
@@ -64,22 +66,11 @@ static inline void WritePixel(uint8_t* p, DWORD bytes, uint32_t v) {
     }
 }
 
-// One row of the CPU copy to the GPU's memory: as is (same layout), or to A8R8G8B8 (through
-// the palette; a colour-keyed texel becomes transparent black, as DX7 hardware treated it).
-static void RowToGpu(const Buffer* b, int y, uint8_t* dst, bool convert, const PALETTEENTRY* pal, bool keyed,
-                     DWORD key) {
-    const uint8_t* src = b->Row(y);
-    const DWORD bytes = b->fmt.Bytes();
-    if (!convert) {
-        memcpy(dst, src, size_t(b->w) * bytes);
-        return;
-    }
-    const DWORD keyMask = b->fmt.KeyMask();
-    auto* out = reinterpret_cast<uint32_t*>(dst);
-    for (int x = 0; x < b->w; x++, src += bytes) {
-        const uint32_t v = ReadPixel(src, bytes);
-        out[x] = keyed && (v & keyMask) == (key & keyMask) ? 0 : PixelToARGB(b->fmt, v, pal);
-    }
+// One row of the CPU copy to the GPU's memory: as is (same layout), or to A8R8G8B8 through
+// `conv` (the palette; a colour-keyed texel becomes transparent black, as DX7 hardware treated it).
+static void RowToGpu(const Buffer* b, int y, uint8_t* dst, const RowConverter* conv) {
+    if (!conv) memcpy(dst, b->Row(y), size_t(b->w) * b->fmt.Bytes());
+    else conv->Run(b->Row(y), reinterpret_cast<uint32_t*>(dst), b->w);
 }
 
 // A palettized render target: Direct3D 9 draws in X8R8G8B8, and each pixel read back
@@ -101,8 +92,8 @@ struct PaletteMap {
         auto it = exact.find(rgb);
         if (it != exact.end()) return it->second;
         const uint32_t key = ((rgb >> 9) & 0x7C00) | ((rgb >> 6) & 0x3E0) | ((rgb >> 3) & 0x1F);
-        if (nearest[key] < 0) {
-            const int r = int((rgb >> 16) & 0xFF), g = int((rgb >> 8) & 0xFF), b = int(rgb & 0xFF);
+        if (nearest[key] < 0) {  // from the bucket's centre: the same answer whatever comes first
+            const int r = int((key >> 10) << 3 | 4), g = int(((key >> 5) & 31) << 3 | 4), b = int((key & 31) << 3 | 4);
             int best = 0, bestD = INT_MAX;
             for (int i = 0; i < 256; i++) {
                 const int dr = r - pal[i].peRed, dg = g - pal[i].peGreen, db = b - pal[i].peBlue;
@@ -140,6 +131,9 @@ static D3DFORMAT DepthFormat(const Format& f) {
 
 // ---------------------------------------------------------------- render targets and Z
 
+// Counts drawing on every render target: a copy made at serial n is of that drawing alone.
+static unsigned g_drawSerial = 0;
+
 struct GpuSurf final : Gpu::Owner {
     Gpu* gpu;
     Buffer* buf;
@@ -155,6 +149,7 @@ struct GpuSurf final : Gpu::Owner {
     float clearZ = 1.0f;
     // A palettized render target's palette (its surface's when last bound or read back).
     PaletteMap* pal = nullptr;
+    unsigned serial = 0;  // counts what Direct3D drew into it (a texture copy of it is current while equal)
 
     GpuSurf(Gpu* g, Buffer* b, bool d) : gpu(g), buf(b), depth(d) {}
     ~GpuSurf() { delete pal; }
@@ -228,9 +223,8 @@ static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     }
     D3DLOCKED_RECT lr;
     if (FAILED(g->upload->LockRect(&lr, nullptr, 0))) return;
-    for (int y = 0; y < b->h; y++)
-        RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal ? g->pal->pal : nullptr,
-                 false, 0);
+    const RowConverter conv(b->fmt, g->pal ? g->pal->pal : nullptr);
+    for (int y = 0; y < b->h; y++) RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert ? &conv : nullptr);
     g->upload->UnlockRect();
     gpu.CloseScene();
     d->StretchRect(g->upload, nullptr, g->surf, nullptr, D3DTEXF_NONE);
@@ -253,6 +247,7 @@ static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     for (int y = 0; y < b->h; y++)
         RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal);
     g->sysmem->UnlockRect();
+    b->cpuSerial++;  // the CPU copy changed: a texture made from it is behind
 }
 
 void GpuCpuAccess(Surface* s, bool write) {
@@ -314,12 +309,24 @@ struct GpuTex final : Gpu::Owner {
     bool keyed = false;
     DWORD key = 0;
     std::vector<Buffer*> levelBufs;
+    std::vector<unsigned> levelSerials;  // each level's Buffer::cpuSerial when uploaded
+    // A render target used as a texture while the GPU has its newest pixels: a copy made on
+    // the GPU (no read back through the CPU), of `rtSrc` as its serial was `rtSerial`.
+    IDirect3DTexture9* rtTex = nullptr;
+    const void* rtSrc = nullptr;
+    unsigned rtSerial = 0;
+    UINT rtW = 0, rtH = 0;
+    D3DFORMAT rtFmt = D3DFMT_UNKNOWN;
 
     GpuTex(Gpu* g, Surface* s) : gpu(g), top(s) {}
     void Drop() {
         if (tex) tex->Release();
         tex = nullptr;
         levelBufs.clear();
+        levelSerials.clear();
+        if (rtTex) rtTex->Release();
+        rtTex = nullptr;
+        rtSrc = nullptr;
     }
     void ReleaseGpuResources() override { Drop(); }
     void GpuReleased() override {
@@ -349,6 +356,42 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
     // The colour key becomes alpha only while D3DRENDERSTATE_COLORKEYENABLE is on.
     const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc;
     const DWORD key = keyed ? s->ck[kCkSrcBlt].dwColorSpaceLowValue : 0;
+    // Rendered into by Direct3D and not touched by the CPU since: copied on the GPU. (Mipmapped
+    // or colour-keyed ones go through the CPU copy below.)
+    if (chain.size() == 1 && !keyed) {
+        Buffer* b = s->buf;
+        GpuSurf* g = b->gpu;
+        if (g && g->surf && b->cpuStale && !b->gpuStale) {
+            if (!t->rtTex || t->rtW != UINT(b->w) || t->rtH != UINT(b->h) || t->rtFmt != g->fmt) {
+                if (t->rtTex) t->rtTex->Release();
+                t->rtTex = nullptr;
+                if (FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &t->rtTex,
+                                            nullptr)))
+                    t->rtTex = nullptr;
+                t->rtW = b->w;
+                t->rtH = b->h;
+                t->rtFmt = g->fmt;
+                t->rtSrc = nullptr;
+            }
+            if (t->rtTex) {
+                if (t->rtSrc != g || t->rtSerial != g->serial) {
+                    IDirect3DSurface9* level = nullptr;
+                    if (SUCCEEDED(t->rtTex->GetSurfaceLevel(0, &level))) {
+                        gpu.CloseScene();  // StretchRect: outside a scene
+                        if (SUCCEEDED(d->StretchRect(g->surf, nullptr, level, nullptr, D3DTEXF_NONE))) {
+                            t->rtSrc = g;
+                            t->rtSerial = g->serial;
+                        }
+                        level->Release();
+                    }
+                }
+                if (t->rtSrc == g) {
+                    t->levelBufs.assign(chain.size(), nullptr);  // the managed copy is behind now
+                    return t->rtTex;
+                }
+            }
+        }
+    }
     bool all = false;
     if (!t->tex || t->levels != chain.size() || keyed != t->keyed) {
         t->Drop();
@@ -374,15 +417,13 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
     }
     if (pal != t->pal || (pal && pal->version != t->palVersion) || key != t->key) all = true;
     t->levelBufs.resize(chain.size(), nullptr);
+    t->levelSerials.resize(chain.size(), 0);
     const PALETTEENTRY* entries = pal ? pal->entries : s->dd->defaultPalette;
     for (UINT i = 0; i < chain.size(); i++) {
         Buffer* b = chain[i]->buf;
         // Rendered into by Direct3D (a render target used as a texture): read back first.
-        if (b->gpu && b->cpuStale && b->gpu->surf) {
-            ReadBack(gpu, d, b->gpu);
-            b->gpuStale = true;
-        }
-        if (!all && !b->gpuStale && t->levelBufs[i] == b) continue;
+        if (b->gpu && b->cpuStale && b->gpu->surf) ReadBack(gpu, d, b->gpu);
+        if (!all && t->levelBufs[i] == b && t->levelSerials[i] == b->cpuSerial) continue;
         D3DLOCKED_RECT lr;
         if (FAILED(t->tex->LockRect(i, &lr, nullptr, 0))) continue;
         if (b->fmt.BlockCompressed()) {
@@ -393,12 +434,13 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
                 memcpy(static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, b->bits + y * rowBytes,
                        std::min<size_t>(rowBytes, size_t(lr.Pitch)));
         } else {
+            const RowConverter conv(b->fmt, entries, keyed, key);
             for (int y = 0; y < b->h; y++)
-                RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, t->convert, entries, keyed, key);
+                RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, t->convert ? &conv : nullptr);
         }
         t->tex->UnlockRect(i);
-        b->gpuStale = false;
         t->levelBufs[i] = b;
+        t->levelSerials[i] = b->cpuSerial;
     }
     t->pal = pal;
     t->palVersion = pal ? pal->version : 0;
@@ -501,13 +543,17 @@ struct GpuContext::Impl final : Gpu::Owner {
     Surface* z = nullptr;
     IDirect3DSurface9* boundRt = nullptr;  // what D3D9 has (compared only)
     IDirect3DSurface9* boundZ = nullptr;
+    bool rebind = true;  // what D3D9 has bound is unknown (new device, or another context's)
     Surface* tex[8] = {};
     bool colorKey = false;
     D3DVIEWPORT9 vp = {0, 0, 1, 1, 0.0f, 1.0f};
     std::unordered_map<DWORD, IDirect3DVertexDeclaration9*> decls;
     std::vector<uint8_t> scratch;
 
-    explicit Impl(Gpu& g) : gpu(g) { gpu.AddOwner(this); }
+    explicit Impl(Gpu& g) : gpu(g) {
+        GpuGuard l(gpu);  // the presenter thread walks the owners with only the Gpu lock
+        gpu.AddOwner(this);
+    }
     ~Impl() {
         GpuGuard l(gpu);
         if (gpu.stateOwner == this) gpu.stateOwner = nullptr;
@@ -537,6 +583,7 @@ bool GpuContext::Begin(bool* fresh) {
         p_->generation = p_->gpu.Generation();
         p_->gpu.stateOwner = p_;
         p_->boundRt = p_->boundZ = nullptr;
+        p_->rebind = true;
         *fresh = true;
     }
     return true;
@@ -606,17 +653,18 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
         if (overwriteColor) rt->buf->gpuStale = false;
         else UploadSurf(gpu, dev, r);
     }
-    if (boundRt != r->surf) {
+    if (rebind || boundRt != r->surf) {
         dev->SetRenderTarget(0, r->surf);
         boundRt = r->surf;
         dev->SetViewport(&vp);  // D3D9 resets it to the whole target; Direct3D 7 keeps its own
     }
     GpuSurf* zs = z ? EnsureSurf(gpu, dev, z->buf, true) : nullptr;
     IDirect3DSurface9* zsurf = zs ? zs->surf : nullptr;
-    if (boundZ != zsurf) {
+    if (rebind || boundZ != zsurf) {  // also null: another context may have left its Z bound
         dev->SetDepthStencilSurface(zsurf);
         boundZ = zsurf;
     }
+    rebind = false;
     if (zs && zs->pendingClear) {
         zs->pendingClear = false;
         if (!overwriteZ) {
@@ -648,9 +696,14 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     if (!p.BindTargets(whole && (flags & D3DCLEAR_TARGET), whole && (flags & D3DCLEAR_ZBUFFER))) return;
     if (!p.boundZ) flags &= ~DWORD(D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL);
     if (!flags) return;
+    // A Z buffer that fell back to D16 has no stencil: D3D9 would refuse the whole clear.
+    if (p.z && p.z->buf->gpu && p.z->buf->gpu->fmt != D3DFMT_D24S8) flags &= ~DWORD(D3DCLEAR_STENCIL);
+    if (!flags) return;
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
+    if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
     if (flags & D3DCLEAR_TARGET) {
         p.rt->buf->cpuStale = true;
+        p.rt->buf->gpu->serial = ++g_drawSerial;
         p.rt->buf->gpuStale = false;
     }
 }
@@ -739,6 +792,8 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     (void)indexCount;
     p.rt->buf->cpuStale = true;
     p.rt->buf->gpuStale = false;
+    p.rt->buf->gpu->serial = ++g_drawSerial;
+    if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
 }
 
 void GpuContext::EndScene() { p_->gpu.CloseScene(); }

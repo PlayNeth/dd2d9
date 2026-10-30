@@ -7,7 +7,7 @@
 #endif
 #include <windows.h>
 #include <ddraw.h>
-// d3d9.h is only included by presenter.cpp: it conflicts with d3d.h (d3dproxy.cpp).
+// d3d9.h is only included by gpu.cpp, gpures.cpp and presenter.cpp: it conflicts with d3d.h.
 
 #include <cstdint>
 #include <cstring>
@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.0"
+#define DD2D9_VERSION "0.9.1"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -29,7 +29,7 @@ struct Config {
     int stretch = 0;               // window & borderless scaling: 0 aspect, 1 fill, 2 integer
     int filter = 0;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear)
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
-    int d3d = kD3DAuto;            // Direct3D objects for a wrapper (D7VK): auto = when loaded behind one
+    int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
     bool mouseScale = true;        // map the mouse to the game's display mode when it is scaled or windowed
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
     int log = 0;                   // 0 off, 1 info, 2 trace (every blit, lock, flip and palette change)
@@ -37,7 +37,7 @@ struct Config {
 };
 extern Config g_config;
 void LoadConfig(HMODULE self);
-// dd2d9 was loaded under another name than ddraw.dll (as ddraw_.dll behind D7VK).
+// dd2d9 was loaded under another name than ddraw.dll (behind a wrapper).
 bool LoadedBehindWrapper();
 
 // ---------------------------------------------------------------- logging

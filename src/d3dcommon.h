@@ -49,7 +49,7 @@ inline UINT FvfSize(DWORD fvf) {
     if (fvf & D3DFVF_RESERVED1) n += 4;
     if (fvf & D3DFVF_DIFFUSE) n += 4;
     if (fvf & D3DFVF_SPECULAR) n += 4;
-    const DWORD tex = (fvf >> 8) & 0xF;
+    const DWORD tex = std::min<DWORD>((fvf >> 8) & 0xF, 8);
     for (DWORD i = 0; i < tex; i++) {
         static const UINT kSize[] = {8, 12, 16, 4};
         n += kSize[(fvf >> (16 + 2 * i)) & 3];

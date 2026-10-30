@@ -6,6 +6,13 @@
 namespace dd2d9 {
 namespace d6 {
 
+// The reference slot of the interface pointer a game gave (XP releases through it).
+static int SlotOfIface(Surface* s, void* iface) {
+    for (int v : {1, 2, 3, 4, 7})
+        if (s->Iface(v) == iface) return Surface::SlotFor(v);
+    return Surface::kRefV1;
+}
+
 Viewport* VpFrom(IUnknown* p) { return p ? static_cast<Viewport*>(reinterpret_cast<IDirect3DViewport3*>(p)) : nullptr; }
 
 // UpdateViewportCache (C §1.6): nothing for degenerate data (the previous mapping stays).
@@ -89,7 +96,7 @@ HRESULT Viewport::SetViewport2(D3DVIEWPORT2* d) {
     if (!d || d->dwSize != sizeof(D3DVIEWPORT2)) return DDERR_INVALIDPARAMS;
     Guard l;
     if (!dev) return D3DERR_VIEWPORTHASNODEVICE;
-    if (dev->version >= 2) {  // version-1 devices take anything
+    if (dev->version >= 2 && dev->rt) {  // version-1 devices take anything
         const DWORD w = DWORD(dev->rt->W()), h = DWORD(dev->rt->H());
         if (d->dvClipWidth == 0.0f || d->dvClipHeight == 0.0f || d->dvMinZ == d->dvMaxZ || d->dwX > w || d->dwY > h ||
             d->dwX + d->dwWidth > w || d->dwY + d->dwHeight > h)
@@ -260,7 +267,7 @@ HRESULT Viewport::GetBackground(D3DMATERIALHANDLE* h, WINBOOL* valid) {
 // The previous surface is released and the new one kept without a reference (sic).
 HRESULT Viewport::SetBackgroundDepth(IDirectDrawSurface* s) {
     Guard l;
-    if (bgDepth) bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : Surface::kRefV1);
+    if (bgDepth) bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : SlotOfIface(bgDepth, bgDepthIface));
     bgDepth = s ? Surface::From(s) : nullptr;
     bgDepthIface = s;
     bgDepthSlot = -1;
@@ -275,7 +282,7 @@ HRESULT Viewport::SetBackgroundDepth2(IDirectDrawSurface4* s) {
         if (!n) return DDERR_INVALIDPARAMS;
         n->AddRef(Surface::kRefV1);  // QueryInterface(IID_IDirectDrawSurface)
     }
-    if (bgDepth) bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : Surface::kRefV1);
+    if (bgDepth) bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : SlotOfIface(bgDepth, bgDepthIface));
     bgDepth = n;
     bgDepthIface = n ? n->Iface(1) : nullptr;
     bgDepthSlot = n ? Surface::kRefV1 : -1;

@@ -211,11 +211,7 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
         o.specular = specular;
         for (DWORD t = 0; t < in.texCount; t++) memcpy(o.tex[t], v + in.tex[t], 8);
     }
-    if (clip) {
-        if (n) d->status = (d->status | (orCodes & 0xFFF)) & ((DWORD(andCodes) << 12) | 0xFF000FFF);
-    } else {
-        d->status &= 0xFF000FFF;
-    }
+    if (clip && n) d->status = (d->status | (orCodes & 0xFFF)) & ((DWORD(andCodes) << 12) | 0xFF000FFF);
 }
 
 // ---------------------------------------------------------------- clipping and drawing
@@ -712,6 +708,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
                 const DWORD fvf = op == D3DPROCESSVERTICES_TRANSFORMLIGHT ? D3DFVF_VERTEX : D3DFVF_LVERTEX;
                 const bool lit = lightFlag && fvf == D3DFVF_VERTEX && FindMatHandle(ls.material);
                 TransformVerts(this, src, 32, fvf, n, flags == D3DEXECUTE_CLIPPED, lit, true, &tl[p.wDest]);
+                if (flags != D3DEXECUTE_CLIPPED) status &= 0xFF000FFF;  // unclipped: no intersection (C §6.2)
                 stats.dwVerticesProcessed += n;
             }
             break;
@@ -800,6 +797,7 @@ void FillRectsTex(Device* d, const std::vector<RECT>& rects, Surface* tex, const
                               {131, 0}, {132, 0}, {133, 0}, {134, 0}, {135, 0}, {1, TexHandleFor(tex)}};
     DWORD old[std::size(saved)];
     const DWORD oldHandle = d->dTexHandle;  // the driver's, which SetTexture may have ended
+    Surface* const oldTex0 = d->dtex[0];
     for (size_t i = 0; i < std::size(saved); i++) {
         old[i] = d->rs[saved[i][0]];
         d->SetRS(saved[i][0], saved[i][1], true);
@@ -824,6 +822,7 @@ void FillRectsTex(Device* d, const std::vector<RECT>& rects, Surface* tex, const
     }
     for (size_t i = std::size(saved); i-- > 0;) d->SetRS(saved[i][0], old[i], true);
     d->dTexHandle = oldHandle;
+    d->dtex[0] = oldTex0;
     d->PushStageOps9();
     d->PushAlpha9();
 }

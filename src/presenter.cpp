@@ -141,6 +141,16 @@ void Presenter::GetGamma(DDGAMMARAMP* ramp) {
 void Presenter::ReleaseGpuResources() {
     if (staging_) staging_->Release();
     staging_ = nullptr;
+    if (gammaSrc_) gammaSrc_->Release();
+    if (gammaOut_) gammaOut_->Release();
+    if (gammaLutTex_) gammaLutTex_->Release();
+    if (gammaPs_) gammaPs_->Release();
+    gammaSrc_ = nullptr;
+    gammaOut_ = nullptr;
+    gammaLutTex_ = nullptr;
+    gammaPs_ = nullptr;
+    gammaW_ = gammaH_ = 0;
+    gammaTexVersion_ = 0;
     if (prescaled_) prescaled_->Release();
     prescaled_ = nullptr;
     preW_ = preH_ = 0;
@@ -178,6 +188,102 @@ bool Presenter::EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h) {
     stH_ = h;
     stagingStale_ = true;
     return true;
+}
+
+// ps_2_0: each channel of s0 looked up in s1, a 256x1 ramp (texel i = the ramp's red, green
+// and blue for i). Assembled from:
+//   def c0, 255/256, 0.5/256, 0.5, 1 / dcl t0.xy / dcl_2d s0 / dcl_2d s1 / texld r0, t0, s0
+//   r1..r3 = (r0.x|y|z * c0.x + c0.y, 0.5) / texld r4..r6, r1..r3, s1
+//   oC0 = (r4.x, r5.y, r6.z, 1)
+static const DWORD kGammaPs[] = {0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000, 0xa00f0800, 0x0200001f, 0x90000000, 0xa00f0801, 0x05000051, 0xa00f0000, 0x3f7f0000, 0x3b000000, 0x3f000000, 0x3f800000, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001, 0x800f0001, 0xa0aa0000, 0x02000001, 0x800f0002, 0xa0aa0000, 0x02000001, 0x800f0003, 0xa0aa0000, 0x04000004, 0x80010001, 0x80000000, 0xa0000000, 0xa0550000, 0x04000004, 0x80010002, 0x80550000, 0xa0000000, 0xa0550000, 0x04000004, 0x80010003, 0x80aa0000, 0xa0000000, 0xa0550000, 0x03000042, 0x800f0004, 0x80e40001, 0xa0e40801, 0x03000042, 0x800f0005, 0x80e40002, 0xa0e40801, 0x03000042, 0x800f0006, 0x80e40003, 0xa0e40801, 0x02000001, 0x800f0007, 0xa0ff0000, 0x02000001, 0x80010007, 0x80000004, 0x02000001, 0x80020007, 0x80550005, 0x02000001, 0x80040007, 0x80aa0006, 0x02000001, 0x800f0800, 0x80e40007, 0x0000ffff};
+
+// The frame (src's rectangle r) with the gamma ramp applied, or null (shown without it).
+// Gpu lock held, outside a scene. The device's state is a GpuContext's: afterwards the next
+// one sends all of its own again.
+IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r) {
+    if (gammaFailed_) return nullptr;
+    const UINT w = UINT(r.right - r.left), h = UINT(r.bottom - r.top);
+    if (!gammaPs_ && FAILED(d->CreatePixelShader(kGammaPs, &gammaPs_))) {
+        gammaPs_ = nullptr;
+        gammaFailed_ = true;
+        DD2D9_LOG("gamma: no pixel shader (the ramp isn't applied to Direct3D frames)");
+        return nullptr;
+    }
+    if (!gammaLutTex_ && FAILED(d->CreateTexture(256, 1, 1, 0, D3DFMT_X8R8G8B8, D3DPOOL_MANAGED, &gammaLutTex_, nullptr))) {
+        gammaLutTex_ = nullptr;
+        return nullptr;
+    }
+    if (gammaW_ != w || gammaH_ != h || !gammaSrc_ || !gammaOut_) {
+        if (gammaSrc_) gammaSrc_->Release();
+        if (gammaOut_) gammaOut_->Release();
+        gammaSrc_ = nullptr;
+        gammaOut_ = nullptr;
+        gammaW_ = gammaH_ = 0;
+        if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &gammaSrc_, nullptr)) ||
+            FAILED(d->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &gammaOut_, nullptr))) {
+            if (gammaSrc_) gammaSrc_->Release();
+            gammaSrc_ = nullptr;
+            gammaOut_ = nullptr;
+            return nullptr;
+        }
+        gammaW_ = w;
+        gammaH_ = h;
+    }
+    EnterCriticalSection(&gammaLock_);
+    if (gammaTexVersion_ != gammaVersion_) {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(gammaLutTex_->LockRect(0, &lr, nullptr, 0))) {
+            auto* t = static_cast<uint32_t*>(lr.pBits);
+            for (int i = 0; i < 256; i++)
+                t[i] = 0xFF000000u | (uint32_t(gammaLut_[0][i]) << 16) | (uint32_t(gammaLut_[1][i]) << 8) | gammaLut_[2][i];
+            gammaLutTex_->UnlockRect(0);
+            gammaTexVersion_ = gammaVersion_;
+        }
+    }
+    LeaveCriticalSection(&gammaLock_);
+    IDirect3DSurface9* level = nullptr;
+    if (FAILED(gammaSrc_->GetSurfaceLevel(0, &level))) return nullptr;
+    d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT);
+    level->Release();
+    d->SetRenderTarget(0, gammaOut_);
+    d->SetDepthStencilSurface(nullptr);
+    const D3DVIEWPORT9 vp = {0, 0, w, h, 0.0f, 1.0f};
+    d->SetViewport(&vp);
+    d->SetPixelShader(gammaPs_);
+    d->SetVertexShader(nullptr);
+    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+    d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    d->SetRenderState(D3DRS_WRAP0, 0);
+    d->SetTexture(0, gammaSrc_);
+    d->SetTexture(1, gammaLutTex_);
+    for (DWORD s = 0; s < 2; s++) {
+        d->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        d->SetSamplerState(s, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        d->SetSamplerState(s, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        d->SetSamplerState(s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        d->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        d->SetSamplerState(s, D3DSAMP_SRGBTEXTURE, FALSE);
+    }
+    const DWORD rs[][2] = {{D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE},
+                           {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_FOGENABLE, FALSE},
+                           {D3DRS_STENCILENABLE, FALSE}, {D3DRS_SCISSORTESTENABLE, FALSE},
+                           {D3DRS_COLORWRITEENABLE, 0xF}, {D3DRS_FILLMODE, D3DFILL_SOLID}, {D3DRS_SRGBWRITEENABLE, FALSE},
+                           {D3DRS_CLIPPLANEENABLE, 0}};
+    for (const auto& s : rs) d->SetRenderState(D3DRENDERSTATETYPE(s[0]), s[1]);
+    // Pixel centres on texel centres (D3D9's half-pixel offset).
+    const float fw = float(w), fh = float(h);
+    const float q[4][6] = {{-0.5f, -0.5f, 0, 1, 0, 0}, {fw - 0.5f, -0.5f, 0, 1, 1, 0},
+                           {-0.5f, fh - 0.5f, 0, 1, 0, 1}, {fw - 0.5f, fh - 0.5f, 0, 1, 1, 1}};
+    Gpu& gpu = dd_->GetGpu();
+    gpu.OpenScene();
+    d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+    gpu.CloseScene();
+    d->SetPixelShader(nullptr);
+    d->SetTexture(0, nullptr);
+    d->SetTexture(1, nullptr);
+    gpu.stateOwner = nullptr;  // the next Direct3D context sends all its state again
+    return gammaOut_;
 }
 
 // filter=sharp's intermediate image: a render target (StretchRect filters only into one).
@@ -290,7 +396,7 @@ void Presenter::Convert(const Snapshot& s, const RECT& area, void* bits, int pit
         if (f.pal8) {
             const uint8_t* src = row + x0;
             for (int i = 0; i < n; i++) o[i] = lut8[src[i]];
-        } else if (f.bpp == 16) {
+        } else if (f.bpp == 16) {  // the table: as fast as SSE2 here (measured), and it has the gamma in
             const uint16_t* src = reinterpret_cast<const uint16_t*>(row) + x0;
             for (int i = 0; i < n; i++) o[i] = lut16_[src[i]];
         } else if (fastCopy) {
@@ -315,7 +421,7 @@ void Presenter::Loop() {
     while (running_) {
         // Also refresh periodically (window exposed, moved...). D3D9 may create
         // windows on the thread that owns a device, so keep its messages flowing.
-        const bool woken = MsgWaitForMultipleObjects(1, &dirtyEvent_, FALSE, 250, QS_ALLINPUT) == WAIT_OBJECT_0;
+        MsgWaitForMultipleObjects(1, &dirtyEvent_, FALSE, 250, QS_ALLINPUT);
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         if (!running_) break;
@@ -338,15 +444,13 @@ void Presenter::Loop() {
             Guard l;
             // In the background (focus lost) nothing is shown, and no device may be
             // created: the window is about to be minimized.
-            // A wrapper's Direct3D device presents instead (see DDraw::Add3DDevice).
             // A game that made a new DirectDraw object without releasing this one
             // shows that one's primary: two presenters would fight over the window.
             // A lost primary (the display mode changed, or the game left exclusive mode
             // and went on with another DirectDraw object) holds nothing current until
             // the game restores it: showing it would cover what the game draws now.
             superseded = dd_->Superseded();
-            havePrimary = dd_->primary != nullptr && !dd_->primary->IsLost() && !dd_->Suspended() &&
-                          !dd_->Has3D() && !superseded;
+            havePrimary = dd_->primary != nullptr && !dd_->primary->IsLost() && !dd_->Suspended() && !superseded;
             if (havePrimary) hwnd = dd_->PresentWindow();
             if (hwnd) src = dd_->PresentSource(hwnd);
             if (hwnd) target = dd_->PresentTarget(hwnd);
@@ -355,15 +459,7 @@ void Presenter::Loop() {
             if (superseded) LeaveGpu();  // the window belongs to the other object's device
             active_ = false;
             stagingStale_ = true;  // the device may go meanwhile: start over with a full frame
-            // After a wrapper's 3D device, the screen shows its last frame, which
-            // the primary surface never held: wait for the game to draw again
-            // instead of refreshing with stale content.
-            if (dd_->Has3D()) waitForContent_ = true;
             continue;
-        }
-        if (waitForContent_) {
-            if (!woken) continue;  // periodic refresh: nothing new yet
-            waitForContent_ = false;
         }
         RECT cr;
         GetClientRect(hwnd, &cr);
@@ -398,7 +494,7 @@ void Presenter::Loop() {
             Guard l;
             supersededNow = dd_->Superseded();
         }
-        if (dropRequest_ || dd_->Has3D() || dd_->Suspended() || supersededNow) {
+        if (dropRequest_ || dd_->Suspended() || supersededNow) {
             SetEvent(dirtyEvent_);  // handle it right away in the next iteration
             continue;
         }
@@ -430,6 +526,14 @@ void Presenter::Loop() {
                 else if (!IntersectRect(&area, &changed, &src)) SetRectEmpty(&area);
                 // Direct3D drew into it since the CPU copy was made: shown straight from
                 // its render target, the whole frame (the staging surface no longer holds it).
+                // A palettized one goes through its CPU copy (read back now): the palette is
+                // applied there. So does a source rectangle outside the surface (a window
+                // partly off the screen), which StretchRect would refuse.
+                const bool inside = src.left >= 0 && src.top >= 0 && src.right <= p->buf->w && src.bottom <= p->buf->h;
+                if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale && (p->buf->fmt.pal8 || !inside)) {
+                    GpuCpuAccess(p, false);
+                    area = src;
+                }
                 if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale) {
                     gpuFrame = true;
                     area = src;
@@ -475,11 +579,23 @@ void Presenter::Loop() {
         // The frame's source: the render target as it is, or the staging surface the CPU copy
         // is converted into (also when the render target went meanwhile: read back then).
         IDirect3DSurface9* source = staging_;
+        IDirect3DSurface9* heldRt = nullptr;
         RECT sourceRect = {0, 0, LONG(sw), LONG(sh)};
         if (gpuFrame && snap.buf) {
             if (IDirect3DSurface9* rt = GpuNewestSurface(snap.buf)) {
+                rt->AddRef();  // snap.buf may hold the last reference to it: released after Present
+                heldRt = rt;
                 source = rt;
                 sourceRect = src;
+                EnterCriticalSection(&gammaLock_);
+                const bool gammaOn = gammaActive_;
+                LeaveCriticalSection(&gammaLock_);
+                if (gammaOn) {
+                    if (IDirect3DSurface9* g = ApplyGammaGpu(d, rt, src)) {
+                        source = g;
+                        sourceRect = {0, 0, src.right - src.left, src.bottom - src.top};
+                    }
+                }
                 snap.buf->Release();
                 snap.buf = nullptr;
             }
@@ -534,6 +650,7 @@ void Presenter::Loop() {
             bb->Release();
         }
         const HRESULT hr = swap->Present(nullptr, nullptr, nullptr, nullptr, 0);
+        if (heldRt) heldRt->Release();
         gpu.Unlock();
         active_ = SUCCEEDED(hr);
         if (FAILED(hr)) DD2D9_LOG("Present failed: 0x%08lx", hr);

@@ -3,6 +3,32 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.1
+- **The gamma ramp applies to Direct3D frames presented from the GPU** (0.8.3 showed them
+  without it): the frame goes through a small pixel shader that looks each channel up in
+  the ramp. Games with a brightness slider using `SetGammaRamp` look right again in 3D.
+- **Render targets used as textures are copied on the GPU** while Direct3D holds their
+  newest pixels, instead of being read back through system memory and uploaded again at
+  every use (reflections, render-to-texture menus). Mipmapped or colour-keyed ones still go
+  through the CPU copy.
+- **D7VK support removed**: dd2d9's own Direct3D 3–7 replaces it. Gone: the Direct3D
+  objects for a wrapper (`d3dproxy.cpp`), the presenter stepping aside for a wrapper's
+  device, `install-dd2d9.sh --d7vk`. `d3d=on` now means the same as `auto`.
+- With D7VK gone, two workarounds for references it kept go too, back to `ddraw.dll`'s
+  rules (re/spec/ddraw-object.md): a second DirectDraw object gets
+  `DDERR_EXCLUSIVEMODEALREADYSET` while the first holds exclusive mode in front (it takes
+  over once the first lost activation, or its window is gone or hidden), and a new primary
+  surface is refused with `DDERR_PRIMARYSURFACEALREADYEXISTS` while the old one exists, lost
+  or not.
+- **Faster texture and render-target uploads**: rows go to A8R8G8B8 through a converter
+  built once per surface (`src/convert.cpp`): SSE2 for 565/555/1555/4444 and 32-bit RGB,
+  colour key included, and a table for palettized ones. It is bit-exact with the old
+  per-pixel path and about 7x faster (a 1024x768 565 texture: ~0.55 ms instead of ~4 ms).
+- Built with `-msse2 -mfpmath=sse`: the Direct3D 3–6 transform, lighting and clipping
+  code no longer runs on the x87 stack. (The presenter's 16-bit conversion stays a
+  table: measured, SSE2 wasn't faster there.)
+- `d3d7test` checks render to texture; `gamma` sets an inverting ramp.
+
 ## 0.9.0
 **Direct3D 3–6 in dd2d9 itself** (`src/d3d6*.cpp`), matched to XP SP3's `d3dim.dll`
 (`re/spec/d3d6-*.md`): DirectDraw objects made by `DirectDrawCreate` now offer

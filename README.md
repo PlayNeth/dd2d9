@@ -57,14 +57,14 @@ DirectDraw (DirectX 1–7) and Direct3D (3–7), implemented on Direct3D 9. See
   `GetSystemMetrics`' screen size, the window's rectangles and coordinate conversions) and
   its window's mouse messages are translated, so the game sees its mode's coordinates
   with its window as the screen, as after a real mode switch. Graphics and input DLLs in
-  the game folder (D7VK, DXVK...) keep the real ones. `mouse=raw` turns it off.
+  the game folder (DXVK...) keep the real ones. `mouse=raw` turns it off.
 - **Windowed games** (`DDSCL_NORMAL`) get a desktop-sized primary surface, and
   the part under their window is shown.
 - **All interface versions are implemented**: IDirectDraw 1/2/4/7,
   IDirectDrawSurface 1/2/3/4/7, Palette, Clipper and GammaControl. Their method tables
   are writable, as `ddraw.dll`'s, for overlays and patches that hook them.
 - **Presenting through Windows' own `d3d9.dll`** (`d3d9=system`), even when the game
-  folder holds DXVK's for D7VK: Vulkan presentation in a window covering the screen can
+  folder holds DXVK's: Vulkan presentation in a window covering the screen can
   let the driver switch the display back to the desktop mode. `d3d9=game` uses the
   game's.
 
@@ -86,8 +86,8 @@ transformed vertices. The legacy render states (`TEXTUREHANDLE`, `TEXTUREMAPBLEN
 `TEXTUREMAG`/`MIN`, ...) are mapped onto texture stages as Microsoft's own rasterizer mapped
 them; `GetRenderState` still answers what the game set.
 
-Not done yet: the gamma ramp on 3D frames presented from the GPU, cube maps, rendering to textures used later as textures is read back
-through the CPU, and Z buffers can't be read or copied by DirectDraw (only cleared with
+Not done yet: cube maps (mipmapped or colour-keyed render-target textures still go through
+the CPU), and Z buffers can't be read or copied by DirectDraw (only cleared with
 `DDBLT_DEPTHFILL`). Direct3D 7's `GetClipStatus` reflects `ProcessVertices` and
 `SetClipStatus` only. Direct3D 3–6: no picking (`Pick` finds nothing), `D3DOP_SPAN` isn't
 drawn, and Ramp devices draw in colour.
@@ -98,12 +98,9 @@ software devices render to 8-bit palettized surfaces as XP's RGB and Ramp raster
 Direct3D 9 draws in true colour and each pixel read back becomes its palette entry (the
 exact one, else the nearest).
 
-**Behind D7VK** (D7VK as `ddraw.dll`, dd2d9 as `ddraw_.dll`, which `install-dd2d9.sh --d7vk`
-does) dd2d9 instead provides the Direct3D objects D7VK builds on (devices, viewports,
-materials, textures, with `Clear` and `Load` applied to the DirectDraw surfaces), and D7VK
-renders and presents while a 3D device exists. D7VK presents through its own swap chain,
-so `stretch` and `filter` don't apply to its frames: keep `display=switch` there. The `d3d=`
-ini key overrides which Direct3D is offered.
+The gamma ramp (`IDirectDrawGammaControl`) applies to 3D frames presented straight from the
+GPU too, through a small pixel shader. `d3d=off` offers no Direct3D at all (2D only). D7VK
+isn't needed or supported any more (0.9.0).
 
 ## Differences from ddraw.dll on purpose
 - **The window's frame sits just off the screen in fullscreen.** `ddraw.dll` leaves the
@@ -125,13 +122,9 @@ ini key overrides which Direct3D is offered.
 - **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2
   keeps drawing to its old back buffer).
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).
-- **A second DirectDraw object takes exclusive mode over** from the first (as in Wine;
-  `ddraw.dll` refuses it with `DDERR_EXCLUSIVEMODEALREADYSET` while the first is active).
-- **A primary surface a mode change made lost can be replaced** by a new one
-  (`ddraw.dll` refuses any second primary).
-  These two only matter behind D7VK, which keeps references the games released (Type
-  Wild's DirectDraw object, Jazz Jackrabbit 2's old front buffer), so on XP they're gone
-  and behind D7VK they aren't.
+- **A second DirectDraw object takes exclusive mode over** from a first one that has lost
+  activation, or whose window is gone or hidden (`ddraw.dll` frees it then and the second
+  takes it). While the first is in front, `DDERR_EXCLUSIVEMODEALREADYSET`, as in `ddraw.dll`.
 - **Direct3D 3–6 checks what `d3dim.dll` dereferences blindly**: unknown matrix, material
   and texture handles, a draw with no current viewport (`D3DERR_NOCURRENTVIEWPORT`), bad
   vertex types, execute-buffer offsets past the buffer, and NULL pointers give errors
@@ -167,7 +160,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `point`, `linear`, `sharp` (bilinear-sharp: whole-multiple point scaling, then linear) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
-| `d3d` | `auto`: dd2d9's own Direct3D (3–7), or the objects a wrapper needs when loaded as `ddraw_.dll`; `on`: always the wrapper's objects; `off`: no Direct3D |
+| `d3d` | `auto` (or `on`): dd2d9's own Direct3D (3–7); `off`: no Direct3D |
 | `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
@@ -193,9 +186,7 @@ dependencies.
 
 ## Using
 Copy `ddraw.dll` next to the game's executable, and under Wine also set
-`WINEDLLOVERRIDES="ddraw=n"`. Behind D7VK, D7VK is `ddraw.dll` and dd2d9 is
-`ddraw_.dll` in the same folder. `install-dd2d9.sh` installs it into a Wine prefix,
-either on its own or behind D7VK. Under Wine, `d3d9=system` presents through the prefix's
+`WINEDLLOVERRIDES="ddraw=n"`. `install-dd2d9.sh` installs it into a Wine prefix. Under Wine, `d3d9=system` presents through the prefix's
 `d3d9.dll` (wined3d, or DXVK if it's installed into the prefix); `d3d9=game` also takes
 one next to the game.
 
@@ -220,11 +211,11 @@ updates to a windowed primary). With `log=1`, the presenter logs every 10 second
 the frame it converted and how long the game had to wait for it.
 
 `build/reloadtest.exe [dll]` frees and reloads dd2d9 (default `ddraw_.dll`) while the game window
-stays subclassed by a wrapper, as D7VK does when a game switches between Direct3D and software.
+stays subclassed, as a wrapper loading dd2d9 under another name may do.
 
-`build/d3d7test.exe [w h [bpp]]` renders a Direct3D 7 triangle with DirectDraw fills
-and GDI text on top, then flips, through dd2d9's own Direct3D 7 or behind D7VK. It writes
-`d3d7test.txt`.
+`build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw
+fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp.
+It writes `d3d7test.txt`.
 
 ## Reverse-engineering notes
 `re/` has the vtable map of the XP SP3 `ddraw.dll` (5.3.2600.5512), along with

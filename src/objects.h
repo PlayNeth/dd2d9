@@ -8,6 +8,8 @@
 struct IDirect3D9;
 struct IDirect3DDevice9;
 struct IDirect3DSurface9;
+struct IDirect3DTexture9;
+struct IDirect3DPixelShader9;
 
 namespace dd2d9 {
 
@@ -47,7 +49,8 @@ struct Buffer {
     // Direct3D: the GPU copy of a render target or Z buffer (gpures.h), and which copy is
     // behind. g_lock (and the Gpu lock for gpu).
     GpuSurf* gpu = nullptr;
-    bool gpuStale = true;   // the CPU copy changed since the GPU copy was made
+    bool gpuStale = true;   // the CPU copy changed since the render target's GPU copy was made
+    unsigned cpuSerial = 1; // counts changes to the CPU copy (a texture's GPU copy is current while equal)
     bool cpuStale = false;  // the GPU copy changed since the CPU copy was read back
 };
 
@@ -287,7 +290,6 @@ public:
     GammaControl* gamma = nullptr;
     DDGAMMARAMP* gammaRamp = nullptr;  // the primary's ramp (SetGammaRamp), applied while exclusive
     HRESULT ManagedTextureCheck() const;  // Set/GetPriority, Set/GetLOD
-    void* d3dTexture = nullptr;  // Direct3D texture object (d3dproxy.cpp), created on demand
     GpuTex* gpuTex = nullptr;    // Direct3D's GPU copy of this texture and its mip levels (gpures.h)
     void* d3dLegacy = nullptr;   // Direct3D 3-6's textures and device made through QueryInterface (d3d6int.h)
     // The CPU copy is about to be read (written): Direct3D's drawing read back first.
@@ -360,13 +362,22 @@ private:
     HANDLE dirtyEvent_ = nullptr;
     HANDLE dropDone_ = nullptr;          // signaled when a DropDevice() request was handled
     volatile bool dropRequest_ = false;
-    bool waitForContent_ = false;  // presenter thread only: see Loop()
     volatile bool running_ = false;
     volatile bool active_ = false;
 
     bool usingGpu_ = false;            // presenting through the shared device (an owner of it)
     IDirect3DSurface9* staging_ = nullptr;
     IDirect3DSurface9* prescaled_ = nullptr;  // filter=sharp: the image enlarged by a whole factor
+    // The gamma ramp on frames presented from a render target: the frame copied into a
+    // texture, drawn through a pixel shader that looks each channel up in a 256x1 ramp.
+    IDirect3DTexture9* gammaSrc_ = nullptr;
+    IDirect3DSurface9* gammaOut_ = nullptr;
+    IDirect3DTexture9* gammaLutTex_ = nullptr;
+    IDirect3DPixelShader9* gammaPs_ = nullptr;
+    UINT gammaW_ = 0, gammaH_ = 0;
+    DWORD gammaTexVersion_ = 0;
+    bool gammaFailed_ = false;  // no pixel shaders: GPU frames shown without the ramp
+    IDirect3DSurface9* ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r);
     UINT preW_ = 0, preH_ = 0;
     UINT stW_ = 0, stH_ = 0;
 
@@ -512,11 +523,6 @@ public:
     bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
     bool QuietMove() const { return quietMove_; }  // CheckCover's move: hidden from the game
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
-    // Direct3D devices created through dd2d9 (by a wrapper such as D7VK, which
-    // then presents itself): while any exist, dd2d9 doesn't present.
-    void Add3DDevice();
-    void Remove3DDevice();
-    bool Has3D() const { return devices3D_ > 0; }
     void SleepUntilVBlank(int count);
     void PaceFlip();  // never let Flip() run faster than the refresh rate
     double VBlankPhase() const;  // 0..1 position inside the current refresh period
@@ -524,7 +530,6 @@ public:
     Surface* primary = nullptr;
     std::vector<Surface*> surfaces;
     PALETTEENTRY defaultPalette[256];
-    void* d3dObject = nullptr;  // Direct3D object (d3dproxy.cpp), shared by its interfaces
     void* d3d7 = nullptr;       // dd2d9's own Direct3D 7 object (d3d7.cpp), while it lives
     void* d3dLegacy = nullptr;  // dd2d9's own Direct3D 3-6 object (d3d6obj.cpp), while it lives
     bool dd7 = false;           // made by DirectDrawCreateEx (ddraw.dll's DDRAWILCL_DIRECTDRAW7)
@@ -548,7 +553,6 @@ private:
 
     LONG ref_ = 0;
     LONG tornDown_ = 0;
-    LONG devices3D_ = 0;
     LONG ifaceRef_[4] = {};  // per interface version: 1, 2, 4, 7
 public:
     // Video memory as games see it: a fixed total, minus the video-memory surfaces (g_lock).

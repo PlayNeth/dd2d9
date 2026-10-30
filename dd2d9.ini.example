@@ -13,8 +13,6 @@
 ;                lacks the mode (320x200, 320x240...), falls back to borderless.
 ;   window     - no mode change: a window the size of the game's mode, centered
 ;   borderless - no mode change: a borderless window covering the monitor, image scaled
-;                Behind D7VK, 3D frames are D7VK's and fill the screen whatever the
-;                stretch and filter: keep switch for 3D games.
 display=switch
 
 ; Scaling when the image doesn't fit 1:1 (window resized, borderless, windowed games):
@@ -37,12 +35,7 @@ filter=point
 vsync=auto
 
 ; Direct3D (3D games):
-;   auto - when loaded behind a Direct3D wrapper such as D7VK (as ddraw_.dll), give it the
-;          Direct3D objects it builds on; it renders and presents the 3D frames, and dd2d9
-;          takes over again for 2D once the game releases its 3D device. Loaded on its
-;          own (as ddraw.dll), dd2d9's own Direct3D 7 (default)
-;   on   - offer a wrapper's objects even when not loaded as ddraw_.dll (a wrapper under
-;          another name)
+;   auto - dd2d9's own Direct3D 3-7, drawn through Direct3D 9 (default); on is the same
 ;   off  - no Direct3D at all: games use their 2D or software renderers
 d3d=auto
 
@@ -53,9 +46,9 @@ d3d=auto
 ;   raw   - the real screen's coordinates (clicks land in the wrong place when scaled)
 mouse=scale
 
-; Which d3d9.dll dd2d9 presents the 2D picture through:
-;   system - Windows' own, even when the game folder holds another one (DXVK's, which D7VK
-;            needs). Presenting through DXVK's Vulkan in a window that covers the screen
+; Which d3d9.dll dd2d9 draws and presents through:
+;   system - Windows' own, even when the game folder holds another one (DXVK's).
+;            Presenting through DXVK's Vulkan in a window that covers the screen
 ;            can let the driver take over the display and switch it back to the desktop
 ;            resolution, which drops games out of fullscreen (default)
 ;   game   - the one the game loads (the game folder's, if there is one)

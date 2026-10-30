@@ -2,9 +2,6 @@
 # Installs dd2d9's ddraw.dll into a Wine prefix's 32-bit system directory.
 #
 #   install-dd2d9.sh install <dd2d9 ddraw.dll>                     dd2d9 replaces Wine's ddraw
-#   install-dd2d9.sh install <dd2d9 ddraw.dll> --d7vk <d7vk ddraw.dll>
-#                                                                D7VK handles 3D, dd2d9 sits behind it
-#                                                                as ddraw_.dll (instead of Wine's ddraw)
 #   install-dd2d9.sh uninstall                                    restores Wine's ddraw
 #
 # Also creates C:\windows\dd2d9.ini in the prefix from dd2d9.ini.example if there is none
@@ -19,7 +16,7 @@ backup_name="ddraw.dll.wine-orig"
 die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -68,17 +65,10 @@ backup_wine_ddraw() {
 }
 
 cmd_install() {
-    local dd2d9="" d7vk=""
-    [ $# -ge 1 ] || usage
-    dd2d9="$1"; shift
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --d7vk) [ $# -ge 2 ] || usage; d7vk="$2"; shift 2 ;;
-            *) usage ;;
-        esac
-    done
+    local dd2d9=""
+    [ $# -eq 1 ] || usage
+    dd2d9="$1"
     require_x86_dll "$dd2d9" "dd2d9 ddraw.dll"
-    [ -z "$d7vk" ] || require_x86_dll "$d7vk" "D7VK ddraw.dll"
 
     local dir
     dir=$(sysdir)
@@ -86,17 +76,9 @@ cmd_install() {
     echo "system directory: $dir"
     backup_wine_ddraw "$dir"
 
-    if [ -n "$d7vk" ]; then
-        # D7VK loads ddraw_.dll from its own directory first, so dd2d9 becomes its
-        # DirectDraw implementation in place of Wine's.
-        cp -f "$d7vk" "$dir/ddraw.dll"
-        cp -f "$dd2d9" "$dir/ddraw_.dll"
-        echo "installed D7VK as ddraw.dll and dd2d9 as ddraw_.dll"
-    else
-        cp -f "$dd2d9" "$dir/ddraw.dll"
-        rm -f "$dir/ddraw_.dll"
-        echo "installed dd2d9 as ddraw.dll"
-    fi
+    cp -f "$dd2d9" "$dir/ddraw.dll"
+    rm -f "$dir/ddraw_.dll"  # left by older versions' D7VK setup
+    echo "installed dd2d9 as ddraw.dll"
     set_override
     echo "set DLL override: ddraw = native,builtin"
     local ini="$prefix/drive_c/windows/dd2d9.ini" example
