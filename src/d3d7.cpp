@@ -401,6 +401,8 @@ public:
 
     // For VertexBuffer7::ProcessVertices.
     D3DMATRIX world_, view_, proj_, world1_, world2_, world3_;
+    DWORD blendSent_ = 0;  // VERTEXBLEND as last sent to D3D9 (see DrawCommon)
+    int keySent_ = -1;     // whether PushAlphaTest last sent the colour key's alpha test
     D3DVIEWPORT7 vp_;
     DWORD rs_[256];
     D3DMATERIAL7 mat_ = {};
@@ -596,8 +598,10 @@ void Device7::PushRS(DWORD s) {
         ctx_.SetRenderState(195, b);
         break;
     }
-    case 151:  // VERTEXBLEND: D3D9's fixed function blends at most 3 weights
-        ctx_.SetRenderState(151, std::min<DWORD>(v, D3DVBLEND_3WEIGHTS));
+    case 151:  // VERTEXBLEND: D3D9's fixed function blends at most 3 weights; per draw, at
+        // most the vertices' own (DrawCommon): without, D3D9 would blend with weight 0
+        blendSent_ = std::min<DWORD>(v, D3DVBLEND_3WEIGHTS);
+        ctx_.SetRenderState(151, blendSent_);
         break;
     case 152:  // CLIPPLANEENABLE: the planes D3D9 has
         ctx_.SetRenderState(152, v & ((1u << std::min<DWORD>(caps_.wMaxUserClipPlanes, 31)) - 1));
@@ -618,6 +622,7 @@ void Device7::PushRS(DWORD s) {
 void Device7::PushAlphaTest() {
     ctx_.SetColorKeyEnable(rs_[41] == TRUE);
     const bool key = rs_[41] == TRUE && tex_[0] && tex_[0]->hasCk[kCkSrcBlt];
+    keySent_ = key;
     if (rs_[15] == TRUE || !key) {
         ctx_.SetRenderState(15, rs_[15] == TRUE);
         ctx_.SetRenderState(24, rs_[24] & 0xFF);
@@ -924,7 +929,7 @@ HRESULT Device7::SetLight(DWORD i, D3DLIGHT7* l) {
 }
 
 HRESULT Device7::LightEnableI(DWORD i, bool on) {
-    if (i >= 0x10000000) return E_OUTOFMEMORY;
+    if (i >= 0x10000) return E_OUTOFMEMORY;  // as SetLight (a vector that size would throw)
     if (i >= lights_.size()) lights_.resize(size_t(i) + 10);
     Light& l = lights_[i];
     if (!l.set) {  // a default white directional light (S §LightEnable)
@@ -1112,7 +1117,17 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
     }
     Use u(this);
     if (!u.ok) return D3D_OK;
-    if (rs_[41] == TRUE && tex_[0]) PushAlphaTest();  // the texture's colour key may have changed since
+    // The texture's colour key may have come or gone since (SetColorKey): sent again then.
+    if (rs_[41] == TRUE && tex_[0] && int(tex_[0]->hasCk[kCkSrcBlt]) != keySent_) PushAlphaTest();
+    {
+        // VERTEXBLEND reads min(the FVF's weights, the state) (V §9).
+        const DWORD posType = fvf & 0x0E, betas = posType >= 0x06 && posType != D3DFVF_XYZRHW ? (posType - 0x04) / 2 : 0;
+        const DWORD want = std::min<DWORD>(std::min<DWORD>(rs_[151], betas), D3DVBLEND_3WEIGHTS);
+        if (want != blendSent_) {
+            ctx_.SetRenderState(151, want);
+            blendSent_ = want;
+        }
+    }
     ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE);
     return D3D_OK;
 }
@@ -1182,6 +1197,148 @@ void Device7::HoldVB(VertexBuffer7* vb) {
     heldVB_ = vb;
 }
 
+// A transformed vertex buffer that ProcessVertices(D3DVOP_CLIP) left with clip codes: its
+// vertices outside the frustum are in clip space (x and y as (c + w) / 2, z, w), the others
+// on the screen (V §8.5). XP's draw clips them by the codes (V §4 step 3a). Here: each
+// primitive in clip space, clipped against the near plane (z >= 0: whatever is behind the
+// camera), then projected through the viewport; past the screen's edges the GPU clips them,
+// as any transformed vertex. Every attribute is interpolated (the colours per byte). The
+// result is a list of the primitive's kind, drawn instead.
+namespace {
+constexpr WORD kInClipSpace = 0x8000;  // a clip code's mark: the vertex was stored in clip space
+struct ClipVert {
+    float c[4];                // clip space: x, y, z, w
+    std::vector<uint8_t> rest;  // everything after the position, as in the buffer
+};
+}  // namespace
+
+static bool ExpandClipped(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* mem, UINT stride, const WORD* codes, DWORD n,
+                          const WORD* idx, DWORD ni, const D3DVIEWPORT7& vp, std::vector<uint8_t>* out,
+                          D3DPRIMITIVETYPE* outType) {
+    // Only vertices stored in clip space need it (codes from a transformed source mark
+    // vertices left on the screen, which the GPU clips as any).
+    bool any = false;
+    for (DWORD i = 0; i < n && !any; i++) any = (codes[i] & kInClipSpace) != 0;
+    if (!any) return false;
+    const float hw = vp.dwWidth * 0.5f, hh = vp.dwHeight * 0.5f, zr = vp.dvMaxZ - vp.dvMinZ;
+    // Where the colours are (lerped per byte); the rest is floats.
+    UINT off = 16;
+    int diffuse = -1, specular = -1;
+    if (fvf & D3DFVF_NORMAL) off += 12;
+    if (fvf & D3DFVF_RESERVED1) off += 4;
+    if (fvf & D3DFVF_DIFFUSE) diffuse = int(off), off += 4;
+    if (fvf & D3DFVF_SPECULAR) specular = int(off);
+    auto load = [&](DWORD i) {
+        ClipVert v;
+        const uint8_t* p = mem + size_t(i) * stride;
+        const float* f = reinterpret_cast<const float*>(p);
+        if (codes[i] & kInClipSpace) {  // (x + w) / 2, (y + w) / 2, z, w
+            v.c[3] = f[3];
+            v.c[0] = 2 * f[0] - f[3];
+            v.c[1] = 2 * f[1] - f[3];
+            v.c[2] = f[2];
+        } else {  // on the screen: back to clip space
+            const float w = f[3] != 0 ? 1.0f / f[3] : 1.0f;
+            v.c[3] = w;
+            v.c[0] = (f[0] - vp.dwX - hw) / hw * w;
+            v.c[1] = -(f[1] - vp.dwY - hh) / hh * w;
+            v.c[2] = zr != 0 ? (f[2] - vp.dvMinZ) / zr * w : 0.0f;
+        }
+        v.rest.assign(p + 16, p + stride);
+        return v;
+    };
+    auto lerp = [&](const ClipVert& a, const ClipVert& b, float k) {
+        ClipVert v;
+        for (int j = 0; j < 4; j++) v.c[j] = a.c[j] + (b.c[j] - a.c[j]) * k;
+        v.rest = a.rest;
+        for (UINT o = 0; o + 4 <= a.rest.size(); o += 4) {
+            const int at = int(o + 16);
+            if (at == diffuse || at == specular) {
+                for (int byte = 0; byte < 4; byte++) {
+                    const float x = a.rest[o + byte] + (float(b.rest[o + byte]) - a.rest[o + byte]) * k;
+                    v.rest[o + byte] = uint8_t(std::clamp(x + 0.5f, 0.0f, 255.0f));
+                }
+            } else {
+                float fa, fb;
+                memcpy(&fa, &a.rest[o], 4);
+                memcpy(&fb, &b.rest[o], 4);
+                const float x = fa + (fb - fa) * k;
+                memcpy(&v.rest[o], &x, 4);
+            }
+        }
+        return v;
+    };
+    auto emit = [&](const ClipVert& v) {
+        const size_t at = out->size();
+        out->resize(at + stride);
+        float* f = reinterpret_cast<float*>(out->data() + at);
+        const float rhw = 1.0f / v.c[3];
+        f[0] = v.c[0] * rhw * hw + vp.dwX + hw;
+        f[1] = -v.c[1] * rhw * hh + vp.dwY + hh;
+        f[2] = v.c[2] * rhw * zr + vp.dvMinZ;
+        f[3] = rhw;
+        memcpy(out->data() + at + 16, v.rest.data(), v.rest.size());
+    };
+    // Clipped against z >= 0 (the near plane; w > 0 beyond it). Sutherland-Hodgman.
+    auto clipPoly = [&](std::vector<ClipVert> in) {
+        std::vector<ClipVert> res;
+        for (size_t i = 0; i < in.size(); i++) {
+            const ClipVert& a = in[i];
+            const ClipVert& b = in[(i + 1) % in.size()];
+            const bool ain = a.c[2] >= 0, bin = b.c[2] >= 0;
+            if (ain) res.push_back(a);
+            if (ain != bin) res.push_back(lerp(a, b, a.c[2] / (a.c[2] - b.c[2])));
+        }
+        return res;
+    };
+    auto vertexAt = [&](DWORD k) { return idx ? DWORD(idx[k]) : k; };
+    const DWORD count = idx ? ni : n;
+    out->clear();
+    switch (t) {
+    case D3DPT_POINTLIST:
+        *outType = D3DPT_POINTLIST;
+        for (DWORD k = 0; k < count; k++) {
+            const ClipVert v = load(vertexAt(k));
+            if (v.c[2] >= 0 && v.c[3] > 0) emit(v);
+        }
+        return true;
+    case D3DPT_LINELIST:
+    case D3DPT_LINESTRIP:
+        *outType = D3DPT_LINELIST;
+        for (DWORD k = 0; k + 1 < count; k += t == D3DPT_LINELIST ? 2 : 1) {
+            ClipVert a = load(vertexAt(k)), b = load(vertexAt(k + 1));
+            if (a.c[2] < 0 && b.c[2] < 0) continue;
+            if (a.c[2] < 0) a = lerp(a, b, a.c[2] / (a.c[2] - b.c[2]));
+            else if (b.c[2] < 0) b = lerp(b, a, b.c[2] / (b.c[2] - a.c[2]));
+            emit(a);
+            emit(b);
+        }
+        return true;
+    default:
+        break;
+    }
+    *outType = D3DPT_TRIANGLELIST;
+    for (DWORD k = 0; k + 2 < count; k += t == D3DPT_TRIANGLELIST ? 3 : 1) {
+        DWORD i0, i1, i2;
+        if (t == D3DPT_TRIANGLEFAN) {
+            i0 = vertexAt(0), i1 = vertexAt(k + 1), i2 = vertexAt(k + 2);
+        } else if (t == D3DPT_TRIANGLESTRIP && (k & 1)) {
+            i0 = vertexAt(k + 1), i1 = vertexAt(k), i2 = vertexAt(k + 2);  // the same winding as the strip's
+        } else {
+            i0 = vertexAt(k), i1 = vertexAt(k + 1), i2 = vertexAt(k + 2);
+        }
+        std::vector<ClipVert> poly = {load(i0), load(i1), load(i2)};
+        if (poly[0].c[2] < 0 || poly[1].c[2] < 0 || poly[2].c[2] < 0) poly = clipPoly(std::move(poly));
+        for (size_t j = 1; j + 1 < poly.size(); j++) {
+            if (poly[0].c[3] <= 0 || poly[j].c[3] <= 0 || poly[j + 1].c[3] <= 0) continue;
+            emit(poly[0]);
+            emit(poly[j]);
+            emit(poly[j + 1]);
+        }
+    }
+    return true;
+}
+
 HRESULT Device7::DrawPrimitiveVB(D3DPRIMITIVETYPE t, IDirect3DVertexBuffer7* p, DWORD start, DWORD n, DWORD) {
     if (!p) return DDERR_INVALIDPARAMS;
     Guard l;
@@ -1192,6 +1349,13 @@ HRESULT Device7::DrawPrimitiveVB(D3DPRIMITIVETYPE t, IDirect3DVertexBuffer7* p, 
     const bool transformed = (vb->fvf_ & 0x0E) == D3DFVF_XYZRHW;
     const bool clipped = rs_[136] == TRUE && (kind_ != kTnLHAL || vb->hasClipCodes_);
     if ((transformed || kind_ == kTnLHAL) && !clipped) HoldVB(vb);
+    if (transformed && clipped && vb->hasClipCodes_ && vb->clip_.size() >= size_t(start) + n && ValidPrim(t)) {
+        std::vector<uint8_t> v;
+        D3DPRIMITIVETYPE ot;
+        if (ExpandClipped(t, vb->fvf_ & ~DWORD(0xF001), vb->mem_.data() + size_t(start) * vb->stride_, vb->stride_,
+                          vb->clip_.data() + start, n, nullptr, 0, vp_, &v, &ot))
+            return v.empty() ? D3D_OK : DrawCommon(ot, vb->fvf_, v.data(), vb->stride_, DWORD(v.size() / vb->stride_), nullptr, 0);
+    }
     return DrawCommon(t, vb->fvf_, vb->mem_.data() + size_t(start) * vb->stride_, vb->stride_, n, nullptr, 0);
 }
 
@@ -1216,6 +1380,13 @@ HRESULT Device7::DrawIndexedPrimitiveVB(D3DPRIMITIVETYPE t, IDirect3DVertexBuffe
             use = safe.data();
             break;
         }
+    }
+    if (transformed && clipped && vb->hasClipCodes_ && vb->clip_.size() >= size_t(start) + n && ValidPrim(t)) {
+        std::vector<uint8_t> v;
+        D3DPRIMITIVETYPE ot;
+        if (ExpandClipped(t, vb->fvf_ & ~DWORD(0xF001), vb->mem_.data() + size_t(start) * vb->stride_, vb->stride_,
+                          vb->clip_.data() + start, n, use, ni, vp_, &v, &ot))
+            return v.empty() ? D3D_OK : DrawCommon(ot, vb->fvf_, v.data(), vb->stride_, DWORD(v.size() / vb->stride_), nullptr, 0);
     }
     return DrawCommon(t, vb->fvf_, vb->mem_.data() + size_t(start) * vb->stride_, vb->stride_, n, use, ni);
 }
@@ -1610,7 +1781,17 @@ HRESULT Direct3D7::CreateDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, I
 static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD count, const uint8_t* src, UINT srcStride,
                        DWORD srcFvf, Device7* dev, DWORD flags) {
     const Layout in(srcFvf), out(dstVb->fvf_);
+    // V §8.5 step 6: lit with specular or fog needs a destination specular; the destination
+    // has at least the source's texture coordinates, with their size bits.
+    if ((op & D3DVOP_LIGHT) && (dev->rs_[D3DRENDERSTATE_SPECULARENABLE] || dev->rs_[D3DRENDERSTATE_FOGENABLE]) &&
+        out.specular < 0)
+        return D3DERR_INVALIDVERTEXFORMAT;
     if (out.texCount < in.texCount) return D3DERR_INVALIDVERTEXFORMAT;
+    {
+        const DWORD used = in.texCount >= 16 ? 0xFFFFFFFFu : (1u << (2 * in.texCount)) - 1;
+        const DWORD srcBits = (srcFvf >> 16) & used, dstBits = (dstVb->fvf_ >> 16) & used;
+        if ((dstBits & srcBits) != srcBits) return D3DERR_INVALIDVERTEXFORMAT;
+    }
     if (dstIndex >= dstVb->count_) return D3D_OK;
     count = std::min(count, dstVb->count_ - dstIndex);
     const bool dstRhw = (dstVb->fvf_ & 0x0E) == D3DFVF_XYZRHW;
@@ -1618,7 +1799,28 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
     MatMul(&wv, dev->world_, dev->view_);
     MatMul(&wvp, wv, dev->proj_);
     MatMul(&vp4, dev->view_, dev->proj_);
-    const DWORD blend = std::min<DWORD>(dev->rs_[D3DRENDERSTATE_VERTEXBLEND], 3);
+    // Weights read: min(the FVF's betas, VERTEXBLEND) (V §9; at most 3 here).
+    const DWORD posType = srcFvf & 0x0E, betas = posType >= 0x06 && posType != D3DFVF_XYZRHW ? (posType - 0x04) / 2 : 0;
+    const DWORD blend = std::min<DWORD>(std::min<DWORD>(dev->rs_[D3DRENDERSTATE_VERTEXBLEND], betas), 3);
+    // Normals through the inverse-transpose of world x view (right under non-uniform scale).
+    D3DMATRIX nm = wv;
+    {
+        const float a = wv._11, b = wv._12, c = wv._13, d = wv._21, e = wv._22, f = wv._23, g = wv._31, h = wv._32,
+                    k = wv._33;
+        const float det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
+        if (det != 0) {
+            const float id = 1.0f / det;  // the inverse's transpose = the cofactors / det
+            nm._11 = (e * k - f * h) * id;
+            nm._12 = -(d * k - f * g) * id;
+            nm._13 = (d * h - e * g) * id;
+            nm._21 = -(b * k - c * h) * id;
+            nm._22 = (a * k - c * g) * id;
+            nm._23 = -(a * h - b * g) * id;
+            nm._31 = (b * f - c * e) * id;
+            nm._32 = -(a * f - c * d) * id;
+            nm._33 = (a * e - b * d) * id;
+        }
+    }
     const D3DMATRIX* worlds[4] = {&dev->world_, &dev->world1_, &dev->world2_, &dev->world3_};
     const D3DVIEWPORT7& vp = dev->vp_;
     const bool clip = (op & D3DVOP_CLIP) != 0, light = (op & D3DVOP_LIGHT) != 0;
@@ -1643,8 +1845,8 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
         Vec3 pos = {p[0], p[1], p[2]};
         float cx, cy, cz, cw;
         if (blend) {
-            // Vertex blending (V §9): the weights after the position (read there even when
-            // the FVF has none, as XP does), the last matrix weighted 1 - their sum.
+            // Vertex blending (V §9): the weights after the position, the last matrix
+            // weighted 1 - their sum.
             Vec3 acc = {0, 0, 0};
             float sum = 0;
             for (DWORD k = 0; k <= blend; k++) {
@@ -1677,7 +1879,8 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
             if (cz > cw) code |= 0x20;
             orCodes |= code;
             andCodes &= code;
-            if (!dstVb->clip_.empty()) dstVb->clip_[dstIndex + i] = WORD(code);
+            // 0x8000 (no D3DCLIP_ flag): the vertex is stored in clip space (below).
+            if (!dstVb->clip_.empty()) dstVb->clip_[dstIndex + i] = WORD(code | (code ? kInClipSpace : 0));
         }
         float* po = reinterpret_cast<float*>(o);
         if (code) {  // outside: clip space (V §8.5)
@@ -1723,7 +1926,7 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
             const float* n = in.normal >= 0 ? reinterpret_cast<const float*>(v + in.normal) : nullptr;
             // Normalized whatever NORMALIZENORMALS says (Wine's tests on Windows: a scaled
             // world or view still gives full specular).
-            const Vec3 N = n ? Norm(XformDir({n[0], n[1], n[2]}, wv)) : Vec3{0, 0, 0};
+            const Vec3 N = n ? Norm(XformDir({n[0], n[1], n[2]}, nm)) : Vec3{0, 0, 0};
             Color d = {ambient.r * ma.r + me.r, ambient.g * ma.g + me.g, ambient.b * ma.b + me.b, md.a};
             Color s = {0, 0, 0, 0};
             const bool local = dev->rs_[D3DRENDERSTATE_LOCALVIEWER] == TRUE;

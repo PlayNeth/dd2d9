@@ -246,6 +246,21 @@ void Gpu::RemoveOwner(Owner* o) { owners_.erase(std::remove(owners_.begin(), own
 
 void Gpu::ReleaseResources() {
     CloseScene();
+    // Nothing of the owners' left bound: a D3DPOOL_DEFAULT surface or texture the device
+    // still holds keeps a native Reset from succeeding (then every loss means a new device).
+    if (dev_) {
+        for (DWORD i = 0; i < 8; i++) dev_->SetTexture(i, nullptr);
+        IDirect3DSurface9* own = nullptr;
+        if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &own))) {
+            dev_->SetRenderTarget(0, own);
+            own->Release();
+        }
+        dev_->SetDepthStencilSurface(nullptr);
+        dev_->SetStreamSource(0, nullptr, 0, 0);
+        dev_->SetIndices(nullptr);
+        dev_->SetPixelShader(nullptr);
+        stateOwner = nullptr;  // every context binds and sends its state again
+    }
     // An owner may remove itself while releasing: iterate over a copy.
     const std::vector<Owner*> owners = owners_;
     for (Owner* o : owners) o->ReleaseGpuResources();

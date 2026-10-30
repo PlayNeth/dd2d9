@@ -471,6 +471,17 @@ public:
     std::vector<PVert> tl;       // the TL buffer, indices of execute-buffer primitives
     DWORD pickCount = 0;
 
+    // The DirectDraw object kept (not freed) while the device lives: releasing its last
+    // surfaces in ~Device may otherwise free it, and its Gpu, before `ctx` (destroyed after
+    // the destructor's body) is done with it. XP's devices keep it alive too, through
+    // internal surfaces. Declared before ctx: released after it.
+    struct DDHold {
+        DDraw* dd;
+        explicit DDHold(DDraw* d) : dd(d) { dd->IntAddRef(); }
+        ~DDHold() { dd->IntRelease(); }
+        DDHold(const DDHold&) = delete;
+        DDHold& operator=(const DDHold&) = delete;
+    } ddHold;
     // ---- the emulated driver (B §1.4): what a DX6 HAL had, pushed to Direct3D 9
     GpuContext ctx;
     DWORD dtss[8][32];        // driver stage states (Direct3D 6 numbers)

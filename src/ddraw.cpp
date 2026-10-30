@@ -421,11 +421,22 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         PostMessageW(h, checkCover, 0, frameChanged ? 0 : 1);
     if (msg == WM_ACTIVATEAPP || (deferred && msg == deferred)) {
         // Another thread may hold the display lock while it waits for this
-        // thread (SetWindowPos on our window): never block here, retry later.
+        // thread (SetWindowPos on our window): never block here, retry later. A retry
+        // takes the activation as it is by then (the foreground window's process), not as
+        // the message said: a deactivation retried behind a later activation would
+        // otherwise run last and minimize a game in front. At most ~500 tries.
+        static LONG retries;
+        if (msg == deferred) {
+            DWORD pid = 0;
+            const HWND fg = GetForegroundWindow();
+            wp = fg && (GetWindowThreadProcessId(fg, &pid), pid == GetCurrentProcessId());
+        } else {
+            InterlockedExchange(&retries, 0);
+        }
         if (TryEnterCriticalSection(&g_displayLock)) {
             if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->OnActivate(wp != 0, DWORD(lp));
             LeaveCriticalSection(&g_displayLock);
-        } else if (deferred) {
+        } else if (deferred && InterlockedIncrement(&retries) < 500) {
             PostMessageW(h, deferred, wp, lp);
         }
         if (msg == deferred) return 0;
@@ -436,14 +447,16 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // surfaces), and between two game modes one may name the desktop's: only a
         // display that really left the game's mode loses the surfaces. SetDisplayMode
         // already lost those of the old mode.
-        DDraw* owner = g_hook.owner;
-        if (h == g_hook.hwnd && owner) {
-            if (owner->EmulatedMode()) DD2D9_LOG("display changed: the game's mode is dd2d9's own, its surfaces stay");
-            else if (!owner->InOwnMode()) owner->InvalidateSurfaces();
-            if (TryEnterCriticalSection(&g_displayLock)) {
-                if (g_hook.owner == owner) owner->OnDisplayChange();
-                LeaveCriticalSection(&g_displayLock);
+        // The owner only under the display lock: TearDown unhooks under it, then frees it.
+        // (Held by another thread now: that thread is changing the mode, dd2d9's own.)
+        if (TryEnterCriticalSection(&g_displayLock)) {
+            DDraw* owner = g_hook.owner;
+            if (h == g_hook.hwnd && owner) {
+                if (owner->EmulatedMode()) DD2D9_LOG("display changed: the game's mode is dd2d9's own, its surfaces stay");
+                else if (!owner->InOwnMode()) owner->InvalidateSurfaces();
+                owner->OnDisplayChange();
             }
+            LeaveCriticalSection(&g_displayLock);
         }
     } else if ((msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED || msg == WM_SIZE || msg == WM_MOVE) &&
                h == g_hook.hwnd && g_hook.owner && g_hook.owner->QuietMove()) {
@@ -524,6 +537,11 @@ void DDraw::KeepTopmost() {
         return;
     if ((modeSet_ ? activeDisplay_ : g_config.display) == kDisplayWindow) return;
     if (GetWindowLongW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST) return;
+    // In front only: a game that took exclusive mode behind another program (its
+    // SetForegroundWindow refused) stays behind it, as ApplyWindow left it.
+    DWORD pid = 0;
+    const HWND fg = GetForegroundWindow();
+    if (fg && fg != hwnd_ && (GetWindowThreadProcessId(fg, &pid), pid != GetCurrentProcessId())) return;
     DD2D9_LOG("window %p was no longer topmost: made topmost again", static_cast<void*>(hwnd_));
     SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 }
@@ -770,11 +788,10 @@ void DDraw::CheckCover(HWND h, bool moved) {
         const LONG x = mi.rcMonitor.left, y = mi.rcMonitor.top;
         if (w.left > x || w.top > y || w.right < x + LONG(modeW_) || w.bottom < y + LONG(modeH_)) return;  // smaller: windowed
     }
+    // Tries counted until 2 s pass without one: a game that keeps resizing wins.
     const DWORD now = GetTickCount();
-    if (now - recoverStart_ > 2000) {
-        recoverStart_ = now;
-        recoverCount_ = 0;
-    }
+    if (now - recoverStart_ > 2000) recoverCount_ = 0;
+    recoverStart_ = now;
     if (++recoverCount_ > 5) return;
     DD2D9_LOG("the window no longer covers the screen (client %ld,%ld-%ld,%ld): covering it again", c.left, c.top,
               c.right, c.bottom);
@@ -940,20 +957,40 @@ double DDraw::VBlankPhase() const {
     return t - double(int64_t(t));
 }
 
+// Sleeps until QueryPerformanceCounter reaches `target`: a high-resolution waitable timer
+// (Windows 10 1803 and later) for all but the last half millisecond, which is spun; without
+// one, Sleep for all but the last ~1.5 ms. (Spinning the last 2 ms on Sleep(0) cost the game
+// its only core with cpus=1.)
+void SleepUntilQpc(int64_t target) {
+    static LARGE_INTEGER freq;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* HIGH_RESOLUTION */,
+                                                         TIMER_ALL_ACCESS);
+    for (;;) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const int64_t left = target - now.QuadPart;
+        if (left <= 0) return;
+        const double ms = double(left) * 1000.0 / double(freq.QuadPart);
+        if (timer && ms > 0.6) {
+            LARGE_INTEGER due;
+            due.QuadPart = -int64_t((ms - 0.5) * 10000.0);  // relative, in 100 ns
+            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+                WaitForSingleObject(timer, INFINITE);
+                continue;
+            }
+        }
+        if (!timer && ms > 2.0) Sleep(DWORD(ms - 1.5));
+        else YieldProcessor();
+    }
+}
+
 void DDraw::SleepUntilVBlank(int count) {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     const int64_t period = qpcFreq_.QuadPart / refresh_;
     const int64_t elapsed = now.QuadPart - qpcBase_.QuadPart;
-    const int64_t target = qpcBase_.QuadPart + (elapsed / period + count) * period;
-    for (;;) {
-        QueryPerformanceCounter(&now);
-        int64_t left = target - now.QuadPart;
-        if (left <= 0) break;
-        double ms = double(left) * 1000.0 / double(qpcFreq_.QuadPart);
-        if (ms > 2.0) Sleep(DWORD(ms - 1.5));
-        else Sleep(0);
-    }
+    SleepUntilQpc(qpcBase_.QuadPart + (elapsed / period + count) * period);
 }
 
 void DDraw::PaceFlip() {
@@ -963,16 +1000,9 @@ void DDraw::PaceFlip() {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     const int64_t minGap = qpcFreq_.QuadPart * 98 / (100 * int64_t(refresh_));
-    if (lastFlip_) {
-        const int64_t target = lastFlip_ + minGap;
-        for (;;) {
-            int64_t left = target - now.QuadPart;
-            if (left <= 0) break;
-            double ms = double(left) * 1000.0 / double(qpcFreq_.QuadPart);
-            if (ms > 2.0) Sleep(DWORD(ms - 1.5));
-            else Sleep(0);
-            QueryPerformanceCounter(&now);
-        }
+    if (lastFlip_ && now.QuadPart < lastFlip_ + minGap) {
+        SleepUntilQpc(lastFlip_ + minGap);
+        QueryPerformanceCounter(&now);
     }
     lastFlip_ = now.QuadPart;
 }
@@ -990,14 +1020,7 @@ void LimitFrame() {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (!next || now.QuadPart > next + period) next = now.QuadPart;
-    for (;;) {
-        const int64_t left = next - now.QuadPart;
-        if (left <= 0) break;
-        const double ms = double(left) * 1000.0 / double(freq.QuadPart);
-        if (ms > 2.0) Sleep(DWORD(ms - 1.5));  // Sleep's granularity: the last bit spun
-        else Sleep(0);
-        QueryPerformanceCounter(&now);
-    }
+    SleepUntilQpc(next);
     next += period;
     ReleaseSRWLockExclusive(&lock);
 }

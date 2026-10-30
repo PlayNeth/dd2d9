@@ -24,6 +24,11 @@ class Gpu;
 // ---------------------------------------------------------------- Buffer
 // Pixel memory of a surface. RGB / palettized buffers are GDI DIB sections so
 // GetDC() works natively; Flip() swaps buffers between the surfaces of a chain.
+inline unsigned NextCpuSerial() {
+    static volatile LONG n;
+    return unsigned(InterlockedIncrement(&n));
+}
+
 struct Buffer {
     LONG ref = 1;
     int w = 0, h = 0;
@@ -50,7 +55,9 @@ struct Buffer {
     // behind. g_lock (and the Gpu lock for gpu).
     GpuSurf* gpu = nullptr;
     bool gpuStale = true;   // the CPU copy changed since the render target's GPU copy was made
-    unsigned cpuSerial = 1; // counts changes to the CPU copy (a texture's GPU copy is current while equal)
+    // Changes to the CPU copy (a texture's GPU copy is current while equal). Drawn from one
+    // counter for every buffer: a buffer made where a freed one was can't match its value.
+    unsigned cpuSerial = NextCpuSerial();
     bool cpuStale = false;  // the GPU copy changed since the CPU copy was read back
 };
 

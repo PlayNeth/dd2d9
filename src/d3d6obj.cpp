@@ -291,18 +291,22 @@ HRESULT D3D::CreateMaterial(Material** out, IUnknown* outerUnk) {
 }
 
 HRESULT D3D::F1::CreateMaterial(IDirect3DMaterial** out, IUnknown* outerUnk) {
+    if (!out) return DDERR_INVALIDPARAMS;  // (XP v1/v2 fault; nothing is made)
     Material* m;
     const HRESULT hr = o->CreateMaterial(&m, outerUnk);
     if (SUCCEEDED(hr)) *out = &m->f1;
     return hr;
 }
 HRESULT D3D::F2::CreateMaterial(IDirect3DMaterial2** out, IUnknown* outerUnk) {
+    if (!out) return DDERR_INVALIDPARAMS;  // (XP v1/v2 fault; nothing is made)
     Material* m;
     const HRESULT hr = o->CreateMaterial(&m, outerUnk);
     if (SUCCEEDED(hr)) *out = &m->f2;
     return hr;
 }
 HRESULT D3D::F3::CreateMaterial(IDirect3DMaterial3** out, IUnknown* outerUnk) {
+    if (outerUnk) return CLASS_E_NOAGGREGATION;
+    if (!out) return DDERR_INVALIDPARAMS;  // (XP v1/v2 fault; nothing is made)
     Material* m;
     const HRESULT hr = o->CreateMaterial(&m, outerUnk);
     if (SUCCEEDED(hr)) *out = &m->f3;
@@ -323,18 +327,22 @@ HRESULT D3D::CreateViewport(Viewport** out, IUnknown* outerUnk) {
 
 // IDirect3D and IDirect3D2 ignore the outer unknown (A §CreateViewport).
 HRESULT D3D::F1::CreateViewport(IDirect3DViewport** out, IUnknown*) {
+    if (!out) return DDERR_INVALIDPARAMS;  // (would leak a viewport no one can reach)
     Viewport* v;
     const HRESULT hr = o->CreateViewport(&v, nullptr);
     if (out) *out = SUCCEEDED(hr) ? v : nullptr;
     return hr;
 }
 HRESULT D3D::F2::CreateViewport(IDirect3DViewport2** out, IUnknown*) {
+    if (!out) return DDERR_INVALIDPARAMS;
     Viewport* v;
     const HRESULT hr = o->CreateViewport(&v, nullptr);
     if (out) *out = SUCCEEDED(hr) ? v : nullptr;
     return hr;
 }
 HRESULT D3D::F3::CreateViewport(IDirect3DViewport3** out, IUnknown* outerUnk) {
+    if (outerUnk) return CLASS_E_NOAGGREGATION;
+    if (!out) return DDERR_INVALIDPARAMS;
     Viewport* v;
     const HRESULT hr = o->CreateViewport(&v, outerUnk);
     if (out && hr != CLASS_E_NOAGGREGATION) *out = SUCCEEDED(hr) ? v : nullptr;
@@ -957,6 +965,9 @@ HRESULT D3DLegacyQuerySurface(Surface* s, REFIID riid, void** out, int version) 
     SurfaceInfo* info = Info(s);
     for (const SurfaceInfo::Entry& e : info->cache)
         if (IsEqualGUID(e.iid, riid)) return SUCCEEDED(e.obj->InnerQuery(riid, out)) ? S_OK : E_NOINTERFACE;
+    // A surface outliving its DirectDraw object: no new Direct3D object on a dead one
+    // (nothing would tear it down, and its Gpu is gone).
+    if (!s->dd->alive) return E_NOINTERFACE;
     D3D* d3d = EnsureD3D(s->dd, s->ddVersion);
     if (!d3d) return E_OUTOFMEMORY;
     Inner* obj = nullptr;

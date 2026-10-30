@@ -3,6 +3,67 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.17 (review of 0.9.0-0.9.16)
+Fixes from a line-by-line review (four reviewers, each finding checked against the code):
+- **Direct3D 7: vertex buffers processed with `D3DVOP_CLIP` are drawn clipped.**
+  ProcessVertices keeps the vertices outside the frustum in clip space, as XP does, and the
+  draw sent them to the GPU as screen coordinates: triangles crossing a screen edge
+  stretched to the corner. Now each primitive is clipped against the near plane in clip
+  space and projected (`ExpandClipped`); d3d7test compares it with the direct draw.
+- **Direct3D 3-6: a device outliving its DirectDraw object** no longer uses it after it is
+  freed (the device keeps it, as XP's do through internal surfaces).
+- **Textures given a new buffer by `SetSurfaceDesc`** (another size or format) are made
+  again instead of being written past their end; a new buffer can't be taken for a freed
+  one at the same address (its change count comes from one global counter).
+- Direct3D 3-6: `CreateViewport`/`CreateMaterial` with a NULL pointer return
+  `DDERR_INVALIDPARAMS` (one leaked a viewport, the other crashed); `SetRenderTarget` to a
+  Z buffer doesn't leave the GPU context pointing at the old target; a surface outliving
+  its DirectDraw object no longer makes a new Direct3D object on it; draws and execute
+  buffers with absurd sizes fail instead of overflowing or throwing; an execute buffer's
+  branch past its end stops instead of looping.
+- Direct3D 7: `LightEnable` caps the index as `SetLight` does (a huge one threw);
+  ProcessVertices blends min(the FVF's weights, VERTEXBLEND), draws send VERTEXBLEND no
+  higher than the vertices' weights (D3D9 blended with weight 0), normals are lit through
+  the inverse-transpose (non-uniform scale), and the destination format is checked as XP
+  does (`D3DERR_INVALIDVERTEXFORMAT`).
+- Z buffers: several depth fills before a draw all apply (a split screen's two halves);
+  a new GPU depth buffer starts from the surface's own memory (zero-filled by DirectDraw, or
+  the game's earlier fill), not as the driver leaves it; the
+  emulated W buffer's scale starts again with each whole depth clear.
+- GPU: before a Reset nothing of dd2d9's stays bound (native D3D9 refused the Reset, so
+  every loss made a new device); a failed surface creation isn't retried (and logged) at
+  every draw; CPU changes are marked sent only once they are; the slope-scaled overlay bias
+  is sent again after a device change; palettized targets read back through their current
+  palette.
+- Windows: the topmost timer acts only while the game is in front; a deferred activation
+  takes the real state when it runs (a stale "deactivated" could minimize a game in front)
+  and is retried at most ~500 times; waiting for the display lock handles messages sent to
+  the thread (a game with a render thread could deadlock); `WM_DISPLAYCHANGE` uses the
+  DirectDraw object only under the lock; re-covering the screen gives up for real after 5
+  tries in 2 s.
+- `fpslimit`: windowed games are paced too (blits covering half the window), only after
+  blits that succeeded, and never with the game's DirectDraw lock held.
+- Compatibility: `cpus=N` takes one logical processor per physical core, core 0 last;
+  `ram=`/`cpu=` also answer games that look the functions up with GetProcAddress, and keys
+  opened with RegCreateKey(Ex) or through a copy of HKLM; a reused registry handle replaces
+  the old entry. Import patching restores only slots still holding dd2d9's function, in
+  loaded modules, writes them atomically, checks the import table lies in the image, and
+  retries the module snapshot; `C:\WindowsGames\...` is no longer taken for Windows' folder.
+- ini: a `[game.exe]` section overrides the general ones whichever file they are in (two
+  passes); lines without `=` are logged; a comment may follow a tab.
+- The log file is closed when the DLL is unloaded early (a reload truncated it under the
+  open handle). MapWindowPoints' hook clears the last error when it returns 0.
+
+Optimizations:
+- Indexed draws send the GPU only the vertices their indices use (a few triangles from a
+  big vertex buffer copied all of it, every draw).
+- Waits (fpslimit, vblank pacing) use a high-resolution waitable timer, spinning only the
+  last half millisecond instead of the last 2 ms on Sleep(0) (with `cpus=1` that took the
+  game's own core).
+- Direct3D 3-6: unchanged render states, stage states and textures return before the
+  device check; Direct3D 7 re-sends the colour key's alpha test only when it changes; no
+  heap allocation per bound texture per draw.
+
 ## 0.9.16 (0.9.15 had the timer on the window)
 - **The exclusive window is made topmost again every 1.5 s** if something took that away,
   as `ddraw.dll`'s timer does (a hidden window stays hidden; not while the game is in the

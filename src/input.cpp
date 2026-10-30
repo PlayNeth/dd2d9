@@ -123,7 +123,10 @@ BOOL WINAPI HookClientToScreen(HWND h, POINT* p) {
 int WINAPI HookMapWindowPoints(HWND from, HWND to, POINT* p, UINT n) {
     // Between the game's window and the screen (NULL or the desktop): nothing moves.
     const HWND desktop = GetDesktopWindow();
-    if ((IsGameWindow(from) && (!to || to == desktop)) || (IsGameWindow(to) && (!from || from == desktop))) return 0;
+    if ((IsGameWindow(from) && (!to || to == desktop)) || (IsGameWindow(to) && (!from || from == desktop))) {
+        SetLastError(0);  // 0 with no error: nothing moved (0 with an error is a failure)
+        return 0;
+    }
     return g_mapWindowPoints(from, to, p, n);
 }
 

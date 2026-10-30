@@ -473,6 +473,68 @@ static int Run(int w, int h, int bpp) {
             dev->SetRenderTarget(back, 0);
         }
         if (zbuf) zbuf->Release();
+
+        // ProcessVertices(TRANSFORM | CLIP) into a transformed buffer, then DrawPrimitiveVB:
+        // the vertices outside the frustum are kept in clip space (XP's format), and the draw
+        // must clip them as XP's does. A floor triangle reaching off the screen's edges and
+        // behind the camera, drawn so and drawn directly: the same picture.
+        {
+            D3DMATRIX id = {}, proj = {};
+            id._11 = id._22 = id._33 = id._44 = 1;
+            const float zn = 1, zf = 100;
+            proj._11 = 1;
+            proj._22 = 1;
+            proj._33 = zf / (zf - zn);
+            proj._34 = 1;
+            proj._43 = -zn * zf / (zf - zn);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &proj);
+            struct V3 { float x, y, z; DWORD c; };
+            const V3 tri[3] = {{-50, -1, 0.5f, 0xFFFFFFFF}, {0, -1, 50, 0xFF00FF00}, {50, -1, 0.5f, 0xFFFF0000}};
+            DWORD ref[24], got[24];
+            auto sample = [&](DWORD* outPx) {
+                for (int i = 0; i < 24; i++) outPx[i] = pixel(40 + (i % 6) * 110, 250 + (i / 6) * 50);
+            };
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->BeginScene();
+            dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZ | D3DFVF_DIFFUSE, const_cast<V3*>(tri), 3, 0);
+            dev->EndScene();
+            sample(ref);
+            D3DVERTEXBUFFERDESC vd = {};
+            vd.dwSize = sizeof(vd);
+            vd.dwCaps = D3DVBCAPS_SYSTEMMEMORY;
+            vd.dwFVF = D3DFVF_XYZ | D3DFVF_DIFFUSE;
+            vd.dwNumVertices = 3;
+            IDirect3DVertexBuffer7 *src = nullptr, *dst = nullptr;
+            d3d->CreateVertexBuffer(&vd, &src, 0);
+            vd.dwFVF = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
+            d3d->CreateVertexBuffer(&vd, &dst, 0);
+            void* pv = nullptr;
+            if (src && dst && SUCCEEDED(src->Lock(DDLOCK_WAIT, &pv, nullptr))) {
+                memcpy(pv, tri, sizeof(tri));
+                src->Unlock();
+                hr = dst->ProcessVertices(D3DVOP_TRANSFORM | D3DVOP_CLIP, 0, 3, src, 0, dev, 0);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                dev->DrawPrimitiveVB(D3DPT_TRIANGLELIST, dst, 0, 3, 0);
+                dev->EndScene();
+                sample(got);
+                int differ = 0;
+                for (int i = 0; i < 24; i++) {
+                    const DWORD a = ref[i], b = got[i];
+                    for (int sh = 0; sh < 24; sh += 8)
+                        if (abs(int((a >> sh) & 0xFF) - int((b >> sh) & 0xFF)) > 24) {
+                            differ++;
+                            break;
+                        }
+                }
+                CHECK(SUCCEEDED(hr) && differ == 0, "ProcessVertices(CLIP) then DrawPrimitiveVB: %d of 24 samples differ from the direct draw (hr 0x%08lx)",
+                      differ, hr);
+            }
+            if (src) src->Release();
+            if (dst) dst->Release();
+        }
     }
 
     int flipErrors = 0, sceneErrors = 0, gdiErrors = 0;

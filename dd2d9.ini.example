@@ -68,7 +68,8 @@ vram=512
 cpu=2000
 ; Processors the game runs on and is told about (GetSystemInfo): 1 (default), as the PCs of
 ; the era had; games of the era can crash, stutter or run at the wrong speed on several.
-; 0: all.
+; One logical processor per physical core is taken, the first core last (it handles most of
+; the system's interrupts). dd2d9's own presenting thread shares them. 0: all.
 cpus=1
 
 ; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too

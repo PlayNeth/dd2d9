@@ -181,9 +181,15 @@ struct GpuSurf final : Gpu::Owner {
     IDirect3DSurface9* sysmem = nullptr;   // read-back staging
     IDirect3DSurface9* upload = nullptr;   // upload staging (D3DPOOL_DEFAULT, lockable)
     // A DDBLT_DEPTHFILL waiting for the Z buffer's next use (it can't be written directly).
-    bool pendingClear = false;
-    RECT clearRect = {};
-    float clearZ = 1.0f;
+    // DDBLT_DEPTHFILLs waiting for the Z buffer's next use (it can't be written directly),
+    // in order: a second one before a draw (a split screen's two halves) doesn't replace
+    // the first. A new Z buffer starts with one over it all, from the surface's memory.
+    struct Fill {
+        RECT r;
+        float z;
+    };
+    std::vector<Fill> fills;
+    unsigned failedGen = 0;  // creation failed on the device of generation failedGen - 1
     // A palettized render target's palette (its surface's when last bound or read back).
     PaletteMap* pal = nullptr;
     ToPixel* toPixel = nullptr;  // a converted RGB render target's read-back table
@@ -256,6 +262,7 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
     }
     GpuSurf* g = b->gpu;
     if (g->surf) return g;
+    if (g->failedGen == gpu.Generation() + 1) return nullptr;  // failed on this device already
     HRESULT hr;
     const D3DMULTISAMPLE_TYPE msaa = MsaaType(d);
     if (depth) {
@@ -267,6 +274,16 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
             hr = d->CreateDepthStencilSurface(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
         }
         b->gpuStale = false;  // nothing to upload: a Z buffer starts cleared by the game
+        if (SUCCEEDED(hr)) {
+            // Starts as the surface's memory says (DirectDraw zero-fills a new one, which
+            // Wine's test_multiple_devices relies on: nothing passes; or what a fill on the
+            // CPU copy made it), not as the driver leaves it.
+            const Format& f = b->fmt;
+            const DWORD zmask = f.r ? f.r : f.ValueMask();
+            const DWORD shift = zmask ? DWORD(__builtin_ctz(zmask)) : 0, maxv = zmask >> shift;
+            const DWORD v = ReadPixel(b->Row(0), f.Bytes());
+            g->fills.assign(1, GpuSurf::Fill{RECT{0, 0, b->w, b->h}, maxv ? float(double((v & zmask) >> shift) / maxv) : 0.0f});
+        }
     } else {
         const D3DFORMAT native = NativeFormat(b->fmt);
         g->convert = !IsRenderTargetFormat(native);
@@ -287,6 +304,7 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
         DD2D9_LOG("Direct3D: %s %dx%d (format %d) failed: 0x%08lx", depth ? "CreateDepthStencilSurface" : "CreateRenderTarget",
                   b->w, b->h, int(g->fmt), hr);
         g->surf = nullptr;
+        g->failedGen = gpu.Generation() + 1;  // not tried again (and logged) at every draw
         return nullptr;
     }
     return g;
@@ -297,7 +315,6 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
 // device's state is kept around it (a state block): it happens in the middle of the game's
 // drawing. Gpu lock held.
 static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
-    g->msStale = false;
     const Buffer* b = g->buf;
     if (!g->msCopy && FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &g->msCopy, nullptr))) {
         g->msCopy = nullptr;
@@ -341,7 +358,7 @@ static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     const float q[4][6] = {{-0.5f, -0.5f, 0, 1, 0, 0}, {w - 0.5f, -0.5f, 0, 1, 1, 0},
                            {-0.5f, h - 0.5f, 0, 1, 0, 1}, {w - 0.5f, h - 0.5f, 0, 1, 1, 1}};
     gpu.OpenScene();
-    d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+    if (SUCCEEDED(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0])))) g->msStale = false;  // (else tried again)
     sb->Apply();
     sb->Release();
 }
@@ -355,10 +372,13 @@ static void Resolve(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
 }
 
 // The CPU copy into a render target.
+// gpuStale stays set until the copy is made (tried again at the next use).
 static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     Buffer* b = g->buf;
-    b->gpuStale = false;
-    if (g->depth) return;  // can't be written: only DDBLT_DEPTHFILL reaches it (pendingClear)
+    if (g->depth) {  // can't be written: only DDBLT_DEPTHFILL reaches it (GpuSurf::fills)
+        b->gpuStale = false;
+        return;
+    }
     if (!g->upload &&
         FAILED(d->CreateOffscreenPlainSurface(b->w, b->h, g->fmt, D3DPOOL_DEFAULT, &g->upload, nullptr))) {
         g->upload = nullptr;
@@ -370,7 +390,8 @@ static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     for (int y = 0; y < b->h; y++) RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert ? &conv : nullptr);
     g->upload->UnlockRect();
     gpu.CloseScene();
-    d->StretchRect(g->upload, nullptr, g->surf, nullptr, D3DTEXF_NONE);
+    if (FAILED(d->StretchRect(g->upload, nullptr, g->surf, nullptr, D3DTEXF_NONE))) return;
+    b->gpuStale = false;
     if (g->ms) g->msStale = true;  // copied on into the multisampled one when drawn into
 }
 
@@ -393,7 +414,7 @@ static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     for (int y = 0; y < b->h; y++)
         RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal, g->toPixel);
     g->sysmem->UnlockRect();
-    b->cpuSerial++;  // the CPU copy changed: a texture made from it is behind
+    b->cpuSerial = NextCpuSerial();  // the CPU copy changed: a texture made from it is behind
 }
 
 void GpuCpuAccess(Surface* s, bool write) {
@@ -402,6 +423,7 @@ void GpuCpuAccess(Surface* s, bool write) {
     if (g && g->gpu && b->cpuStale) {
         Gpu& gpu = *g->gpu;
         GpuGuard l(gpu);
+        g->SetPalette(s);  // a palettized target maps back through the palette it has now
         if (IDirect3DDevice9* d = gpu.Ensure(); d && g->surf) ReadBack(gpu, d, g);
         b->cpuStale = false;
     }
@@ -424,9 +446,8 @@ bool GpuDepthFill(Surface* s, const RECT& r, DWORD value) {
     DWORD zmask = f.r ? f.r : f.ValueMask();
     const DWORD shift = zmask ? DWORD(__builtin_ctz(zmask)) : 0;
     const DWORD maxv = zmask >> shift;
-    g->pendingClear = true;
-    g->clearRect = r;
-    g->clearZ = maxv ? float(double((value & zmask) >> shift) / maxv) : 1.0f;
+    if (g->fills.size() >= 64) g->fills.erase(g->fills.begin());  // (a game filling without drawing)
+    g->fills.push_back({r, maxv ? float(double((value & zmask) >> shift) / maxv) : 1.0f});
     return true;
 }
 
@@ -456,6 +477,8 @@ struct GpuTex final : Gpu::Owner {
     bool keyed = false;
     DWORD key = 0;
     bool autogen = false;  // mipmaps=on: one level from the game, the rest made by the GPU
+    int w = 0, h = 0;      // the top level's size and layout when made (SetSurfaceDesc may change them)
+    Format made = {};
     std::vector<Buffer*> levelBufs;
     std::vector<unsigned> levelSerials;  // each level's Buffer::cpuSerial when uploaded
     // A render target used as a texture while the GPU has its newest pixels: a copy made on
@@ -517,8 +540,13 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
         gpu.AddOwner(s->gpuTex);
     }
     GpuTex* t = s->gpuTex;
-    std::vector<Surface*> chain;
-    for (Surface* l = s; l && chain.size() < 16; l = l->NextMipLevel()) chain.push_back(l);
+    struct Chain {  // the mip levels, at most 16 (no allocation per bound texture per draw)
+        Surface* l[16];
+        size_t n = 0;
+        size_t size() const { return n; }
+        Surface* operator[](size_t i) const { return l[i]; }
+    } chain;
+    for (Surface* l = s; l && chain.n < 16; l = l->NextMipLevel()) chain.l[chain.n++] = l;
     const Palette* pal = s->buf->fmt.pal8 ? TexturePalette(s) : nullptr;
     // The colour key becomes alpha only while D3DRENDERSTATE_COLORKEYENABLE is on.
     const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc;
@@ -561,7 +589,8 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
         }
     }
     bool all = false;
-    if (!t->tex || t->levels != chain.size() || keyed != t->keyed) {
+    if (!t->tex || t->levels != chain.size() || keyed != t->keyed || t->w != s->buf->w || t->h != s->buf->h ||
+        !(t->made == s->buf->fmt)) {
         t->Drop();
         const D3DFORMAT native = NativeFormat(s->buf->fmt);
         t->convert = native == D3DFMT_UNKNOWN || keyed;
@@ -599,6 +628,9 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
             return nullptr;
         }
         t->levels = UINT(chain.size());
+        t->w = s->buf->w;
+        t->h = s->buf->h;
+        t->made = s->buf->fmt;
         all = true;
     }
     if (pal != t->pal || (pal && pal->version != t->palVersion) || key != t->key) all = true;
@@ -610,6 +642,12 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
         // Rendered into by Direct3D (a render target used as a texture): read back first.
         if (b->gpu && b->cpuStale && b->gpu->surf) ReadBack(gpu, d, b->gpu);
         if (!all && t->levelBufs[i] == b && t->levelSerials[i] == b->cpuSerial) continue;
+        D3DSURFACE_DESC ld;
+        // A level given another size since (SetSurfaceDesc on a lower level): not written
+        // past the GPU level's rows.
+        if (FAILED(t->tex->GetLevelDesc(i, &ld)) || UINT(b->w) > ld.Width || UINT(b->h) > ld.Height ||
+            !(b->fmt == s->buf->fmt))
+            continue;
         D3DLOCKED_RECT lr;
         if (FAILED(t->tex->LockRect(i, &lr, nullptr, 0))) continue;
         if (b->fmt.BlockCompressed()) {
@@ -751,6 +789,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     DWORD tci[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     bool cutoutStage[8] = {};
     bool wEmulate = false;  // ZENABLE = D3DZB_USEW on a GPU without W buffering
+    int nativeW = -1;       // the GPU's own W buffering: -1 not asked yet
     DWORD rsMirror[256] = {};  // render states as last set through this context (drawtrace)
     bool zWrite = true;     // ZWRITEENABLE as the game set it; zWriteSet: as D3D9 has it
     bool zWriteSet = true;
@@ -803,6 +842,9 @@ bool GpuContext::Begin(bool* fresh) {
         p_->gpu.stateOwner = p_;
         p_->boundRt = p_->boundZ = nullptr;
         p_->rebind = true;
+        // The device's own copies of what dd2d9 sets beside the game's states (which the
+        // caller sends all again): unknown now, sent at the next draw.
+        p_->biasSet = p_->slopeSet = -2.0f;
         *fresh = true;
     }
     return true;
@@ -816,8 +858,11 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
         p_->wEmulate = false;
         if (value == D3DZB_USEW && p_->dev) {
             static int logged;
-            D3DCAPS9 caps = {};
-            const bool native = SUCCEEDED(p_->dev->GetDeviceCaps(&caps)) && (caps.RasterCaps & D3DPRASTERCAPS_WBUFFER);
+            if (p_->nativeW < 0) {  // asked once (the game sets ZENABLE per draw, some of them)
+                D3DCAPS9 caps = {};
+                p_->nativeW = SUCCEEDED(p_->dev->GetDeviceCaps(&caps)) && (caps.RasterCaps & D3DPRASTERCAPS_WBUFFER);
+            }
+            const bool native = p_->nativeW > 0;
             if (!native) {
                 p_->wEmulate = true;
                 value = D3DZB_TRUE;
@@ -943,19 +988,21 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
         boundZ = zsurf;
     }
     rebind = false;
-    if (zs && zs->pendingClear) {
-        zs->pendingClear = false;
+    if (zs && !zs->fills.empty()) {
         if (!overwriteZ) {
-            // Inside the viewport only, as Clear works: the pending fill's rectangle in it.
-            D3DRECT rect = {zs->clearRect.left, zs->clearRect.top, zs->clearRect.right, zs->clearRect.bottom};
+            // Clear works inside the viewport only: the whole surface's for the fills.
             const D3DVIEWPORT9 keep = vp;
             D3DVIEWPORT9 whole = {0, 0, DWORD(z->buf->w), DWORD(z->buf->h), 0.0f, 1.0f};
             if (DWORD(rt->buf->w) < whole.Width) whole.Width = rt->buf->w;
             if (DWORD(rt->buf->h) < whole.Height) whole.Height = rt->buf->h;
             dev->SetViewport(&whole);
-            dev->Clear(1, &rect, D3DCLEAR_ZBUFFER | (zs->fmt == D3DFMT_D24S8 ? D3DCLEAR_STENCIL : 0), 0, zs->clearZ, 0);
+            for (const GpuSurf::Fill& f : zs->fills) {
+                D3DRECT rect = {f.r.left, f.r.top, f.r.right, f.r.bottom};
+                dev->Clear(1, &rect, D3DCLEAR_ZBUFFER | (zs->fmt == D3DFMT_D24S8 ? D3DCLEAR_STENCIL : 0), 0, f.z, 0);
+            }
             dev->SetViewport(&keep);
         }
+        zs->fills.clear();
     }
     return true;
 }
@@ -1076,6 +1123,9 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     if (p.z && p.z->buf->gpu && p.z->buf->gpu->fmt != D3DFMT_D24S8) flags &= ~DWORD(D3DCLEAR_STENCIL);
     if (!flags) return;
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
+    // Emulated W buffering's scale starts again with each whole depth clear (a frame): one
+    // stray near vertex shrinks it for that frame only, not for good.
+    if ((flags & D3DCLEAR_ZBUFFER) && whole) g_wScale = 1.0f;
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
     if (flags & D3DCLEAR_TARGET) {
         p.rt->buf->cpuStale = true;
@@ -1250,12 +1300,20 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                   tl ? wlo : 0.0f, tl ? whi : 0.0f);
     }
     p.gpu.OpenScene();
-    if (indices)
-        p.dev->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(primType), 0, vertexCount, primCount, indices, D3DFMT_INDEX16,
-                                      verts, stride);
-    else
+    if (indices) {
+        // Only the vertices the indices use are copied to the GPU (D3D9 takes them from the
+        // lowest one): a few triangles from a big vertex buffer don't send all of it.
+        WORD lo = 0xFFFF, hi = 0;
+        for (UINT i = 0; i < indexCount; i++) {
+            lo = std::min(lo, indices[i]);
+            hi = std::max(hi, indices[i]);
+        }
+        if (lo > hi || hi >= vertexCount) lo = 0, hi = WORD(std::min<UINT>(vertexCount, 0x10000) - 1);  // (no indices)
+        p.dev->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(primType), lo, UINT(hi - lo) + 1, primCount, indices,
+                                      D3DFMT_INDEX16, verts, stride);
+    } else {
         p.dev->DrawPrimitiveUP(D3DPRIMITIVETYPE(primType), primCount, verts, stride);
-    (void)indexCount;
+    }
     p.rt->buf->cpuStale = true;
     p.rt->buf->gpuStale = false;
     p.rt->buf->gpu->msNewer = p.rt->buf->gpu->ms != nullptr;

@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.16"
+#define DD2D9_VERSION "0.9.17"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -115,8 +115,12 @@ struct Guard {
 // holding it: those changes send messages to the game window's thread, whose
 // window procedure may call DirectDraw (and so take g_lock).
 extern CRITICAL_SECTION g_displayLock;
+// Waiting for it, messages sent to this thread's windows are handled meanwhile: the holder
+// may be in SetWindowPos on a window of this thread, waiting for it (a game with a render
+// thread changing the mode while its window thread calls DirectDraw).
+void EnterDisplayLock();
 struct DisplayGuard {
-    DisplayGuard() { EnterCriticalSection(&g_displayLock); }
+    DisplayGuard() { EnterDisplayLock(); }
     ~DisplayGuard() { LeaveCriticalSection(&g_displayLock); }
     DisplayGuard(const DisplayGuard&) = delete;
     DisplayGuard& operator=(const DisplayGuard&) = delete;

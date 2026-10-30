@@ -205,7 +205,10 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
 
 // Reads one ini file. Keys outside any section, in [dd2d9] and in [default]
 // apply to every game; a [<game>.exe] section applies to that executable only.
-static bool LoadIni(const std::wstring& path, const std::string& exeName) {
+// gameSections: this pass reads the game's own sections only, else only the general ones
+// (LoadConfig reads every file for the general ones first, so a game's section overrides
+// them wherever they are).
+static bool LoadIni(const std::wstring& path, const std::string& exeName, bool gameSections) {
     FILE* f = _wfopen(path.c_str(), L"rb");
     if (!f) return false;
     std::string data;
@@ -215,7 +218,7 @@ static bool LoadIni(const std::wstring& path, const std::string& exeName) {
     fclose(f);
     if (data.size() >= 3 && data.compare(0, 3, "\xEF\xBB\xBF") == 0) data.erase(0, 3);  // UTF-8 BOM
 
-    bool active = true;
+    bool active = !gameSections;  // keys before any section: general
     size_t pos = 0, lineNo = 0;
     while (pos < data.size()) {
         size_t eol = data.find('\n', pos);
@@ -226,15 +229,21 @@ static bool LoadIni(const std::wstring& path, const std::string& exeName) {
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
         if (line[0] == '[') {
             std::string name = Lower(Trim(line.substr(1, line.find(']') - 1)));
-            active = name == "dd2d9" || name == "default" || name == exeName;
+            active = gameSections ? name == exeName : name == "dd2d9" || name == "default";
             continue;
         }
         if (!active) continue;
         size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
+        if (eq == std::string::npos) {
+            g_iniErrors.push_back(BaseName(path) + L":" + std::to_wstring(lineNo) + L": ignored " + FromUtf8(line));
+            continue;
+        }
         std::string val = Trim(line.substr(eq + 1));
-        size_t comment = val.find(" ;");  // allow "key=value ; comment"
-        if (comment != std::string::npos) val = Trim(val.substr(0, comment));
+        for (size_t i = 1; i < val.size(); i++)  // "key=value ; comment" (a space or tab before the ;)
+            if (val[i] == ';' && (val[i - 1] == ' ' || val[i - 1] == '\t')) {
+                val = Trim(val.substr(0, i));
+                break;
+            }
         Apply(Lower(Trim(line.substr(0, eq))), val, BaseName(path) + L":" + std::to_wstring(lineNo));
     }
     return true;
@@ -256,7 +265,8 @@ void LoadConfig(HMODULE self) {
     std::wstring envIni = Env(L"DD2D9_INI");
     if (!envIni.empty()) files.push_back(envIni);
     for (const auto& f : files)
-        if (LoadIni(f, exeName)) g_iniLoaded.push_back(f);
+        if (LoadIni(f, exeName, false)) g_iniLoaded.push_back(f);
+    for (const auto& f : g_iniLoaded) LoadIni(f, exeName, true);
 
     // DD2D9_LOG=0/1/2 sets the level; any other value is a log file path (and enables logging).
     std::wstring envLog = Env(L"DD2D9_LOG");
@@ -341,6 +351,14 @@ void LogInit() {
 void CrashLoggerRemove() {
     if (g_crashHandler) RemoveVectoredExceptionHandler(g_crashHandler);
     g_crashHandler = nullptr;
+}
+
+void EnterDisplayLock() {
+    while (!TryEnterCriticalSection(&g_displayLock)) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_SENDMESSAGE);
+        MSG m;
+        PeekMessageW(&m, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);  // runs the sent ones
+    }
 }
 
 bool WaitPumping(HANDLE h, DWORD timeoutMs) {
@@ -497,6 +515,10 @@ void LogFlush(bool processExit) {
         EnterCriticalSection(&g_logLock);
     }
     fflush(g_logFile);
+    if (!processExit) {  // unloaded while the process goes on: a later load opens the file again
+        fclose(g_logFile);
+        g_logFile = nullptr;
+    }
     LeaveCriticalSection(&g_logLock);
 }
 

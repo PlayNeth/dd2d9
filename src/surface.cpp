@@ -1288,7 +1288,7 @@ void Surface::FillRect(const RECT& r, DWORD value) {
 void Surface::CpuAccess(bool write) {
     if (buf->gpu) GpuCpuAccess(this, write);  // reads back what Direct3D drew, if newer
     else if (write) buf->gpuStale = true;
-    if (write) buf->cpuSerial++;              // a texture's GPU copy is made from its levels' buffers
+    if (write) buf->cpuSerial = NextCpuSerial();              // a texture's GPU copy is made from its levels' buffers
 }
 
 Surface* Surface::NextMipLevel() const {
@@ -1359,7 +1359,7 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         dd->PaceFlip();
         for (int i = 1; i < intervals; i++) dd->PaceFlip();
     }
-    if (isPrimary) LimitFrame();
+    if (isPrimary) RunWhenUnlocked([](void*) { LimitFrame(); }, nullptr);  // not under a game's thread lock
     return DD_OK;
 }
 

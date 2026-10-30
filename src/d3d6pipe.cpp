@@ -447,6 +447,7 @@ HRESULT Device::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT
     const UINT prims = PrimCount(t, idx ? ni : n);
     if (!prims || !n) return D3D_OK;
     if (!v || (!idx && ni)) return DDERR_INVALIDPARAMS;
+    if (n > 0x01000000 || ni > 0x01000000) return DDERR_INVALIDPARAMS;  // as Direct3D 7 (no huge allocations)
     // Transformed vertices draw without a current viewport too (Wine's test_vb_discard).
     if (cur || (fvf & 0x0E) != D3DFVF_XYZRHW) {
         const HRESULT hr = CheckViewport();
@@ -742,6 +743,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
                     ConvertExtent(this, &eb->data.dsStatus.drExtent);
                     return D3D_OK;
                 }
+                if (b.dwOffset >= size - pos) return D3D_OK;  // past the end (or wrapping round): stop
                 pos += b.dwOffset;
                 continue;
             }

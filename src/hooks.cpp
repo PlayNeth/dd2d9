@@ -15,16 +15,20 @@ namespace {
 struct Patched {
     void** slot;
     void* original;
+    void* replacement;  // put back only while the slot still holds it
 };
 SRWLOCK g_hookLock = SRWLOCK_INIT;
 std::vector<Patched>* g_patched;  // g_hookLock
 
-void WriteSlot(void** slot, void* value) {
+bool WriteSlot(void** slot, void* value) {
     DWORD old;
     // Executable too: some linkers put the import table in the code section.
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return;
-    *slot = value;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return false;
+    // One aligned pointer-sized store: a thread calling through the slot meanwhile sees
+    // the old function or the new one.
+    InterlockedExchangePointer(slot, value);
     VirtualProtect(slot, sizeof(void*), old, &old);
+    return true;
 }
 
 // "user32", "USER32.dll", "user32.DLL" all match "user32".
@@ -41,6 +45,14 @@ unsigned PatchModule(HMODULE m, const ImportHook* hooks, size_t n) {
     if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
     const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!dir.VirtualAddress || !dir.Size) return 0;
+    // A packed executable may have wiped or moved its import table after unpacking: only one
+    // inside the image, in memory that can be read.
+    const DWORD image = nt->OptionalHeader.SizeOfImage;
+    if (dir.VirtualAddress >= image || dir.Size > image - dir.VirtualAddress) return 0;
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(base + dir.VirtualAddress, &mi, sizeof(mi)) || mi.State != MEM_COMMIT ||
+        (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+        return 0;
     unsigned count = 0;
     for (auto* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; d++) {
         const char* dllName = reinterpret_cast<const char*>(base + d->Name);
@@ -59,8 +71,9 @@ unsigned PatchModule(HMODULE m, const ImportHook* hooks, size_t n) {
                     match = iat[i] == *k.original;  // no names (bound) or by ordinal: by address
                 }
                 if (!match || iat[i] == k.replacement) continue;
-                g_patched->push_back({&iat[i], iat[i]});
-                WriteSlot(&iat[i], k.replacement);
+                void* const original = iat[i];
+                if (!WriteSlot(&iat[i], k.replacement)) break;
+                g_patched->push_back({&iat[i], original, k.replacement});
                 count++;
                 break;
             }
@@ -76,8 +89,11 @@ bool LeaveAlone(const wchar_t* path) {
     name = name ? name + 1 : path;
     wchar_t sys[MAX_PATH], win[MAX_PATH];
     const UINT ns = GetSystemDirectoryW(sys, MAX_PATH), nw = GetWindowsDirectoryW(win, MAX_PATH);
-    if ((ns && ns < MAX_PATH && _wcsnicmp(path, sys, ns) == 0) || (nw && nw < MAX_PATH && _wcsnicmp(path, win, nw) == 0))
-        return true;
+    // (A whole folder: C:\Windows matches C:\Windows\..., not C:\WindowsGames\...)
+    auto under = [&](const wchar_t* dir, UINT n) {
+        return n && n < MAX_PATH && _wcsnicmp(path, dir, n) == 0 && (path[n] == L'\\' || dir[n - 1] == L'\\');
+    };
+    if (under(sys, ns) || under(win, nw)) return true;
     static const wchar_t* kNames[] = {L"ddraw.dll", L"ddraw_.dll", L"d3d8.dll", L"d3d9.dll", L"d3d10core.dll",
                                       L"d3d11.dll", L"dxgi.dll", L"opengl32.dll", L"dinput.dll", L"dinput8.dll",
                                       L"dsound.dll", L"winmm.dll", L"glide.dll", L"glide2x.dll", L"glide3x.dll"};
@@ -104,7 +120,12 @@ void ModulesFromLoader(std::vector<std::pair<HMODULE, std::wstring>>* out) {
 }
 
 void ModulesFromSnapshot(std::vector<std::pair<HMODULE, std::wstring>>* out) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+    HANDLE snap = INVALID_HANDLE_VALUE;
+    // ERROR_BAD_LENGTH while another thread loads a module: tried again, as documented.
+    for (int i = 0; i < 5 && snap == INVALID_HANDLE_VALUE; i++) {
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+        if (snap == INVALID_HANDLE_VALUE && GetLastError() != ERROR_BAD_LENGTH) return;
+    }
     if (snap == INVALID_HANDLE_VALUE) return;
     MODULEENTRY32W me = {};
     me.dwSize = sizeof(me);
@@ -141,7 +162,13 @@ unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) 
 void UnpatchAll() {
     AcquireSRWLockExclusive(&g_hookLock);
     if (g_patched) {
-        for (const Patched& p : *g_patched) WriteSlot(p.slot, p.original);
+        for (const Patched& p : *g_patched) {
+            // Not into a module unloaded since (its memory gone or reused), nor over a
+            // later hooker's own patch.
+            MEMORY_BASIC_INFORMATION mi;
+            if (!VirtualQuery(p.slot, &mi, sizeof(mi)) || mi.State != MEM_COMMIT) continue;
+            if (*p.slot == p.replacement) WriteSlot(p.slot, p.original);
+        }
         g_patched->clear();
     }
     ReleaseSRWLockExclusive(&g_hookLock);

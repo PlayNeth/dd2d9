@@ -229,13 +229,6 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
                RectText(dstRect).s, static_cast<void*>(src), RectText(srcRect).s, flags, isPrimary ? " (primary)" : "",
                fx ? fx->dwDDFX : 0, fx ? fx->dwFillColor : 0);
     if (CantDraw() || (src && src->CantDraw(false))) return DDERR_SURFACELOST;
-    // fpslimit: a game that shows its frames by blitting them to the primary (windowed, or
-    // without a flip chain) is paced at blits covering half of it or more.
-    if (g_config.fpsLimit > 0 && isPrimary && src && src != this) {
-        const int64_t whole = int64_t(buf->w) * buf->h;
-        const int64_t area = dstRect ? int64_t(dstRect->right - dstRect->left) * (dstRect->bottom - dstRect->top) : whole;
-        if (area * 2 >= whole) RunWhenUnlocked([](void*) { LimitFrame(); }, nullptr);
-    }
     // 0x80000000 is the Direct3D 8/9 runtime's own flag (window clipping, with the
     // destination-alpha bits); ddraw.dll takes it off first.
     if (flags & 0x80000000) flags &= ~0x8000000Bu;
@@ -288,7 +281,21 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
     }
     // A fill takes no source rectangle.
     const bool usesSource = !(flags & (DDBLT_ROP | fills)) || ((flags & DDBLT_ROP) && fx->dwROP == SRCCOPY);
-    return BltLocked(dstRect, usesSource ? src : nullptr, srcRect, flags, fx, true, srcOldIface);
+    const HRESULT hr = BltLocked(dstRect, usesSource ? src : nullptr, srcRect, flags, fx, true, srcOldIface);
+    // fpslimit: a game that shows its frames by blitting them to the primary (windowed, or
+    // without a flip chain) is paced at successful blits covering half of its screen or
+    // more: the primary in exclusive mode, else the clipper's window (a windowed game's
+    // primary is the whole desktop).
+    if (g_config.fpsLimit > 0 && SUCCEEDED(hr) && isPrimary && src && src != this) {
+        int64_t whole = int64_t(buf->w) * buf->h;
+        RECT c;
+        if (!dd->Exclusive() && clipper && clipper->hwnd && GetClientRect(clipper->hwnd, &c))
+            whole = int64_t(c.right - c.left) * (c.bottom - c.top);
+        const int64_t area = dstRect ? int64_t(dstRect->right - dstRect->left) * (dstRect->bottom - dstRect->top)
+                                     : int64_t(buf->w) * buf->h;
+        if (whole > 0 && area * 2 >= whole) RunWhenUnlocked([](void*) { LimitFrame(); }, nullptr);
+    }
+    return hr;
 }
 
 // The drawing (callers have checked what ddraw.dll checks; the contents stamp is theirs

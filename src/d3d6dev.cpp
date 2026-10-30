@@ -21,7 +21,7 @@ template <class T> static void Unlink(std::vector<T>& v, T x) {
 Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* rt, int rtVersion, Surface* z,
                Palette* pal)
     : d3d(d3d), dd(d3d->dd), kind(kind), guid(guid), version(version), rt(rt), rtVersion(rtVersion), z(z), pal(pal),
-      ctx(d3d->dd->GetGpu()) {
+      ddHold(d3d->dd), ctx(d3d->dd->GetGpu()) {
     f1.o = f2.o = f3.o = this;
     if (kind == kHAL) {
         HalHalDesc(&hal);
@@ -194,7 +194,8 @@ void Device::ForgetSurface(Surface* s) {
         if (dTexHandle == h) dTexHandle = 0;
     }
     GpuGuard g(dd->GetGpu());
-    if (targets) ctx.SetTargets(rt, z);
+    ctx.SetTargets(rtUnheld ? nullptr : rt, z);  // (always: it only stores the two)
+    (void)targets;
     for (DWORD i = 0; i < 8; i++) ctx.SetTexture(i, nullptr);
 }
 
@@ -215,7 +216,7 @@ void Device::PushAll() {
     PushStageOps9();
     PushAlpha9();
     ctx.SetRenderState(128, dWrap0);
-    ctx.SetTargets(rt, z);
+    ctx.SetTargets(rtUnheld ? nullptr : rt, z);  // a Z buffer set as the target is no colour target
     SetViewport9();
 }
 
@@ -489,6 +490,8 @@ HRESULT Device::SetRS(DWORD s, DWORD v, bool fromExecute) {
 HRESULT Device::F2::SetRenderState(D3DRENDERSTATETYPE s, DWORD v) {
     if (DWORD(s) == 0 || DWORD(s) > 255) return DDERR_INVALIDPARAMS;
     Guard l;
+    // Unchanged: nothing reaches the device (Use's device check costs a call per state).
+    if (s != 5 && s != 6 && s != D3DRENDERSTATE_FLUSHBATCH && o->rs[s] == v) return D3D_OK;
     Use u(o);
     return o->SetRS(s, v, false);
 }
@@ -570,6 +573,7 @@ HRESULT Device::SetTSS(DWORD stage, DWORD t, DWORD v) {
 
 HRESULT Device::F3::SetTextureStageState(DWORD stage, D3DTEXTURESTAGESTATETYPE t, DWORD v) {
     Guard l;
+    if (stage >= 8 || DWORD(t) >= 64 || o->tss[stage][t] == v) return D3D_OK;  // (as SetTSS: nothing to send)
     Use u(o);
     return o->SetTSS(stage, t, v);
 }
@@ -594,8 +598,10 @@ HRESULT Device::SetTex(DWORD stage, Texture* t) {
 
 HRESULT Device::F3::SetTexture(DWORD stage, IDirect3DTexture2* t) {
     Guard l;
+    Texture* tex = TexFrom(t);
+    if (stage >= 8 || o->stageTex[stage] == tex) return D3D_OK;  // (as SetTex)
     Use u(o);
-    return o->SetTex(stage, TexFrom(t));
+    return o->SetTex(stage, tex);
 }
 
 HRESULT Device::F3::GetTexture(DWORD stage, IDirect3DTexture2** out) {
@@ -922,6 +928,11 @@ HRESULT Device::SetRenderTargetI(Surface* s, int sVersion) {
         rtUnheld = true;
         rt = s;
         rtVersion = version == 2 ? 1 : 4;
+        {
+            // Nothing to draw into now: the context forgets the old target (which may go).
+            GpuGuard g(dd->GetGpu());
+            ctx.SetTargets(nullptr, z);
+        }
         return DDERR_INVALIDPIXELFORMAT;
     }
     if (!s->palette && s->buf->fmt.bpp < 16) return DDERR_NOPALETTEATTACHED;
@@ -1126,6 +1137,7 @@ HRESULT Device::CreateExecuteBufferI(D3DEXECUTEBUFFERDESC* d, IDirect3DExecuteBu
     *out = nullptr;
     const DWORD max = (kind == kHAL ? hal : hel).dwMaxBufferSize;
     if (!d->dwFlags || !d->dwBufferSize || (max && d->dwBufferSize > max)) return DDERR_INVALIDPARAMS;
+    if (d->dwBufferSize > 0x10000000) return E_OUTOFMEMORY;  // (a vector that size would throw)
     ExecBuf* b = new (std::nothrow) ExecBuf(this, d->dwBufferSize);
     if (!b) return E_OUTOFMEMORY;
     execBufs.push_back(b);
@@ -1231,6 +1243,7 @@ HRESULT Device::F3::DrawPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWP
                                          DWORD flags) {
     if ((fvf & 0x0E) == D3DFVF_XYZRHW) return D3DERR_INVALIDVERTEXTYPE;
     if (!d) return DDERR_INVALIDPARAMS;
+    if (n > 0x01000000) return DDERR_INVALIDPARAMS;  // as Direct3D 7's cap (n * stride stays far from 4 GB)
     Guard l;
     std::vector<uint8_t> v;
     Gather6(fvf, *d, n, &v);
@@ -1241,6 +1254,7 @@ HRESULT Device::F3::DrawIndexedPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D
                                                 WORD* idx, DWORD ni, DWORD flags) {
     if ((fvf & 0x0E) == D3DFVF_XYZRHW) return D3DERR_INVALIDVERTEXTYPE;
     if (!d) return DDERR_INVALIDPARAMS;
+    if (n > 0x01000000) return DDERR_INVALIDPARAMS;  // as Direct3D 7's cap (n * stride stays far from 4 GB)
     Guard l;
     std::vector<uint8_t> v;
     Gather6(fvf, *d, n, &v);

@@ -124,6 +124,13 @@ bool PathOf(HKEY k, std::wstring* path) {
 void Remember(HKEY k, const std::wstring& path) {
     AcquireSRWLockExclusive(&g_keyLock);
     if (!g_keys) g_keys = new std::vector<std::pair<HKEY, std::wstring>>;
+    // A handle value seen before (closed some way not hooked, and reused): the new key.
+    for (auto& e : *g_keys)
+        if (e.first == k) {
+            e.second = path;
+            ReleaseSRWLockExclusive(&g_keyLock);
+            return;
+        }
     g_keys->emplace_back(k, path);
     ReleaseSRWLockExclusive(&g_keyLock);
 }
@@ -153,9 +160,10 @@ bool IsCpuKey(const std::wstring& path) {
            path[kCpuPath.size()] == L'\\' && AllDigits(path, kCpuPath.size() + 1);
 }
 
-// On the way there: a whole-component prefix of the processor directory, or a processor.
+// On the way there: a whole-component prefix of the processor directory, or a processor
+// ("": a new handle to HKEY_LOCAL_MACHINE itself, opened with no subkey).
 bool Tracked(const std::wstring& path) {
-    if (path.empty()) return false;
+    if (path.empty()) return true;
     if (path.size() <= kCpuPath.size())
         return kCpuPath.compare(0, path.size(), path) == 0 && (path.size() == kCpuPath.size() || kCpuPath[path.size()] == L'\\');
     return IsCpuKey(path);
@@ -197,6 +205,29 @@ LONG WINAPI HookRegOpenKeyA(HKEY k, LPCSTR sub, PHKEY out) {
 }
 LONG WINAPI HookRegOpenKeyW(HKEY k, LPCWSTR sub, PHKEY out) {
     return Opened(g_regOpenKeyW(k, sub, out), k, sub ? sub : L"", out);
+}
+
+// RegCreateKey(Ex) opens existing keys too (some games open the processor keys that way).
+using RegCreateKeyExAFn = LONG(WINAPI*)(HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM, const SECURITY_ATTRIBUTES*, PHKEY, LPDWORD);
+using RegCreateKeyExWFn = LONG(WINAPI*)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM, const SECURITY_ATTRIBUTES*, PHKEY, LPDWORD);
+using RegCreateKeyAFn = LONG(WINAPI*)(HKEY, LPCSTR, PHKEY);
+using RegCreateKeyWFn = LONG(WINAPI*)(HKEY, LPCWSTR, PHKEY);
+RegCreateKeyExAFn g_regCreateKeyExA;
+RegCreateKeyExWFn g_regCreateKeyExW;
+RegCreateKeyAFn g_regCreateKeyA;
+RegCreateKeyWFn g_regCreateKeyW;
+
+LONG WINAPI HookRegCreateKeyExA(HKEY k, LPCSTR sub, DWORD res, LPSTR cls, DWORD opt, REGSAM sam,
+                                const SECURITY_ATTRIBUTES* sa, PHKEY out, LPDWORD disp) {
+    return Opened(g_regCreateKeyExA(k, sub, res, cls, opt, sam, sa, out, disp), k, Wide(sub), out);
+}
+LONG WINAPI HookRegCreateKeyExW(HKEY k, LPCWSTR sub, DWORD res, LPWSTR cls, DWORD opt, REGSAM sam,
+                                const SECURITY_ATTRIBUTES* sa, PHKEY out, LPDWORD disp) {
+    return Opened(g_regCreateKeyExW(k, sub, res, cls, opt, sam, sa, out, disp), k, sub ? sub : L"", out);
+}
+LONG WINAPI HookRegCreateKeyA(HKEY k, LPCSTR sub, PHKEY out) { return Opened(g_regCreateKeyA(k, sub, out), k, Wide(sub), out); }
+LONG WINAPI HookRegCreateKeyW(HKEY k, LPCWSTR sub, PHKEY out) {
+    return Opened(g_regCreateKeyW(k, sub, out), k, sub ? sub : L"", out);
 }
 
 LONG WINAPI HookRegCloseKey(HKEY k) {
@@ -245,6 +276,10 @@ ImportHook kCpuHooks[] = {
     {"advapi32", "RegQueryValueExW", reinterpret_cast<void*>(HookRegQueryValueExW),
      reinterpret_cast<void**>(&g_regQueryValueExW)},
     {"advapi32", "RegCloseKey", reinterpret_cast<void*>(HookRegCloseKey), reinterpret_cast<void**>(&g_regCloseKey)},
+    {"advapi32", "RegCreateKeyExA", reinterpret_cast<void*>(HookRegCreateKeyExA), reinterpret_cast<void**>(&g_regCreateKeyExA)},
+    {"advapi32", "RegCreateKeyExW", reinterpret_cast<void*>(HookRegCreateKeyExW), reinterpret_cast<void**>(&g_regCreateKeyExW)},
+    {"advapi32", "RegCreateKeyA", reinterpret_cast<void*>(HookRegCreateKeyA), reinterpret_cast<void**>(&g_regCreateKeyA)},
+    {"advapi32", "RegCreateKeyW", reinterpret_cast<void*>(HookRegCreateKeyW), reinterpret_cast<void**>(&g_regCreateKeyW)},
 };
 
 // ---------------------------------------------------------------- cpus=
@@ -265,24 +300,64 @@ ImportHook kCpusHooks[] = {
     {"kernel32", "GetSystemInfo", reinterpret_cast<void*>(HookGetSystemInfo), reinterpret_cast<void**>(&g_getSystemInfo)},
 };
 
-// The first cpus= processors the process may run on.
+// cpus= processors the process may run on: one logical processor per physical core (two
+// hyperthreads of one core would be about one core's worth), the first core last (it takes
+// most of the system's interrupts) when there are cores to spare.
 void SetAffinity() {
     DWORD_PTR process = 0, system = 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &process, &system)) return;
+    std::vector<DWORD_PTR> cores;  // each core's first logical processor the process may use
+    DWORD len = 0;
+    GetLogicalProcessorInformation(nullptr, &len);
+    std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> info(len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) + 1);
+    len = DWORD(info.size() * sizeof(info[0]));
+    if (GetLogicalProcessorInformation(info.data(), &len)) {
+        for (DWORD i = 0; i < len / sizeof(info[0]); i++) {
+            if (info[i].Relationship != RelationProcessorCore) continue;
+            const DWORD_PTR usable = info[i].ProcessorMask & process;
+            if (usable) cores.push_back(usable & (~usable + 1));  // its lowest bit
+        }
+    }
+    if (cores.empty())  // no topology: the logical processors themselves
+        for (unsigned bit = 0; bit < sizeof(DWORD_PTR) * 8; bit++)
+            if (process & (DWORD_PTR(1) << bit)) cores.push_back(DWORD_PTR(1) << bit);
+    if (int(cores.size()) > g_config.cpus) std::rotate(cores.begin(), cores.begin() + 1, cores.end());  // core 0 last
     DWORD_PTR mask = 0;
     int count = 0;
-    for (unsigned bit = 0; bit < sizeof(DWORD_PTR) * 8 && count < g_config.cpus; bit++) {
-        const DWORD_PTR b = DWORD_PTR(1) << bit;
-        if (process & b) {
-            mask |= b;
-            count++;
-        }
+    for (DWORD_PTR c : cores) {
+        if (count >= g_config.cpus) break;
+        mask |= c;
+        count++;
     }
     if (!mask || !SetProcessAffinityMask(GetCurrentProcess(), mask)) return;
     g_affinity = mask;
     g_cpuCount = count;
     DD2D9_LOG("cpus: the game runs on %d processor(s) (mask 0x%lx)", count, static_cast<unsigned long>(mask));
 }
+
+// Functions looked up at run time (games that also ran on Windows 95 find
+// GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's.
+using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+GetProcAddressFn g_getProcAddress;
+struct HookTable {
+    ImportHook* hooks;
+    size_t n;
+    bool on;
+};
+HookTable g_tables[3];
+
+FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
+    const FARPROC p = g_getProcAddress(m, name);
+    if (p)
+        for (const HookTable& t : g_tables)
+            for (size_t i = 0; t.on && i < t.n; i++)
+                if (*t.hooks[i].original == reinterpret_cast<void*>(p)) return reinterpret_cast<FARPROC>(t.hooks[i].replacement);
+    return p;
+}
+
+ImportHook kProcHooks[] = {
+    {"kernel32", "GetProcAddress", reinterpret_cast<void*>(HookGetProcAddress), reinterpret_cast<void**>(&g_getProcAddress)},
+};
 
 }  // namespace
 
@@ -292,6 +367,11 @@ void InstallCompatHooks(bool inLoaderLock) {
     if (g_config.ramMB) n += PatchGameModules(kMemoryHooks, sizeof(kMemoryHooks) / sizeof(kMemoryHooks[0]), inLoaderLock);
     if (g_config.cpuMHz) n += PatchGameModules(kCpuHooks, sizeof(kCpuHooks) / sizeof(kCpuHooks[0]), inLoaderLock);
     if (g_affinity) n += PatchGameModules(kCpusHooks, sizeof(kCpusHooks) / sizeof(kCpusHooks[0]), inLoaderLock);
+    g_tables[0] = {kMemoryHooks, sizeof(kMemoryHooks) / sizeof(kMemoryHooks[0]), g_config.ramMB != 0};
+    g_tables[1] = {kCpuHooks, sizeof(kCpuHooks) / sizeof(kCpuHooks[0]), g_config.cpuMHz != 0};
+    g_tables[2] = {kCpusHooks, sizeof(kCpusHooks) / sizeof(kCpusHooks[0]), g_affinity != 0};
+    if (g_tables[0].on || g_tables[1].on || g_tables[2].on)
+        n += PatchGameModules(kProcHooks, sizeof(kProcHooks) / sizeof(kProcHooks[0]), inLoaderLock);
     if (n) DD2D9_LOG("compat: %u imports patched (ram=%d cpu=%d cpus=%d)", n, g_config.ramMB, g_config.cpuMHz, g_config.cpus);
 }
 
