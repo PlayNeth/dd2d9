@@ -3,6 +3,21 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.0.1
+- **Transformed vertices are drawn without Direct3D 9's clipping**, so depth past [0, 1]
+  is clamped per pixel as the hardware of the era did, not cut off. NFS Porsche
+  Unleashed's sky haze (depth up to 11, and the sky dome from -100 to 700) was cut in
+  wedges on Intel's driver; Wine's own Direct3D clamps, so it never showed there.
+  Untransformed vertices keep the game's CLIPPING state. d3d7test checks a triangle from
+  depth 0.5 to 3 draws whole.
+- **`antialias2d=` (off by default): with antialiasing, 2D drawn through Direct3D stays
+  sharp.** A draw of transformed vertices at one depth and one rhw (screen-aligned: no
+  perspective) with the depth test off, or ALWAYS without writing depth, is drawn into
+  the resolved image after the 3D so far; the next 3D draw copies the part drawn into the
+  multisampled image, as for the CPU's drawing. HUDs' edges (NFS Porsche Unleashed's dials) came out soft. `on`
+  antialiases them as before. d3d7test's slanted-edge check is now depth tested (3D), and
+  a 2D triangle is checked beside it.
+
 ## 1.0.0
 First public release. Since 0.9.21:
 - **`desktopbpp=` also answers GDI and EnumDisplaySettings** (`GetDeviceCaps` BITSPIXEL and

@@ -795,6 +795,9 @@ struct GpuContext::Impl final : Gpu::Owner {
     IDirect3DSurface9* boundRt = nullptr;  // what D3D9 has (compared only)
     IDirect3DSurface9* boundZ = nullptr;
     bool rebind = true;  // what D3D9 has bound is unknown (new device, or another context's)
+    // antialias2d=off: this draw is 2D (Draw: screen-aligned, the depth test passing
+    // always): drawn into the resolved, single-sampled image, not the multisampled one.
+    bool flat2d = false;
     Surface* tex[8] = {};
     bool colorKey = false;
     // Each stage's mip filter as the game set it, and as D3D9 has it: mipmaps=on turns it on
@@ -823,6 +826,10 @@ struct GpuContext::Impl final : Gpu::Owner {
     float gameBias = 0.0f;  // the game's depth bias (ZBIAS); biasSet: as D3D9 has it
     float biasSet = 0.0f;
     float slopeSet = 0.0f;  // SLOPESCALEDEPTHBIAS as D3D9 has it (only the overlay slack sets it)
+    // CLIPPING as the game set it, and as D3D9 has it (2: unknown): off for every draw of
+    // transformed vertices (Draw).
+    DWORD gameClipping = TRUE;
+    DWORD clippingSet = 2;
     DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD anisoLimit = 0;  // anisotropy= within what the GPU can (0: not known yet, or none)
     // alternatepixelcenter: the game's projection, sent moved half a pixel at the next draw
@@ -871,6 +878,7 @@ bool GpuContext::Begin(bool* fresh) {
         // The device's own copies of what dd2d9 sets beside the game's states (which the
         // caller sends all again): unknown now, sent at the next draw.
         p_->biasSet = p_->slopeSet = -2.0f;
+        p_->clippingSet = 2;
         *fresh = true;
     }
     return true;
@@ -878,6 +886,10 @@ bool GpuContext::Begin(bool* fresh) {
 
 void GpuContext::SetRenderState(DWORD state, DWORD value) {
     if (state < 256) p_->rsMirror[state] = value;  // as the game set it (drawtrace)
+    if (state == D3DRS_CLIPPING) {  // sent per draw (Draw)
+        p_->gameClipping = value;
+        return;
+    }
     if (state == D3DRS_ZENABLE) {
         // W buffering: D3D9's own where the GPU has it, else emulated for transformed
         // vertices (Draw); the depth test itself is an ordinary Z buffer's.
@@ -996,25 +1008,28 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
         if (overwriteColor) rt->buf->gpuStale = false;
         else UploadSurf(gpu, dev, r);
     }
-    if (r->ms && r->msStale) {
+    const bool single = flat2d && r->ms;  // into `surf`: the 3D drawn so far resolved into it first
+    // (`surf` already the newest image for a 2D draw: nothing to copy into the multisampled one yet)
+    if (r->ms && r->msStale && !(single && !r->msNewer)) {
         if (overwriteColor) r->msStale = false;
         else CopyToMs(gpu, dev, r);
         rebind = true;  // CopyToMs drew into it with no Z buffer
     }
-    IDirect3DSurface9* target = r->ms ? r->ms : r->surf;
+    if (single) Resolve(gpu, dev, r);
+    IDirect3DSurface9* target = r->ms && !single ? r->ms : r->surf;
     if (rebind || boundRt != target) {
         dev->SetRenderTarget(0, target);
         boundRt = target;
         dev->SetViewport(&vp);  // D3D9 resets it to the whole target; Direct3D 7 keeps its own
     }
     GpuSurf* zs = z ? EnsureSurf(gpu, dev, z->buf, true) : nullptr;
-    IDirect3DSurface9* zsurf = zs ? zs->surf : nullptr;
+    IDirect3DSurface9* zsurf = zs && !single ? zs->surf : nullptr;  // (multisampled: not with `surf`)
     if (rebind || boundZ != zsurf) {  // also null: another context may have left its Z bound
         dev->SetDepthStencilSurface(zsurf);
         boundZ = zsurf;
     }
     rebind = false;
-    if (zs && !zs->fills.empty()) {
+    if (zs && !single && !zs->fills.empty()) {  // (with `surf`: at the next 3D draw)
         if (!overwriteZ) {
             // Clear works inside the viewport only: the whole surface's for the fills.
             const D3DVIEWPORT9 keep = vp;
@@ -1210,7 +1225,39 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                       const WORD* indices, UINT indexCount, UINT primCount, bool zEnabled) {
     Impl& p = *p_;
     if (!p.dev || !primCount || !verts || !vertexCount) return;
-    if (!p.BindTargets(false, false)) return;
+    // antialias2d=off: a 2D draw (a HUD, a menu, text) skips antialiasing: drawn into the
+    // resolved image after the 3D so far, pixel for pixel, its edges as the game drew them
+    // (multisampled, a HUD's edges came out soft). 2D: transformed vertices at one depth
+    // and one rhw (screen-aligned, no perspective: a sky dome has it), the depth test
+    // passing always (off, or ALWAYS without writing depth). The next 3D draw copies the
+    // part drawn (msDirty) into the multisampled image first, as for the CPU's drawing.
+    RECT flatRect = {};
+    p.flat2d = false;
+    // (The Z buffer isn't bound with `surf`: a draw that writes depth stays 3D, as a cockpit
+    // written with ZFUNC ALWAYS hides what is drawn after it.)
+    if (!g_config.aa2d && (fvf & 0x0E) == 0x04 && stride >= 16 &&
+        (!zEnabled || (p.rsMirror[D3DRS_ZFUNC] == D3DCMP_ALWAYS && !p.zWrite)) &&
+        p.rsMirror[D3DRS_STENCILENABLE] != TRUE && p.rt && p.rt->buf->gpu && p.rt->buf->gpu->ms) {  // (no depth-stencil with `surf`)
+        const auto* src = static_cast<const uint8_t*>(verts);
+        const float* v0 = reinterpret_cast<const float*>(src);
+        float x0 = v0[0], y0 = v0[1], x1 = v0[0], y1 = v0[1];
+        bool flat = true;
+        for (UINT i = 1; i < vertexCount && flat; i++) {
+            const float* v = reinterpret_cast<const float*>(src + size_t(i) * stride);
+            flat = v[2] == v0[2] && v[3] == v0[3];
+            x0 = std::min(x0, v[0]), x1 = std::max(x1, v[0]), y0 = std::min(y0, v[1]), y1 = std::max(y1, v[1]);
+        }
+        if (flat && std::isfinite(x0) && std::isfinite(x1) && std::isfinite(y0) && std::isfinite(y1)) {
+            const float w = float(p.rt->buf->w), h = float(p.rt->buf->h);
+            flatRect = {LONG(std::clamp(std::floor(x0) - 1.0f, 0.0f, w)), LONG(std::clamp(std::floor(y0) - 1.0f, 0.0f, h)),
+                        LONG(std::clamp(std::ceil(x1) + 1.0f, 0.0f, w)), LONG(std::clamp(std::ceil(y1) + 1.0f, 0.0f, h))};
+            p.flat2d = true;
+        }
+    }
+    const bool bound = p.BindTargets(false, false);
+    const bool flat2d = p.flat2d;
+    p.flat2d = false;
+    if (!bound) return;
     p.BindTextures();
     if (MsaaType(p.dev) != D3DMULTISAMPLE_NONE) p.ClampCutouts(fvf, verts, stride, vertexCount);
     IDirect3DVertexDeclaration9* decl = p.Decl(fvf);
@@ -1258,6 +1305,16 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
             p.dev->SetRenderState(D3DRS_ZWRITEENABLE, write);
             p.zWriteSet = write;
         }
+    }
+    // Transformed vertices aren't clipped: the hardware of the era clamped their depth to
+    // the depth range per pixel, and so does D3D9 without clipping. With it, D3D9 cuts
+    // triangles where their z leaves [0, 1] (NFS Porsche Unleashed's sky haze, z up to 11,
+    // was cut in wedges on Intel's driver; Wine's own Direct3D clamps). Their x and y stay
+    // within the guard band: the game's or dd2d9's own clipper (Direct3D 3-6) sees to it.
+    const DWORD clipping = (fvf & 0x0E) == 0x04 ? DWORD(FALSE) : p.gameClipping;
+    if (clipping != p.clippingSet) {
+        p.dev->SetRenderState(D3DRS_CLIPPING, clipping);
+        p.clippingSet = clipping;
     }
     const bool shift = g_config.pixelCenter;
     if (shift && (fvf & 0x0E) != 0x04 && p.projDirty) {
@@ -1359,8 +1416,16 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     }
     p.rt->buf->cpuStale = true;
     p.rt->buf->gpuStale = false;
-    p.rt->buf->gpu->msNewer = p.rt->buf->gpu->ms != nullptr;
-    p.rt->buf->gpu->serial = ++g_drawSerial;
+    GpuSurf* g = p.rt->buf->gpu;
+    if (flat2d && g->ms) {  // drawn into `surf`: the multisampled image lacks it there
+        if (!g->msStale) g->msDirty = flatRect;
+        else UnionRect(&g->msDirty, &g->msDirty, &flatRect);
+        g->msStale = true;
+        g->msNewer = false;
+    } else {
+        g->msNewer = g->ms != nullptr;
+    }
+    g->serial = ++g_drawSerial;
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
 }
 

@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.0.0"
+#define DD2D9_VERSION "1.0.1"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -42,6 +42,7 @@ struct Config {
     int fpsLimit = 0;              // frames per second at most (Flip, full blits to the primary); 0: off
     bool texLinear = false;        // texfilter=linear: point-filtered textures drawn linear
     int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off
+    bool aa2d = false;             // antialias2d=on: 2D draws (HUDs) antialiased too; off: drawn single-sampled
     bool render32 = false;         // 16-bit render targets drawn in 32 bits on the GPU
     bool depth24 = false;
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s

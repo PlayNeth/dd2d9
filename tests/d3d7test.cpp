@@ -300,8 +300,11 @@ static int Run(int w, int h, int bpp) {
               acc >= 0x10 ? "accumulated (the target keeps more than 16 bits)" : "rounded away (16-bit precision)");
 
         // A white triangle with a slanted edge on black: without antialiasing every pixel on
-        // the edge is black or white; with it (antialiasing=N) some are in between.
-        dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+        // the edge is black or white; with it (antialiasing=N) some are in between. Depth
+        // tested, so 3D (antialias2d=off leaves 2D draws single-sampled).
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_ZENABLE, TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
         dev->BeginScene();
         Vertex tri[3] = {{0, 0, 0.5f, 1, 0xFFFFFFFF}, {40, 0, 0.5f, 1, 0xFFFFFFFF}, {0, 31, 0.5f, 1, 0xFFFFFFFF}};
         dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, tri, 3, 0);
@@ -341,6 +344,36 @@ static int Run(int w, int h, int bpp) {
         dev->EndScene();
         const DWORD zeroTri = pixel(305, 105), validTri = pixel(365, 105);
         CHECK(zeroTri == 0xFFFFFF && validTri == 0xFFFFFF, "rhw 0 beside valid rhw in one draw: 0x%06lx, valid 0x%06lx", zeroTri, validTri);
+
+        // Transformed vertices past depth 1 with the depth test on (NFS Porsche Unleashed's
+        // sky haze, z up to 11): the hardware of the era clamped the depth per pixel and drew
+        // the whole triangle; Direct3D 9 with clipping cut it where z passed 1.
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_ZENABLE, TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
+        dev->BeginScene();
+        Vertex deep[3] = {{420, 100, 0.5f, 1, 0xFFFFFFFF}, {520, 100, 3.0f, 1, 0xFFFFFFFF}, {420, 140, 0.5f, 1, 0xFFFFFFFF}};
+        dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, deep, 3, 0);
+        dev->EndScene();
+        const DWORD nearPart = pixel(425, 104), farPart = pixel(500, 102);
+        CHECK(nearPart == 0xFFFFFF && farPart == 0xFFFFFF, "depth past 1 clamped, not clipped: near 0x%06lx, far 0x%06lx", nearPart, farPart);
+
+        // A 2D triangle (transformed, one depth, the depth test off): with antialiasing and
+        // antialias2d off, its edge is drawn as without antialiasing (a HUD stays sharp).
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+        dev->BeginScene();
+        Vertex flat2d[3] = {{0, 200, 0.5f, 1, 0xFFFFFFFF}, {40, 200, 0.5f, 1, 0xFFFFFFFF}, {0, 231, 0.5f, 1, 0xFFFFFFFF}};
+        dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, flat2d, 3, 0);
+        dev->EndScene();
+        dev->SetRenderState(D3DRENDERSTATE_ZENABLE, TRUE);
+        int between2d = 0;
+        for (int y = 200; y < 230; y++)
+            for (int x = 0; x < 40; x++) {
+                const DWORD g = (pixel(x, y) >> 8) & 0xFF;
+                if (g > 0x10 && g < 0xF0) between2d++;
+            }
+        CHECK(true, "a 2D triangle's edge: %d pixels in between, %s", between2d, between2d ? "antialiased" : "sharp");
 
         // A cut-out sprite (alpha tested) whose texture is transparent except a white column
         // at its left edge, drawn with its right edge at a fractional position: nothing may

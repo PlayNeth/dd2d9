@@ -145,6 +145,10 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
             else if (x < n.lo || x > n.hi) ok = false;
             else *n.field = int(x);
         }
+    } else if (key == "antialias2d" || key == "aa2d") {
+        int b;
+        if (ParseBool(v, &b)) g_config.aa2d = b != 0;
+        else ok = false;
     } else if (key == "lockwhole") {
         int b;
         if (ParseBool(v, &b)) g_config.lockWhole = b != 0;
@@ -349,9 +353,9 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
-    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s wbuffer=%s overlaybias=%d", g_config.fpsLimit, g_config.ramMB,
+    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d antialias2d=%s texfilter=%s wbuffer=%s overlaybias=%d", g_config.fpsLimit, g_config.ramMB,
         g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.desktopBpp, g_config.lockWhole ? "on" : "off", g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
-        g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa,
+        g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa, g_config.aa2d ? "on" : "off",
         g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off",
         g_config.overlayBias);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());

@@ -144,6 +144,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
 | `fpslimit` | `0` (off); frames per second at most |
 | `antialiasing` | `0` (off); `2`, `4` or `8` samples |
+| `antialias2d` | `off`: with `antialiasing`, 2D drawn through Direct3D (HUDs, menus: screen-aligned, the depth test off) stays pixel-sharp; `on`: antialiased like the 3D |
 | `anisotropy` | `0` (off); `2`, `4`, `8` or `16`, on textures the game filters smoothly |
 | `mipmaps` | `off`; `on`: the GPU makes smaller levels for textures the game gave none |
 | `texfilter` | `game`; `linear`: point-filtered textures drawn bilinear (cut-outs keep the game's filtering) |
