@@ -319,21 +319,24 @@ bool Presenter::EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h) {
 // ps_2_0, sharp bilinear: within each source pixel, flat colour, blended with the neighbour
 // only over the last output pixel at its edge (libretro's sharp-bilinear-simple). Any
 // enlargement, whole or not. c0 = source size, c1 = 0.5 - 0.5/scale (the flat region's
-// half-width), c2 = scale, c3 = 1/source size. Assembled from:
-//   def c4, 0.5, 0, 0, 0 / dcl t0.xy / dcl_2d s0 / mov r3, c4.y
-//   r0 = t0 * c0 (the texel position) / r1 = frc(r0) / r0 -= r1 / r1 -= 0.5
-//   r2 = min(max(r1, -c1), c1) / r1 = (r1 - r2) * c2 + 0.5 / r3.xy = (r0 + r1) * c3
+// half-width), c5 = -c1, c2 = scale, c3 = 1/source size. Assembled from:
+//   def c4, 0.5, 0, -0.5, 0 / dcl t0 / dcl_2d s0 / mov r0..r3, c4.y
+//   r0.xy = t0 * c0 (the texel position) / r1.xy = frc(r0) / r0.xy -= r1 / r1.xy += c4.z
+//   r2.xy = min(max(r1, c5), c1) / r1.xy = (r1 - r2) * c2 + c4.x / r3.xy = (r0 + r1) * c3
 //   texld r0, r3, s0 / oC0 = r0
-// (r3 set whole first: Windows' validator refuses a texld from a register with components
-// never written, which Wine doesn't check.)
-static const DWORD kSharpPs[] = {0xffff0200,0x0200001f,0x80000000,0xb0030000,0x0200001f,0x90000000,
-0xa00f0800,0x05000051,0xa00f0004,0x3f000000,0x00000000,0x00000000,
-0x00000000,0x02000001,0x800f0003,0xa0550004,0x03000005,0x80030000,
-0xb0e40000,0xa0e40000,0x02000013,0x80030001,0x80e40000,0x03000002,
-0x80030000,0x80e40000,0x81e40001,0x03000002,0x80030001,0x80e40001,
-0xa1000004,0x0300000b,0x80030002,0x80e40001,0xa1e40001,0x0300000a,
-0x80030002,0x80e40002,0xa0e40001,0x03000002,0x80030001,0x80e40001,
-0x81e40002,0x04000004,0x80030001,0x80e40001,0xa0e40002,0xa0000004,
+// Written to stay clear of everything Windows' ps_2_0 validator may refuse (Wine checks
+// none of it): every register set whole before it is read, no negated constants, one
+// constant per instruction, the texture coordinate declared whole.
+static const DWORD kSharpPs[] = {0xffff0200,0x0200001f,0x80000000,0xb00f0000,0x0200001f,0x90000000,
+0xa00f0800,0x05000051,0xa00f0004,0x3f000000,0x00000000,0xbf000000,
+0x00000000,0x02000001,0x800f0000,0xa0550004,0x02000001,0x800f0001,
+0xa0550004,0x02000001,0x800f0002,0xa0550004,0x02000001,0x800f0003,
+0xa0550004,0x03000005,0x80030000,0xb0e40000,0xa0e40000,0x02000013,
+0x80030001,0x80e40000,0x03000002,0x80030000,0x80e40000,0x81e40001,
+0x03000002,0x80030001,0x80e40001,0xa0aa0004,0x0300000b,0x80030002,
+0x80e40001,0xa0e40005,0x0300000a,0x80030002,0x80e40002,0xa0e40001,
+0x03000002,0x80030001,0x80e40001,0x81e40002,0x03000005,0x80030001,
+0x80e40001,0xa0e40002,0x03000002,0x80030001,0x80e40001,0xa0000004,
 0x03000002,0x80030000,0x80e40000,0x80e40001,0x03000005,0x80030003,
 0x80e40000,0xa0e40003,0x03000042,0x800f0000,0x80e40003,0xa0e40800,
 0x02000001,0x800f0800,0x80e40000,0x0000ffff,
@@ -354,14 +357,24 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
             static const DWORD kPassPs[] = {0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000,
                                             0xa00f0800, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001,
                                             0x800f0800, 0x80e40000, 0x0000ffff};
+            // And one with frc alone (the instruction the pass-through one lacks).
+            static const DWORD kFrcPs[] = {0xffff0200,0x0200001f,0x80000000,0xb00f0000,0x0200001f,0x90000000,
+0xa00f0800,0x05000051,0xa00f0000,0x00000000,0x00000000,0x00000000,
+0x00000000,0x02000001,0x800f0001,0xa0000000,0x02000013,0x80030001,
+0xb0e40000,0x03000042,0x800f0000,0x80e40001,0xa0e40800,0x02000001,
+0x800f0800,0x80e40000,0x0000ffff,
+};
             IDirect3DPixelShader9* pass = nullptr;
             const HRESULT hp = d->CreatePixelShader(kPassPs, &pass);
             if (pass) pass->Release();
+            pass = nullptr;
+            const HRESULT hf = d->CreatePixelShader(kFrcPs, &pass);
+            if (pass) pass->Release();
             D3DCAPS9 caps = {};
             d->GetDeviceCaps(&caps);
-            DD2D9_LOG("  the device: pixel shaders %lu.%lu; a pass-through ps_2_0 shader: 0x%08lx",
+            DD2D9_LOG("  the device: pixel shaders %lu.%lu; a pass-through ps_2_0 shader: 0x%08lx; frc: 0x%08lx",
                       static_cast<unsigned long>((caps.PixelShaderVersion >> 8) & 0xFF),
-                      static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF), hp);
+                      static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF), hp, hf);
             return false;
         }
     }
@@ -407,11 +420,10 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
     for (const auto& s : rs) d->SetRenderState(D3DRENDERSTATETYPE(s[0]), s[1]);
     const float dw = float(dst.right - dst.left), dh = float(dst.bottom - dst.top);
     const float sx = dw / float(w), sy = dh / float(h);
-    const float c[4][4] = {{float(w), float(h), 0, 0},
-                           {0.5f - 0.5f / sx, 0.5f - 0.5f / sy, 0, 0},
-                           {sx, sy, 0, 0},
-                           {1.0f / float(w), 1.0f / float(h), 0, 0}};
-    d->SetPixelShaderConstantF(0, &c[0][0], 4);
+    const float rx = 0.5f - 0.5f / sx, ry = 0.5f - 0.5f / sy;
+    const float c[6][4] = {{float(w), float(h), 0, 0}, {rx, ry, 0, 0}, {sx, sy, 0, 0},
+                           {1.0f / float(w), 1.0f / float(h), 0, 0}, {0.5f, 0, -0.5f, 0}, {-rx, -ry, 0, 0}};
+    d->SetPixelShaderConstantF(0, &c[0][0], 6);
     // Pixel centres on the output's (D3D9's half-pixel offset).
     const float x0 = float(dst.left) - 0.5f, y0 = float(dst.top) - 0.5f, x1 = x0 + dw, y1 = y0 + dh;
     const float q[4][6] = {{x0, y0, 0, 1, 0, 0}, {x1, y0, 0, 1, 1, 0}, {x0, y1, 0, 1, 0, 1}, {x1, y1, 0, 1, 1, 1}};

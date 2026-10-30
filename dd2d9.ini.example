@@ -91,13 +91,20 @@ depth24=off
 ; their edges don't pick up a line from the texture's other side.
 antialiasing=0
 
+; Overlays (light maps, decals: passes that don't write depth or that blend) pulled forward
+; one step of the depth precision the game asked for. They differ from the surface under
+; them only by rounding, which the 16-bit depth buffers of the era rounded the same way;
+; deeper ones show it as hatched z-fighting (NFS III's headlights on the road). on / off
+overlaybias=on
+
 ; W buffering, which most cards of the era had and today's don't:
 ;   on    - offered to games, and emulated (default): depth from 1/w, so polygons in the same
 ;           plane agree however they are cut (NFS III's headlights and light maps on the road
 ;           z-fight without it); light maps and decals laid on top get a little slack
 ;   force - Z buffering of pre-transformed vertices treated the same, for games that draw
-;           their own depth with the same trouble without asking for W buffering
-;   off   - not offered (16-bit Z buffers stay 16-bit)
+;           their own depth with the same trouble without asking for W buffering (breaks
+;           games whose 1/w doesn't follow their depth: NFS III's car turns black)
+;   off   - not offered
 wbuffer=on
 
 ; Texture filtering: game (default) as the game sets it; linear: point-filtered textures

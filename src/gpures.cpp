@@ -147,8 +147,8 @@ static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, Palet
 // The Z buffer's Direct3D 9 format: closest depth, with stencil if it has some. depth24=on:
 // 24 bits for a 16-bit one too (less z-fighting in the distance).
 static D3DFORMAT DepthFormat(const Format& f) {
-    // (wbuffer=on: 24 bits too, the emulation's depths are 1/w, crowded near 1 in the distance.)
-    if (f.bpp == 16) return g_config.depth24 || g_config.wbuffer ? D3DFMT_D24X8 : D3DFMT_D16;
+    // (wbuffer=force: 24 bits too, the emulation's depths are 1/w, crowded near 1 in the distance.)
+    if (f.bpp == 16) return g_config.depth24 || g_config.wbuffer == 2 ? D3DFMT_D24X8 : D3DFMT_D16;
     if (f.a) return D3DFMT_D24S8;  // Format keeps a Z buffer's stencil mask in `a`
     return D3DFMT_D24X8;
 }
@@ -749,6 +749,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     bool cutoutStage[8] = {};
     bool wEmulate = false;  // ZENABLE = D3DZB_USEW on a GPU without W buffering
     bool zWrite = true;     // ZWRITEENABLE
+    bool alphaBlend = false;  // ALPHABLENDENABLE
     float gameBias = 0.0f;  // the game's depth bias (ZBIAS); biasSet: as D3D9 has it
     float biasSet = 0.0f;
     DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
@@ -825,6 +826,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
         }
     }
     if (state == D3DRS_ZWRITEENABLE) p_->zWrite = value != 0;
+    if (state == D3DRS_ALPHABLENDENABLE) p_->alphaBlend = value != 0;
     if (state == 195) {  // D3DRS_DEPTHBIAS (from ZBIAS): the game's, before the overlay tolerance
         memcpy(&p_->gameBias, &value, 4);
         p_->biasSet = -1.0f;  // re-sent at the next draw
@@ -1136,13 +1138,20 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // alternatepixelcenter: everything half a pixel up and left, so that pixel centres fall
     // where the drivers that offered it put them (texel centres for 2D drawn 1:1, no lines at
     // texture edges): transformed vertices moved, the projection of the others too.
-    // Emulated W buffering: a pass that doesn't write depth (a light map or decal laid on a
-    // surface already drawn) is pulled forward by a few steps of a 24-bit depth buffer. Its
-    // depth equals the surface's only to within the GPU's rounding (the polygons are cut
-    // differently), where a 16-bit W buffer rounded both the same; without the slack,
-    // less-or-equal fails on half the pixels (NFS III's headlights on the road).
+    // overlaybias: a pass laid on a surface already drawn (it doesn't write depth, or it
+    // blends: light maps, decals) is pulled forward by one step of the depth precision the
+    // game asked for. Its depth equals the surface's only to within rounding (the polygons
+    // are cut differently), which the 16-bit depth buffers of the era rounded the same way,
+    // and the overlay won; with today's 24 bits less-or-equal fails on half its pixels, in
+    // a fine hatch (NFS III's headlights and light maps on the road). Deeper Z buffers: 16
+    // steps of a 24-bit one.
     {
-        const float bias = p.gameBias + (p.wEmulate && !p.zWrite ? -16.0f / 16777216.0f : 0.0f);
+        float slack = 0.0f;
+        if (g_config.overlayBias && zEnabled && (!p.zWrite || p.alphaBlend)) {
+            const bool z16 = p.z && p.z->buf->fmt.bpp == 16;
+            slack = z16 ? 1.0f / 65535.0f : 16.0f / 16777216.0f;
+        }
+        const float bias = p.gameBias - slack;
         if (bias != p.biasSet) {
             DWORD b;
             memcpy(&b, &bias, 4);

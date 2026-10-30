@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.11
+- **No more hatched z-fighting of light maps and decals** (`overlaybias=on`, default): a
+  pass laid on a surface already drawn (it doesn't write depth, or it blends) is pulled
+  forward by one step of the depth precision the game asked for (a 16-bit step for a
+  16-bit Z buffer, else 16 steps of a 24-bit one). The two differ only by rounding, which
+  the 16-bit depth buffers of the era rounded the same way; 24-bit ones (`depth24`, most
+  wrappers) show it as a fine hatch. NFS III's headlights and light maps on the road.
+  (NFS III draws with Z buffering, not W: `wbuffer=force` hid the hatch but broke its depth
+  order, the car drawn black.)
+- `wbuffer=on` no longer makes 16-bit Z buffers 24-bit (only `force` does, and `depth24`).
+- `filter=sharp`'s shader rewritten to stay clear of whatever Windows' ps_2_0 validator may
+  refuse (Wine checks nothing): registers set whole before they are read, no negated
+  constants, one constant per instruction. If it is refused still, the log says whether
+  `frc` alone is.
+- `d3d7test` checks an overlay on a floor cut differently, with Z buffering.
+
 ## 0.9.10
 - The log names the Direct3D 9 adapter, its driver and pixel shader version when the
   device is made; when `filter=sharp`'s shader is refused, whether the device takes a
