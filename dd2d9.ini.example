@@ -22,9 +22,8 @@ stretch=aspect
 ; Scaling filter:
 ;   point  - sharp pixels, but uneven at non-integer scales (default)
 ;   linear - smooth, but blurry
-;   sharp  - in between (also bilinear-sharp): scaled up to the nearest whole multiple
-;            with sharp pixels, then smoothly the rest of the way; crisp, with only a
-;            one-pixel soft edge
+;   sharp  - in between (also bilinear-sharp): each pixel a flat block, blended with its
+;            neighbour only over one screen pixel at the edge; crisp and even at any scale
 filter=point
 
 ; Vertical sync:
@@ -71,6 +70,17 @@ cpu=2000
 ; the era had; games of the era can crash, stutter or run at the wrong speed on several.
 ; 0: all.
 cpus=1
+
+; Mipmaps for textures the game gave none (most of DX7 and older): the GPU makes the smaller
+; levels and filters with them, so textures don't shimmer and crawl in the distance. Softer
+; than the hardware of the era showed. Colour-keyed textures are left alone (their
+; transparent texels would fringe the smaller levels). off (default) / on
+mipmaps=off
+
+; Alternate pixel centre, as ATI's and Nvidia's old drivers offered: Direct3D drawn half a
+; pixel up and left. For games that show lines or seams at the edges of textures, mostly in
+; 2D drawn through Direct3D (menus, HUDs, sprites). off (default) / on
+alternatepixelcenter=off
 
 ; Logging: 0 off (default), 1 info, 2 trace (every blit, lock, flip and palette change -
 ; very verbose, for diagnosing rendering problems).

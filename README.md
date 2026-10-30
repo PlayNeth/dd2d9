@@ -167,7 +167,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | --- | --- |
 | `display` | `switch`, `window`, `borderless` |
 | `stretch` | `aspect`, `fill`, `integer` |
-| `filter` | `point`, `linear`, `sharp` (bilinear-sharp: whole-multiple point scaling, then linear) |
+| `filter` | `point`, `linear`, `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges, at any scale) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
 | `d3d` | `auto` (or `on`): dd2d9's own Direct3D (3–7); `off`: no Direct3D |
 | `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
@@ -175,6 +175,8 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `vram` | `512`: MB of video memory DirectDraw reports (`GetCaps`, `GetAvailableVidMem`), `1`–`2047` |
 | `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
 | `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
+| `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance) |
+| `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered (lines at the edges of textures in 2D drawn through Direct3D) |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
 

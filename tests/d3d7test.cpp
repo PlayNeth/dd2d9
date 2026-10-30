@@ -163,6 +163,66 @@ static int Run(int w, int h, int bpp) {
             CHECK(l == col && r == 0xFF0000, "render to texture, pass %d: left 0x%06lx, right 0x%06lx", pass + 1, l, r);
         }
         if (tex) tex->Release();
+
+        // A 64x64 texture of one-pixel black and white squares drawn 8x8, point-filtered and
+        // with no mip filter: black or white without mipmaps; grey with mipmaps=on (the GPU's
+        // smaller levels average it).
+        DDSURFACEDESC2 c = {};
+        c.dwSize = sizeof(c);
+        c.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        c.dwWidth = c.dwHeight = 64;
+        c.ddsCaps.dwCaps = DDSCAPS_TEXTURE;
+        c.ddpfPixelFormat.dwSize = sizeof(c.ddpfPixelFormat);
+        c.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        c.ddpfPixelFormat.dwRGBBitCount = 32;
+        c.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+        c.ddpfPixelFormat.dwGBitMask = 0xFF00;
+        c.ddpfPixelFormat.dwBBitMask = 0xFF;
+        IDirectDrawSurface7* checker = nullptr;
+        hr = dd->CreateSurface(&c, &checker, nullptr);
+        CHECK(SUCCEEDED(hr) && checker, "checker texture -> 0x%08lx", hr);
+        DDSURFACEDESC2 l = {};
+        l.dwSize = sizeof(l);
+        if (checker && SUCCEEDED(checker->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) {
+            for (int y = 0; y < 64; y++)
+                for (int x = 0; x < 64; x++)
+                    reinterpret_cast<DWORD*>(static_cast<BYTE*>(l.lpSurface) + y * l.lPitch)[x] = ((x + y) & 1) ? 0xFFFFFF : 0;
+            checker->Unlock(nullptr);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFFFF0000, 1.0f, 0);
+            dev->SetTexture(0, checker);
+            dev->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTFN_POINT);
+            dev->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTFG_POINT);
+            dev->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTFP_NONE);
+            dev->BeginScene();
+            TV small[4] = {{0, 0, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {8, 0, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                           {0, 8, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {8, 8, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, small, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            const DWORD p = pixel(4, 4), g = (p >> 8) & 0xFF;
+            const char* what = p == 0 || p == 0xFFFFFF ? "no mipmaps" : (g > 0x40 && g < 0xC0) ? "mipmapped (mipmaps=on)" : "?";
+            CHECK(what[0] != '?', "checker texture drawn 8x smaller: 0x%06lx, %s", p, what);
+            // Drawn 1:1 at whole coordinates with bilinear filtering: Direct3D's pixel centres
+            // fall on texel edges (each pixel blends two texels: grey); alternatepixelcenter=on
+            // puts them on texel centres (exact black and white).
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFFFF0000, 1.0f, 0);
+            dev->SetTexture(0, checker);
+            dev->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTFN_LINEAR);
+            dev->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTFG_LINEAR);
+            dev->BeginScene();
+            TV one[4] = {{0, 0, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {64, 0, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                         {0, 64, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {64, 64, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, one, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            dev->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTFN_POINT);
+            dev->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTFG_POINT);
+            const DWORD q = pixel(10, 10), qg = (q >> 8) & 0xFF;
+            const char* centre = q == 0 || q == 0xFFFFFF ? "texel centres (alternatepixelcenter=on)"
+                                 : (qg > 0x40 && qg < 0xC0) ? "texel edges (Direct3D's)" : "?";
+            CHECK(centre[0] != '?', "checker texture drawn 1:1, bilinear: 0x%06lx, pixel centres on %s", q, centre);
+        }
+        if (checker) checker->Release();
     }
 
     int flipErrors = 0, sceneErrors = 0, gdiErrors = 0;

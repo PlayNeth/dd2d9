@@ -3,6 +3,23 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.3
+- **`filter=sharp` works at every scale**: it was plain bilinear below 2x (640x480 on a
+  1366x768 or 1080p screen) and a two-pass approximation above. Now one pixel shader
+  (sharp bilinear): each game pixel a flat block, blended with its neighbour only over the
+  one screen pixel at its edge.
+- **`mipmaps=on`**: textures the game gave no mipmaps get them from the GPU
+  (`D3DUSAGE_AUTOGENMIPMAP`), and the mip filter is linear where the game asked for none:
+  no shimmer in the distance. Colour-keyed, block-compressed and render-target textures are
+  left alone. Off by default.
+- **`alternatepixelcenter=on`**: Direct3D drawn half a pixel up and left, as old ATI and
+  Nvidia drivers offered, for games with lines at the edges of textures. Transformed
+  vertices are moved; the projection of untransformed ones is. Off by default.
+- `d3d7test` checks a texture drawn 8x smaller (mipmapped or not) and 1:1 with bilinear
+  filtering (where the pixel centres fall).
+- After drawing through its shaders (gamma, sharp), the presenter sets the device's own
+  back buffer as its render target again, so the device holds no surface of the presenter's.
+
 ## 0.9.2
 - **Compatibility options** (`src/compat.cpp`), what the game is told about the machine:
   - `ram=1024` (default): `GlobalMemoryStatus(Ex)` reports 1 GB of memory (3/4 of it free

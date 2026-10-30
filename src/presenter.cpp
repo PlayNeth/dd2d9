@@ -137,7 +137,7 @@ void Presenter::GetGamma(DDGAMMARAMP* ramp) {
 
 // ---------------------------------------------------------------- device
 
-// The staging and prescaled surfaces (the shared device's).
+// The staging surface and the shaders' resources (the shared device's).
 void Presenter::ReleaseGpuResources() {
     if (staging_) staging_->Release();
     staging_ = nullptr;
@@ -151,9 +151,11 @@ void Presenter::ReleaseGpuResources() {
     gammaPs_ = nullptr;
     gammaW_ = gammaH_ = 0;
     gammaTexVersion_ = 0;
-    if (prescaled_) prescaled_->Release();
-    prescaled_ = nullptr;
-    preW_ = preH_ = 0;
+    if (sharpTex_) sharpTex_->Release();
+    if (sharpPs_) sharpPs_->Release();
+    sharpTex_ = nullptr;
+    sharpPs_ = nullptr;
+    sharpW_ = sharpH_ = 0;
     stW_ = stH_ = 0;
     stagingStale_ = true;
 }
@@ -175,9 +177,6 @@ bool Presenter::EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h) {
     if (staging_ && stW_ == w && stH_ == h) return true;
     if (staging_) staging_->Release();
     staging_ = nullptr;
-    if (prescaled_) prescaled_->Release();
-    prescaled_ = nullptr;
-    preW_ = preH_ = 0;
     HRESULT hr = d->CreateOffscreenPlainSurface(w, h, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &staging_, nullptr);
     if (FAILED(hr)) {
         DD2D9_LOG("CreateOffscreenPlainSurface(%u, %u) failed: 0x%08lx", w, h, hr);
@@ -196,6 +195,17 @@ bool Presenter::EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h) {
 //   r1..r3 = (r0.x|y|z * c0.x + c0.y, 0.5) / texld r4..r6, r1..r3, s1
 //   oC0 = (r4.x, r5.y, r6.z, 1)
 static const DWORD kGammaPs[] = {0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000, 0xa00f0800, 0x0200001f, 0x90000000, 0xa00f0801, 0x05000051, 0xa00f0000, 0x3f7f0000, 0x3b000000, 0x3f000000, 0x3f800000, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001, 0x800f0001, 0xa0aa0000, 0x02000001, 0x800f0002, 0xa0aa0000, 0x02000001, 0x800f0003, 0xa0aa0000, 0x04000004, 0x80010001, 0x80000000, 0xa0000000, 0xa0550000, 0x04000004, 0x80010002, 0x80550000, 0xa0000000, 0xa0550000, 0x04000004, 0x80010003, 0x80aa0000, 0xa0000000, 0xa0550000, 0x03000042, 0x800f0004, 0x80e40001, 0xa0e40801, 0x03000042, 0x800f0005, 0x80e40002, 0xa0e40801, 0x03000042, 0x800f0006, 0x80e40003, 0xa0e40801, 0x02000001, 0x800f0007, 0xa0ff0000, 0x02000001, 0x80010007, 0x80000004, 0x02000001, 0x80020007, 0x80550005, 0x02000001, 0x80040007, 0x80aa0006, 0x02000001, 0x800f0800, 0x80e40007, 0x0000ffff};
+
+// After drawing into one of the presenter's surfaces: the device's own back buffer as its
+// render target again, so the device holds no reference to a surface of ours or of a swap
+// chain that may be released (or keep a Reset from succeeding).
+static void RestoreTarget(IDirect3DDevice9* d) {
+    IDirect3DSurface9* own = nullptr;
+    if (SUCCEEDED(d->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &own))) {
+        d->SetRenderTarget(0, own);
+        own->Release();
+    }
+}
 
 // The frame (src's rectangle r) with the gamma ramp applied, or null (shown without it).
 // Gpu lock held, outside a scene. The device's state is a GpuContext's: afterwards the next
@@ -282,22 +292,101 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     d->SetPixelShader(nullptr);
     d->SetTexture(0, nullptr);
     d->SetTexture(1, nullptr);
+    RestoreTarget(d);
     gpu.stateOwner = nullptr;  // the next Direct3D context sends all its state again
     return gammaOut_;
 }
 
-// filter=sharp's intermediate image: a render target (StretchRect filters only into one).
-bool Presenter::EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h) {
-    if (prescaled_ && preW_ == w && preH_ == h) return true;
-    if (prescaled_) prescaled_->Release();
-    prescaled_ = nullptr;
-    preW_ = preH_ = 0;
-    if (FAILED(d->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &prescaled_, nullptr))) {
-        prescaled_ = nullptr;
+// ps_2_0, sharp bilinear: within each source pixel, flat colour, blended with the neighbour
+// only over the last output pixel at its edge (libretro's sharp-bilinear-simple). Any
+// enlargement, whole or not. c0 = source size, c1 = 0.5 - 0.5/scale (the flat region's
+// half-width), c2 = scale, c3 = 1/source size. Assembled from:
+//   def c4, 0.5, 0, 0, 0 / dcl t0.xy / dcl_2d s0
+//   r0 = t0 * c0 (the texel position) / r1 = frc(r0) / r0 -= r1 / r1 -= 0.5
+//   r2 = min(max(r1, -c1), c1) / r1 = (r1 - r2) * c2 + 0.5 / r0 = (r0 + r1) * c3
+//   texld r0, r0, s0 / oC0 = r0
+static const DWORD kSharpPs[] = {0xffff0200,0x0200001f,0x80000000,0xb0030000,0x0200001f,0x90000000,
+0xa00f0800,0x05000051,0xa00f0004,0x3f000000,0x00000000,0x00000000,
+0x00000000,0x03000005,0x80030000,0xb0e40000,0xa0e40000,0x02000013,
+0x80030001,0x80e40000,0x03000002,0x80030000,0x80e40000,0x81e40001,
+0x03000002,0x80030001,0x80e40001,0xa1000004,0x0300000b,0x80030002,
+0x80e40001,0xa1e40001,0x0300000a,0x80030002,0x80e40002,0xa0e40001,
+0x03000002,0x80030001,0x80e40001,0x81e40002,0x04000004,0x80030001,
+0x80e40001,0xa0e40002,0xa0000004,0x03000002,0x80030000,0x80e40000,
+0x80e40001,0x03000005,0x80030000,0x80e40000,0xa0e40003,0x03000042,
+0x800f0000,0x80e40000,0xa0e40800,0x02000001,0x800f0800,0x80e40000,
+0x0000ffff,
+};
+
+// The frame (src's rectangle r) drawn into bb's rectangle dst through kSharpPs; false when it
+// can't be (no pixel shaders), for plain linear filtering. Gpu lock held, outside a scene.
+bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r, IDirect3DSurface9* bb, const RECT& dst) {
+    if (sharpFailed_) return false;
+    const UINT w = UINT(r.right - r.left), h = UINT(r.bottom - r.top);
+    if (!sharpPs_ && FAILED(d->CreatePixelShader(kSharpPs, &sharpPs_))) {
+        sharpPs_ = nullptr;
+        sharpFailed_ = true;
+        DD2D9_LOG("filter=sharp: no pixel shader, linear instead");
         return false;
     }
-    preW_ = w;
-    preH_ = h;
+    if (!sharpTex_ || sharpW_ != w || sharpH_ != h) {
+        if (sharpTex_) sharpTex_->Release();
+        sharpTex_ = nullptr;
+        sharpW_ = sharpH_ = 0;
+        if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &sharpTex_, nullptr))) {
+            sharpTex_ = nullptr;
+            return false;
+        }
+        sharpW_ = w;
+        sharpH_ = h;
+    }
+    IDirect3DSurface9* level = nullptr;
+    if (FAILED(sharpTex_->GetSurfaceLevel(0, &level))) return false;
+    d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT);
+    level->Release();
+    d->SetRenderTarget(0, bb);
+    d->SetDepthStencilSurface(nullptr);
+    D3DSURFACE_DESC bd;
+    bb->GetDesc(&bd);
+    const D3DVIEWPORT9 vp = {0, 0, bd.Width, bd.Height, 0.0f, 1.0f};
+    d->SetViewport(&vp);
+    d->SetPixelShader(sharpPs_);
+    d->SetVertexShader(nullptr);
+    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+    d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    d->SetRenderState(D3DRS_WRAP0, 0);
+    d->SetTexture(0, sharpTex_);
+    d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    d->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    d->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    d->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    d->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+    const DWORD rs[][2] = {{D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE},
+                           {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_FOGENABLE, FALSE},
+                           {D3DRS_STENCILENABLE, FALSE}, {D3DRS_SCISSORTESTENABLE, FALSE},
+                           {D3DRS_COLORWRITEENABLE, 0xF}, {D3DRS_FILLMODE, D3DFILL_SOLID}, {D3DRS_SRGBWRITEENABLE, FALSE},
+                           {D3DRS_CLIPPLANEENABLE, 0}};
+    for (const auto& s : rs) d->SetRenderState(D3DRENDERSTATETYPE(s[0]), s[1]);
+    const float dw = float(dst.right - dst.left), dh = float(dst.bottom - dst.top);
+    const float sx = dw / float(w), sy = dh / float(h);
+    const float c[4][4] = {{float(w), float(h), 0, 0},
+                           {0.5f - 0.5f / sx, 0.5f - 0.5f / sy, 0, 0},
+                           {sx, sy, 0, 0},
+                           {1.0f / float(w), 1.0f / float(h), 0, 0}};
+    d->SetPixelShaderConstantF(0, &c[0][0], 4);
+    // Pixel centres on the output's (D3D9's half-pixel offset).
+    const float x0 = float(dst.left) - 0.5f, y0 = float(dst.top) - 0.5f, x1 = x0 + dw, y1 = y0 + dh;
+    const float q[4][6] = {{x0, y0, 0, 1, 0, 0}, {x1, y0, 0, 1, 1, 0}, {x0, y1, 0, 1, 0, 1}, {x1, y1, 0, 1, 1, 1}};
+    Gpu& gpu = dd_->GetGpu();
+    gpu.OpenScene();
+    d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+    gpu.CloseScene();
+    d->SetPixelShader(nullptr);
+    d->SetTexture(0, nullptr);
+    RestoreTarget(d);
+    gpu.stateOwner = nullptr;  // the next Direct3D context sends all its state again
     return true;
 }
 
@@ -633,17 +722,8 @@ void Presenter::Loop() {
             const bool same = dw == sw && dh == sh;
             if (same || g_config.filter == 0) {
                 d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_POINT);
-            } else if (g_config.filter == 2 && dw >= 2 * sw && dh >= 2 * sh) {
-                // Sharp bilinear: enlarged by the largest whole factor with point sampling (sharp
-                // pixels), the rest of the way with linear (no uneven pixel sizes, only the
-                // pixel edges blended).
-                const UINT k = std::min(dw / sw, dh / sh);
-                if (EnsurePrescaled(d, sw * k, sh * k)) {
-                    d->StretchRect(source, &sourceRect, prescaled_, nullptr, D3DTEXF_POINT);
-                    d->StretchRect(prescaled_, nullptr, bb, &dst, D3DTEXF_LINEAR);
-                } else {
-                    d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_LINEAR);
-                }
+            } else if (g_config.filter == 2 && dw > sw && dh > sh && DrawSharp(d, source, sourceRect, bb, dst)) {
+                // Sharp bilinear: drawn.
             } else {
                 d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_LINEAR);
             }

@@ -343,8 +343,7 @@ private:
     static DWORD WINAPI ThreadProc(void* self);
     void Loop();
     bool EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h);
-    bool EnsurePrescaled(IDirect3DDevice9* d, UINT w, UINT h);
-    void ReleaseGpuResources() override;     // staging and prescaled surfaces (Gpu lock held)
+    void ReleaseGpuResources() override;     // staging surface and shader resources (Gpu lock held)
     void LeaveGpu();                         // stop presenting through the shared device
     // What the presenter copies from the primary surface under g_lock; the
     // pixels themselves are converted afterwards, without it.
@@ -367,7 +366,12 @@ private:
 
     bool usingGpu_ = false;            // presenting through the shared device (an owner of it)
     IDirect3DSurface9* staging_ = nullptr;
-    IDirect3DSurface9* prescaled_ = nullptr;  // filter=sharp: the image enlarged by a whole factor
+    // filter=sharp: the frame copied into a texture, drawn through a sharp-bilinear shader.
+    IDirect3DTexture9* sharpTex_ = nullptr;
+    IDirect3DPixelShader9* sharpPs_ = nullptr;
+    UINT sharpW_ = 0, sharpH_ = 0;
+    bool sharpFailed_ = false;  // no pixel shaders: linear instead
+    bool DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r, IDirect3DSurface9* bb, const RECT& dst);
     // The gamma ramp on frames presented from a render target: the frame copied into a
     // texture, drawn through a pixel shader that looks each channel up in a 256x1 ramp.
     IDirect3DTexture9* gammaSrc_ = nullptr;
@@ -378,7 +382,6 @@ private:
     DWORD gammaTexVersion_ = 0;
     bool gammaFailed_ = false;  // no pixel shaders: GPU frames shown without the ramp
     IDirect3DSurface9* ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r);
-    UINT preW_ = 0, preH_ = 0;
     UINT stW_ = 0, stH_ = 0;
 
     // What the staging surface holds (presenter thread only): a partial update

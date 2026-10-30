@@ -145,6 +145,10 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
             else if (x < n.lo || x > n.hi) ok = false;
             else *n.field = int(x);
         }
+    } else if (key == "mipmaps" || key == "alternatepixelcenter") {
+        int b;
+        if (ParseBool(v, &b)) (key == "mipmaps" ? g_config.mipmaps : g_config.pixelCenter) = b != 0;
+        else ok = false;
     } else if (key == "log") {
         int b;
         if (v == "2" || v == "trace") g_config.log = 2;
@@ -284,7 +288,8 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
-    Log(1, "settings: ram=%d vram=%d cpu=%d cpus=%d", g_config.ramMB, g_config.vramMB, g_config.cpuMHz, g_config.cpus);
+    Log(1, "settings: ram=%d vram=%d cpu=%d cpus=%d mipmaps=%s alternatepixelcenter=%s", g_config.ramMB, g_config.vramMB,
+        g_config.cpuMHz, g_config.cpus, g_config.mipmaps ? "on" : "off", g_config.pixelCenter ? "on" : "off");
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }

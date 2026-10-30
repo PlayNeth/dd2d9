@@ -308,6 +308,7 @@ struct GpuTex final : Gpu::Owner {
     DWORD palVersion = 0;
     bool keyed = false;
     DWORD key = 0;
+    bool autogen = false;  // mipmaps=on: one level from the game, the rest made by the GPU
     std::vector<Buffer*> levelBufs;
     std::vector<unsigned> levelSerials;  // each level's Buffer::cpuSerial when uploaded
     // A render target used as a texture while the GPU has its newest pixels: a copy made on
@@ -340,6 +341,25 @@ static const Palette* TexturePalette(const Surface* s) {
     if (s->palette) return s->palette;
     if (s->dd->primary && s->dd->primary->palette) return s->dd->primary->palette;
     return nullptr;
+}
+
+// mipmaps=on: whether the GPU can make a texture of this format's smaller levels itself.
+static bool CanAutogen(IDirect3DDevice9* d, D3DFORMAT fmt) {
+    static std::unordered_map<int, bool> known;  // Gpu lock
+    auto it = known.find(int(fmt));
+    if (it != known.end()) return it->second;
+    bool ok = false;
+    IDirect3D9* d3d = nullptr;
+    if (SUCCEEDED(d->GetDirect3D(&d3d))) {
+        D3DDEVICE_CREATION_PARAMETERS cp;
+        D3DDISPLAYMODE dm;
+        if (SUCCEEDED(d->GetCreationParameters(&cp)) && SUCCEEDED(d3d->GetAdapterDisplayMode(cp.AdapterOrdinal, &dm)))
+            ok = d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, dm.Format, D3DUSAGE_AUTOGENMIPMAP,
+                                        D3DRTYPE_TEXTURE, fmt) == D3D_OK;  // D3DOK_NOAUTOGEN: no
+        d3d->Release();
+    }
+    known[int(fmt)] = ok;
+    return ok;
 }
 
 // The texture's GPU copy, uploaded where the CPU copy changed. Gpu lock held.
@@ -398,9 +418,25 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
         const D3DFORMAT native = NativeFormat(s->buf->fmt);
         t->convert = native == D3DFMT_UNKNOWN || keyed;
         t->fmt = t->convert ? D3DFMT_A8R8G8B8 : native;
-        HRESULT hr = d->CreateTexture(s->buf->w, s->buf->h, UINT(chain.size()), 0, t->fmt, D3DPOOL_MANAGED, &t->tex,
-                                      nullptr);
+        // mipmaps=on: a texture the game gave one level, made with the rest by the GPU. Not
+        // colour-keyed ones (the keyed texels would blur into the smaller levels: fringes), not
+        // block-compressed ones (D3D9 can't), not 1x1.
+        HRESULT hr = E_FAIL;
+        t->autogen = false;
+        if (g_config.mipmaps && chain.size() == 1 && !keyed && !s->buf->fmt.fourcc && (s->buf->w > 1 || s->buf->h > 1) &&
+            CanAutogen(d, t->fmt)) {
+            hr = d->CreateTexture(s->buf->w, s->buf->h, 0, D3DUSAGE_AUTOGENMIPMAP, t->fmt, D3DPOOL_MANAGED, &t->tex, nullptr);
+            t->autogen = SUCCEEDED(hr);
+            static bool logged;  // Gpu lock
+            if (t->autogen && !logged) {
+                logged = true;
+                DD2D9_LOG("mipmaps: the GPU makes the smaller levels of textures that have none");
+            }
+        }
+        if (!t->autogen)
+            hr = d->CreateTexture(s->buf->w, s->buf->h, UINT(chain.size()), 0, t->fmt, D3DPOOL_MANAGED, &t->tex, nullptr);
         if (FAILED(hr) && !t->convert && !s->buf->fmt.fourcc) {  // a layout this GPU lacks: convert it
+            t->autogen = false;
             t->convert = true;
             t->fmt = D3DFMT_A8R8G8B8;
             hr = d->CreateTexture(s->buf->w, s->buf->h, UINT(chain.size()), 0, t->fmt, D3DPOOL_MANAGED, &t->tex,
@@ -441,6 +477,7 @@ static IDirect3DTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, b
         t->tex->UnlockRect(i);
         t->levelBufs[i] = b;
         t->levelSerials[i] = b->cpuSerial;
+        if (t->autogen) t->tex->GenerateMipSubLevels();
     }
     t->pal = pal;
     t->palVersion = pal ? pal->version : 0;
@@ -546,6 +583,14 @@ struct GpuContext::Impl final : Gpu::Owner {
     bool rebind = true;  // what D3D9 has bound is unknown (new device, or another context's)
     Surface* tex[8] = {};
     bool colorKey = false;
+    // Each stage's mip filter as the game set it, and as D3D9 has it: mipmaps=on turns it on
+    // (linear) for textures whose levels the GPU made while the game asks for none.
+    DWORD mipFilter[8] = {};
+    DWORD mipFilterSet[8] = {};
+    // alternatepixelcenter: the game's projection, sent moved half a pixel at the next draw
+    // of untransformed vertices (it depends on the viewport too).
+    D3DMATRIX proj = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}};
+    bool projDirty = g_config.pixelCenter;
     D3DVIEWPORT9 vp = {0, 0, 1, 1, 0.0f, 1.0f};
     std::unordered_map<DWORD, IDirect3DVertexDeclaration9*> decls;
     std::vector<uint8_t> scratch;
@@ -598,15 +643,21 @@ void GpuContext::SetTextureStageState(DWORD stage, DWORD type, DWORD value) {
 }
 
 void GpuContext::SetSamplerState(DWORD stage, DWORD type, DWORD value) {
+    if (type == D3DSAMP_MIPFILTER && stage < 8) p_->mipFilter[stage] = p_->mipFilterSet[stage] = value;
     if (p_->dev) p_->dev->SetSamplerState(stage, D3DSAMPLERSTATETYPE(type), value);
 }
 
 void GpuContext::SetTransform(DWORD type, const float* m16) {
+    if (type == D3DTS_PROJECTION) {
+        memcpy(&p_->proj, m16, sizeof(p_->proj));
+        p_->projDirty = g_config.pixelCenter;
+    }
     if (p_->dev) p_->dev->SetTransform(D3DTRANSFORMSTATETYPE(type), reinterpret_cast<const D3DMATRIX*>(m16));
 }
 
 void GpuContext::SetViewport(DWORD x, DWORD y, DWORD w, DWORD h, float minZ, float maxZ) {
     p_->vp = {x, y, w, h, minZ, maxZ};
+    if (g_config.pixelCenter) p_->projDirty = true;
     if (p_->dev) p_->dev->SetViewport(&p_->vp);
 }
 
@@ -686,6 +737,13 @@ void GpuContext::Impl::BindTextures() {
     for (DWORD i = 0; i < 8; i++) {
         IDirect3DTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
         dev->SetTexture(i, t);
+        if (!g_config.mipmaps) continue;
+        const bool autogen = t && tex[i]->gpuTex && tex[i]->gpuTex->autogen && t == tex[i]->gpuTex->tex;
+        const DWORD want = autogen && mipFilter[i] == D3DTEXF_NONE ? DWORD(D3DTEXF_LINEAR) : mipFilter[i];
+        if (want != mipFilterSet[i]) {
+            dev->SetSamplerState(i, D3DSAMP_MIPFILTER, want);
+            mipFilterSet[i] = want;
+        }
     }
 }
 
@@ -765,6 +823,20 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // Transformed vertices: Direct3D 7 clips their z to [0, 1] only with ZENABLE on, so it
     // can't matter with it off, but D3D9 always clips: clamp it then. rhw 0 on every vertex
     // (2D drawn through Direct3D) is 1: the same picture, without DXVK's infinities.
+    // alternatepixelcenter: everything half a pixel up and left, so that pixel centres fall
+    // where the drivers that offered it put them (texel centres for 2D drawn 1:1, no lines at
+    // texture edges): transformed vertices moved, the projection of the others too.
+    const bool shift = g_config.pixelCenter;
+    if (shift && (fvf & 0x0E) != 0x04 && p.projDirty) {
+        D3DMATRIX m = p.proj;
+        const float kx = -1.0f / float(std::max<DWORD>(p.vp.Width, 1)), ky = 1.0f / float(std::max<DWORD>(p.vp.Height, 1));
+        for (int r = 0; r < 4; r++) {  // clip x += kx * w, clip y += ky * w
+            m.m[r][0] += m.m[r][3] * kx;
+            m.m[r][1] += m.m[r][3] * ky;
+        }
+        p.dev->SetTransform(D3DTS_PROJECTION, &m);
+        p.projDirty = false;
+    }
     if ((fvf & 0x0E) == 0x04 && stride >= 16) {
         const auto* src = static_cast<const uint8_t*>(verts);
         bool clampZ = false, allRhwZero = true;
@@ -773,12 +845,16 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
             if (!zEnabled && (v[2] < 0.0f || v[2] > 1.0f)) clampZ = true;
             if (v[3] != 0.0f) allRhwZero = false;
         }
-        if (clampZ || allRhwZero) {
+        if (clampZ || allRhwZero || shift) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
             for (UINT i = 0; i < vertexCount; i++) {
                 float* v = reinterpret_cast<float*>(p.scratch.data() + size_t(i) * stride);
                 if (clampZ) v[2] = std::clamp(v[2], 0.0f, 1.0f);
                 if (allRhwZero) v[3] = 1.0f;
+                if (shift) {
+                    v[0] -= 0.5f;
+                    v[1] -= 0.5f;
+                }
             }
             verts = p.scratch.data();
         }
