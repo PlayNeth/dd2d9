@@ -3,6 +3,12 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.21
+- Moto Racer's menu, continued: rhw that are tiny but not 0 (denormals, which the GPU takes
+  as 0) count as bad too, and an untextured draw whose rhw differ over 10000 times gets
+  one rhw (the smallest weigh nothing in Direct3D 9's interpolation). drawtrace prints rhw
+  in full (%g), not to six decimals (tiny values read 0.000000).
+
 ## 0.9.20
 - **Transformed vertices with rhw 0 beside valid ones in one draw** are drawn coloured.
   Hardware of the era interpolated colour across the screen without rhw; Direct3D 9

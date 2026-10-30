@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -1277,15 +1278,24 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // Racer's menu letters: untextured, rhw 0 on part of the vertices). Such a draw gets
         // one rhw for all its vertices when untextured (colour linear on the screen, as then),
         // else the zeros the smallest valid rhw of the draw.
+        // Bad: 0, negative, not a number, or a denormal (the GPU takes it as 0). An untextured
+        // draw is also given one rhw where its rhw differ by more than 10000 times: the
+        // smallest weigh nothing in Direct3D 9's interpolation, and they flush to 0 as
+        // easily (Moto Racer's menu: 0.0039 beside values printed as 0.000000).
         bool clampZ = false, badRhw = false;
-        float minRhw = 0.0f;
+        float minRhw = 0.0f, maxRhw = 0.0f;
         for (UINT i = 0; i < vertexCount; i++) {
             const float* v = reinterpret_cast<const float*>(src + size_t(i) * stride);
             if (!zEnabled && (v[2] < 0.0f || v[2] > 1.0f)) clampZ = true;
-            if (!(v[3] > 0.0f) || !std::isfinite(v[3])) badRhw = true;
-            else if (minRhw == 0.0f || v[3] < minRhw) minRhw = v[3];
+            if (!(v[3] >= FLT_MIN) || !std::isfinite(v[3])) {
+                badRhw = true;
+            } else {
+                if (minRhw == 0.0f || v[3] < minRhw) minRhw = v[3];
+                maxRhw = std::max(maxRhw, v[3]);
+            }
         }
-        const bool flatRhw = badRhw && (!p.tex[0] || minRhw == 0.0f);  // every vertex: 1
+        const bool flatRhw = (badRhw || (minRhw > 0.0f && maxRhw > minRhw * 10000.0f)) && (!p.tex[0] || minRhw == 0.0f);
+        badRhw = badRhw || flatRhw;
         const bool wz = p.wEmulate;
         if (clampZ || badRhw || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
@@ -1303,7 +1313,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                     v[2] = 1.0f - rhw * g_wScale;
                 }
                 if (flatRhw) v[3] = 1.0f;
-                else if (badRhw && (!(v[3] > 0.0f) || !std::isfinite(v[3]))) v[3] = minRhw;
+                else if (badRhw && (!(v[3] >= FLT_MIN) || !std::isfinite(v[3]))) v[3] = minRhw;
                 if (shift) {
                     v[0] -= 0.5f;
                     v[1] -= 0.5f;
@@ -1328,7 +1338,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         memcpy(&bias, &p.biasSet, 4);
         slope = p.slopeSet;
         DD2D9_LOG("drawtrace: prim %lu x%u v%u fvf 0x%lx z(en %lu wr %lu fn %lu) blend(%lu %lu>%lu) atest(%lu %lu ref %lu) "
-                  "tex0 %p %dbpp%s%s bias %g slope %g | z %.6f..%.6f rhw %.6f..%.6f",
+                  "tex0 %p %dbpp%s%s bias %g slope %g | z %.6f..%.6f rhw %g..%g",
                   primType, primCount, vertexCount, fvf, rs[7], rs[14], rs[23], rs[27], rs[19], rs[20], rs[15], rs[25], rs[24],
                   static_cast<void*>(t0), t0 ? int(t0->buf->fmt.bpp) : 0, t0 && t0->buf->fmt.a ? " alpha" : "",
                   t0 && t0->gpuTex && t0->gpuTex->keyed ? " keyed" : "", bias, slope, tl ? zlo : 0.0f, tl ? zhi : 0.0f,
