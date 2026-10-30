@@ -632,6 +632,26 @@ static int RunFullscreen8(int modeW, int modeH) {
     // The surfaces were lost meanwhile, as in ddraw.dll: the game restores them.
     hr = front->Flip(nullptr, DDFLIP_WAIT);
     CHECK(hr == DDERR_SURFACELOST, "flip after focus returns: surface lost (0x%08lx)", hr);
+    // Its other surfaces report lost too, as in ddraw.dll, but can still be drawn with (a
+    // deliberate difference: dd2d9 keeps their pixels, and Captain Claw never restores some
+    // of its sprites).
+    hr = sprite->IsLost();
+    CHECK(hr == DDERR_SURFACELOST, "offscreen sprite reported lost after the focus loss (0x%08lx)", hr);
+    {
+        IDirectDrawSurface7* tmp = nullptr;
+        DDSURFACEDESC2 td = {};
+        td.dwSize = sizeof(td);
+        td.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        td.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+        td.dwWidth = 64;
+        td.dwHeight = 64;
+        hr = dd->CreateSurface(&td, &tmp, nullptr);
+        if (SUCCEEDED(hr)) {
+            hr = tmp->BltFast(0, 0, sprite, nullptr, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT);
+            tmp->Release();
+        }
+    }
+    CHECK(hr == DD_OK, "offscreen sprite still drawable after the focus loss (0x%08lx)", hr);
     hr = dd->TestCooperativeLevel();
     CHECK(hr == DD_OK, "cooperative level fine after focus returns (0x%08lx)", hr);
     hr = dd->RestoreAllSurfaces();

@@ -227,7 +227,7 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
     DD2D9_TRACE("Blt %p[%s] <- %p[%s] flags=0x%lx%s fx=0x%lx fill=0x%lx", static_cast<void*>(this),
                RectText(dstRect).s, static_cast<void*>(src), RectText(srcRect).s, flags, isPrimary ? " (primary)" : "",
                fx ? fx->dwDDFX : 0, fx ? fx->dwFillColor : 0);
-    if (IsLost() || (src && src->IsLost(false))) return DDERR_SURFACELOST;
+    if (CantDraw() || (src && src->CantDraw(false))) return DDERR_SURFACELOST;
     // 0x80000000 is the Direct3D 8/9 runtime's own flag (window clipping, with the
     // destination-alpha bits); ddraw.dll takes it off first.
     if (flags & 0x80000000) flags &= ~0x8000000Bu;
@@ -437,7 +437,7 @@ HRESULT Surface::BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD tr
     Guard l;
     DD2D9_TRACE("BltFast %p (%lu,%lu) <- %p[%s] trans=0x%lx", static_cast<void*>(this), x, y, static_cast<void*>(src),
                RectText(srcRect).s, trans);
-    if (IsLost() || src->IsLost(false)) return DDERR_SURFACELOST;
+    if (CantDraw() || src->CantDraw(false)) return DDERR_SURFACELOST;
     if (trans & ~0x33u) return DDERR_INVALIDPARAMS;  // NO/SRC/DESTCOLORKEY, WAIT, DONOTWAIT
     if (version == 7 && (trans & DDBLTFAST_WAIT) && (trans & DDBLTFAST_DONOTWAIT)) return DDERR_INVALIDPARAMS;
     if (lockCount || src->lockCount) return DDERR_SURFACEBUSY;

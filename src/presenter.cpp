@@ -155,6 +155,9 @@ void Presenter::LeaveGpu() {
     gpu.DropSwapChain();  // another device (a wrapper's, or another object's) may present here now
     gpu.RemoveOwner(this);
     usingGpu_ = false;
+    // Nothing else uses the device (no Direct3D of dd2d9's own yet): it goes, rather than
+    // stay beside a wrapper's for nothing.
+    if (gpu.Unused()) gpu.Release();
 }
 
 bool Presenter::EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h) {

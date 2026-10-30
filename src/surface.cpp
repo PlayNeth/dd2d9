@@ -412,7 +412,17 @@ bool Surface::CanBeLost() const {
 
 bool Surface::IsLost(bool poll) const {
     if (poll && !dd->Exclusive()) dd->PollDisplayChange();
-    return CanBeLost() && (dd->DevState() != DDraw::kDevOk || lost);
+    if (!CanBeLost()) return false;
+    return lost || dd->DevState() != DDraw::kDevOk;  // in the background, or about to be marked lost
+}
+
+// Lost as IsLost says, except a surface lost only by Alt+Tab outside the primary's flip
+// chain: its pixels are kept, so drawing with it still works (see DDraw::UpdateLostSurfaces).
+bool Surface::CantDraw(bool poll) const {
+    if (!IsLost(poll)) return false;
+    if (lost) return !drawableLost;
+    // Not marked yet: in the background everything is, back in front what UpdateLostSurfaces will mark.
+    return dd->DevState() == DDraw::kDevLost || !dd->FocusLossOnly() || InPrimaryChain();
 }
 
 // Checks in ddraw.dll's order (spec: re/spec/surface-lock-dc.md, section 6). A surface that
@@ -427,8 +437,8 @@ HRESULT Surface::Restore() {
     if (w != modeW || h != modeH || bpp != modeBpp) return DDERR_WRONGMODE;
     if (dd->OtherExclusive() || dd->DevState() == DDraw::kDevLost) return DDERR_WRONGMODE;
     // With the surfaces of its complex structure.
-    lost = false;
-    for (Surface* c : children) c->lost = false;
+    lost = drawableLost = false;
+    for (Surface* c : children) c->lost = c->drawableLost = false;
     return DD_OK;
 }
 
@@ -824,7 +834,7 @@ const PALETTEENTRY* Surface::EffectivePalette() const {
 // still give a DC.
 HRESULT Surface::GetDC(HDC* out) {
     Guard l;
-    if (IsLost()) return DDERR_SURFACELOST;
+    if (CantDraw()) return DDERR_SURFACELOST;
     if (dcOut) return DDERR_DCALREADYCREATED;  // *out left alone, as ddraw.dll
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
@@ -1068,7 +1078,7 @@ void Surface::FillLockDesc(void* outDesc, uint8_t* bits) const {
 // any descriptor size, no checks, no nesting.
 HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     Guard l;
-    if (IsLost()) return DDERR_SURFACELOST;
+    if (CantDraw()) return DDERR_SURFACELOST;
     auto* d = static_cast<DDSURFACEDESC2*>(outDesc);
     const DWORD caps = desc.ddsCaps.dwCaps;
     const bool fast = ddVersion == 7 && sysmemRequested && (caps & DDSCAPS_TEXTURE);
@@ -1177,7 +1187,7 @@ HRESULT Surface::Unlock(void* pointer, const RECT* rect, int version) {
         BumpUniqueness();
         MarkDirtyIfVisible(&area);
     }
-    return IsLost() ? DDERR_SURFACELOST : DD_OK;  // unlocked either way, as ddraw.dll
+    return CantDraw() ? DDERR_SURFACELOST : DD_OK;  // unlocked either way, as ddraw.dll
 }
 
 // PageLock and PageUnlock: nothing to pin here; ddraw.dll checks only these.

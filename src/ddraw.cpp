@@ -590,7 +590,10 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // From here on (as in ddraw.dll, once the desktop mode is back) the surfaces are
         // lost and can't be restored; back in front they can (see UpdateLostSurfaces).
         // Window mode stays an ordinary, visible window: the game keeps running.
-        if (display != kDisplayWindow) InterlockedExchange(&deviceState_, kDevLost);
+        if (display != kDisplayWindow) {
+            InterlockedExchange(&deviceState_, kDevLost);
+            focusLossOnly_ = true;  // unless a mode change comes on top (InvalidateSurfaces)
+        }
         // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
         if (cover && windowChanges && IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);  // a hidden one stays so
         if (cover) LogFocusThief(thread, GetForegroundWindow());
@@ -1037,6 +1040,7 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
         // restorable again.
         if (restore && (backgrounded_ || modeBack)) InterlockedExchange(&deviceState_, kDevNotRestored);
         else InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
+        focusLossOnly_ = false;  // the display mode goes back: everything
         backgrounded_ = false;
     }
     if (prev) TakeOverExclusive(prev, hwnd);
@@ -1044,6 +1048,7 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     // memory aside), as in ddraw.dll.
     if (acquire) {
         InterlockedExchange(&deviceState_, kDevNotRestored);
+        focusLossOnly_ = false;
         Guard l;
         for (DDraw* d : g_ddraws)
             if (d != this) d->InvalidateSurfaces();
@@ -1250,7 +1255,18 @@ void DDraw::UpdateLostSurfaces() {
     if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_)
         InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     if (deviceState_ != kDevNotRestored) return;
-    for (Surface* s : surfaces) s->lost = s->CanBeLost();
+    // Every surface that can be is lost, as in ddraw.dll, which frees their video memory.
+    // Back from the background only (Alt+Tab), dd2d9 still has every surface's pixels: those
+    // outside the primary's flip chain report lost (IsLost, Restore, ...) but can still be
+    // drawn with (Blt, BltFast, Lock, GetDC), so games that don't restore all of theirs keep
+    // working (Captain Claw never restores its text sprites: missing text, 2 fps). A
+    // deliberate difference; display mode changes leave nothing drawable, as in ddraw.dll.
+    const bool focusOnly = focusLossOnly_;
+    focusLossOnly_ = false;
+    for (Surface* s : surfaces) {
+        s->lost = s->CanBeLost();
+        s->drawableLost = s->lost && focusOnly && !s->InPrimaryChain();
+    }
     InterlockedCompareExchange(&deviceState_, kDevOk, kDevNotRestored);
 }
 
@@ -2226,7 +2242,8 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
             for (DDraw* d : g_ddraws) {
                 if (d == this || !d->primary) continue;
                 d->primary->lost = true;
-                for (Surface* c : d->primary->children) c->lost = true;
+                d->primary->drawableLost = false;
+                for (Surface* c : d->primary->children) c->lost = true, c->drawableLost = false;
             }
         }
         ApplyGamma();  // a new primary starts without a ramp

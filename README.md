@@ -95,6 +95,11 @@ ratio, or centered) decides how it fills the screen.
   the screen, as `ddraw.dll` leaves it.
 - **8-bit to RGB blits use the palette** (`ddraw.dll` copies the index as grey).
 - **`display=window` doesn't lose surfaces on focus loss**: the game keeps running.
+- **Back from the background (Alt+Tab), surfaces outside the primary's flip chain can
+  still be drawn with.** They report lost as in `ddraw.dll` (IsLost, Restore), but dd2d9
+  keeps their pixels, so Blt, BltFast, Lock and GetDC on them still work, and games that
+  don't restore all of theirs keep working (Captain Claw). The primary and its back
+  buffers are lost as usual; after a display mode change nothing is drawable until restored.
 - **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2
   keeps drawing to its old back buffer).
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).

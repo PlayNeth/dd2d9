@@ -49,6 +49,7 @@ public:
 
     void AddOwner(Owner* o);     // Lock held
     void RemoveOwner(Owner* o);  // Lock held
+    bool Unused() const { return owners_.empty(); }  // Lock held
     void Release();              // Lock held: everything goes (the DirectDraw object is going)
 
 private:
@@ -58,7 +59,7 @@ private:
     CRITICAL_SECTION lock_;
     IDirect3D9* d3d_ = nullptr;
     IDirect3DDevice9* dev_ = nullptr;
-    HWND window_ = nullptr;  // the device's own (hidden) window
+    HWND window_ = nullptr;  // the device's own (hidden) window, on a thread of its own
     IDirect3DSwapChain9* swap_ = nullptr;
     HWND swapWnd_ = nullptr;
     UINT swapW_ = 0, swapH_ = 0;

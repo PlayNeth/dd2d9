@@ -64,17 +64,61 @@ Gpu::~Gpu() {
 
 // The device's own window: hidden, never shown or presented into. The game's window only
 // ever gets a swap chain, which another device (a wrapper's) can replace (DropSwapChain).
-HWND Gpu::MakeWindow() {
+// It belongs to a thread of its own that does nothing but handle its messages: Windows
+// sends every top-level window some (WM_DISPLAYCHANGE when a display mode changes,
+// WM_ACTIVATEAPP), and the sender waits for an answer. Owned by the presenter thread, which
+// can be busy or waiting for one of dd2d9's locks, it could hold up whoever changes the
+// display mode, the game's own thread included (the likely cause of Nerf Arena Blast
+// freezing behind D7VK in 0.7.17, with display=switch).
+namespace {
+
+struct WindowThread {
+    HWND hwnd = nullptr;
+    HANDLE ready = nullptr;
+};
+
+LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_CLOSE) {
+        DestroyWindow(h);
+        return 0;
+    }
+    if (m == WM_DESTROY) PostQuitMessage(0);
+    return DefWindowProcW(h, m, w, l);
+}
+
+DWORD WINAPI RunWindowThread(void* p) {
+    auto* t = static_cast<WindowThread*>(p);
     static const ATOM cls = [] {
         WNDCLASSW wc = {};
-        wc.lpfnWndProc = DefWindowProcW;
+        wc.lpfnWndProc = WindowProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"DD2D9_Gpu";
         return RegisterClassW(&wc);
     }();
-    if (!cls) return nullptr;
-    return CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DD2D9_Gpu", L"", WS_POPUP, 0, 0, 1, 1, nullptr,
-                           nullptr, GetModuleHandleW(nullptr), nullptr);
+    HWND h = cls ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DD2D9_Gpu", L"", WS_POPUP, 0, 0, 1, 1,
+                                   nullptr, nullptr, GetModuleHandleW(nullptr), nullptr)
+                 : nullptr;
+    t->hwnd = h;
+    SetEvent(t->ready);  // t isn't touched after this
+    if (!h) return 0;
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+    return 0;
+}
+
+}  // namespace
+
+HWND Gpu::MakeWindow() {
+    WindowThread t;
+    t.ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!t.ready) return nullptr;
+    HANDLE th = CreateThread(nullptr, 0, RunWindowThread, &t, 0, nullptr);
+    if (th) {
+        WaitForSingleObject(t.ready, INFINITE);
+        CloseHandle(th);  // it ends with its window (WM_CLOSE, see Release)
+    }
+    CloseHandle(t.ready);
+    return t.hwnd;
 }
 
 IDirect3DDevice9* Gpu::Ensure() {
@@ -192,9 +236,7 @@ void Gpu::Release() {
     if (d3d_) d3d_->Release();
     d3d_ = nullptr;
     if (window_) {
-        // A window can only be destroyed by its own thread; another one asks it to.
-        if (GetWindowThreadProcessId(window_, nullptr) == GetCurrentThreadId()) DestroyWindow(window_);
-        else PostMessageW(window_, WM_CLOSE, 0, 0);
+        PostMessageW(window_, WM_CLOSE, 0, 0);  // destroyed by its own thread, which then ends
         window_ = nullptr;
     }
     failed_ = false;

@@ -195,7 +195,9 @@ public:
     bool CanBeLost() const;
     // g_lock held. Out of exclusive mode it first looks for display changes others made,
     // as ddraw.dll does once per call: a second surface of the same call passes poll = false.
-    bool IsLost(bool poll = true) const;
+    bool InPrimaryChain() const { return isPrimary || (root && root->isPrimary); }
+    bool IsLost(bool poll = true) const;  // as ddraw.dll reports it (IsLost, Restore, ...)
+    bool CantDraw(bool poll = true) const;  // lost for Blt, BltFast, Lock and GetDC
     HRESULT Restore();    // g_lock held
     bool sysmemRequested = false;  // created with DDSCAPS_SYSTEMMEMORY asked for (such surfaces aren't lost)
     bool ownFormat = false;        // created with a pixel format (ddraw.dll's HASPIXELFORMAT)
@@ -222,6 +224,7 @@ public:
     void ForgetMembers(const Surface* oldRoot);
     void Detach(const Surface* oldRoot);
     bool lost = false;    // marked lost (see DDraw::UpdateLostSurfaces); g_lock
+    bool drawableLost = false;  // lost by Alt+Tab only: still drawable (see UpdateLostSurfaces); g_lock
     int ddRef = 0;      // DirectDraw interface version (4 or 7) this surface holds a reference to
     int ddVersion = 1;  // DirectDraw interface version it was created through (GetDDInterface returns it)
     uint64_t vidMemBytes = 0;  // counted in the DirectDraw object's video memory use
@@ -473,7 +476,14 @@ public:
     // lost is about to be marked lost; kDevLost: the exclusive game is in the background.
     enum DeviceState : LONG { kDevOk, kDevNotRestored, kDevLost };
     LONG DevState() const { return deviceState_; }
-    void InvalidateSurfaces() { InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevOk); }
+    bool FocusLossOnly() const { return focusLossOnly_; }
+    // A display change: nothing stays drawable (see UpdateLostSurfaces), except in the
+    // background, where the display isn't the game's anyway (switch mode's own change back
+    // to the desktop's, its late second notice) and the game's comes back with it.
+    void InvalidateSurfaces() {
+        if (deviceState_ != kDevLost) focusLossOnly_ = false;
+        InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevOk);
+    }
     void UpdateLostSurfaces();  // apply a pending kDevNotRestored to the surfaces; g_lock held
     HRESULT TestCooperativeLevel();
     HRESULT RestoreAllSurfaces();
@@ -565,6 +575,8 @@ private:
     Presenter* presenter_ = nullptr;
     Gpu* gpu_ = nullptr;  // the Direct3D 9 device (gpu.h)
     volatile LONG deviceState_ = kDevOk;
+    // The pending kDevNotRestored comes from a focus loss alone (see UpdateLostSurfaces).
+    volatile bool focusLossOnly_ = false;
     const Buffer* gdiBuf_ = nullptr;  // the primary's first memory (compared only)
 };
 
