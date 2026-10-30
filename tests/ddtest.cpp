@@ -135,13 +135,21 @@ static int RunUnit() {
         hr = dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d));
         CHECK(SUCCEEDED(hr) && d3d, "IDirect3D7 offered (0x%08lx)", hr);
         if (d3d) d3d->Release();
-        // A DirectDrawCreate one doesn't yet (Direct3D 1-3 aren't implemented).
+        // A DirectDrawCreate one reports 3D too and offers IDirect3D/2/3, not IDirect3D7.
         IDirectDraw* dd1 = nullptr;
         if (SUCCEEDED(DirectDrawCreate(nullptr, &dd1, nullptr))) {
             DDCAPS c1 = {};
             c1.dwSize = sizeof(c1);
             dd1->GetCaps(&c1, nullptr);
-            CHECK(!(c1.dwCaps & DDCAPS_3D), "no 3D reported without Direct3D 1-3 (dwCaps 0x%08lx)", c1.dwCaps);
+            CHECK(c1.dwCaps & DDCAPS_3D, "DirectDrawCreate's object reports 3D (dwCaps 0x%08lx)", c1.dwCaps);
+            IDirect3D2* d2 = nullptr;
+            hr = dd1->QueryInterface(IID_IDirect3D2, reinterpret_cast<void**>(&d2));
+            CHECK(SUCCEEDED(hr) && d2, "IDirect3D2 offered by DirectDrawCreate's object (0x%08lx)", hr);
+            if (d2) d2->Release();
+            IDirect3D7* d7 = nullptr;
+            hr = dd1->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d7));
+            CHECK(hr == E_NOINTERFACE, "no IDirect3D7 there (0x%08lx)", hr);
+            if (d7) d7->Release();
             dd1->Release();
         }
     }

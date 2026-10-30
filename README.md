@@ -1,6 +1,6 @@
 # dd2d9
 
-DirectDraw (DirectX 1–7) and Direct3D 7, implemented on Direct3D 9. See
+DirectDraw (DirectX 1–7) and Direct3D (3–7), implemented on Direct3D 9. See
 `CHANGELOG.md` for what changed and why.
 
 ## How it works
@@ -74,13 +74,29 @@ dd2d9 implements **Direct3D 7** itself (`IDirect3D7`, `IDirect3DDevice7`,
 through the same Direct3D 9 device it presents with, so 3D works on Windows' own Direct3D 9
 and on DXVK alike. Textures, render targets and Z buffers get a GPU copy; whenever
 DirectDraw touches their pixels (Lock, Blt, GetDC, the screen after Flip) what Direct3D drew
-is read back first, so 2D drawn over a 3D frame (HUDs, menus) works. Direct3D 1–6 (`d3dim.dll`'s
-interfaces, for DirectDraw objects made by `DirectDrawCreate`) aren't implemented yet: those
-objects report no 3D support, and games fall back to their other renderers.
+is read back first, so 2D drawn over a 3D frame (HUDs, menus) works.
+
+**Direct3D 3–6** (`IDirect3D`/`2`/`3` with their devices, viewports, lights, materials,
+textures, execute buffers and vertex buffers, for DirectDraw objects made by
+`DirectDrawCreate`; matched to XP SP3's `d3dim.dll`: `re/spec/d3d6-*.md`) is dd2d9's own as
+well. As on XP, where DirectX 6 had no hardware transform and lighting, every vertex goes
+through a CPU front end: transformed with the viewport's clip volume, lit with the DX5
+(`D3DLIGHT`) or DX6 (`D3DLIGHT2`) model, fogged and clipped, then drawn by Direct3D 9 as
+transformed vertices. The legacy render states (`TEXTUREHANDLE`, `TEXTUREMAPBLEND`,
+`TEXTUREMAG`/`MIN`, ...) are mapped onto texture stages as Microsoft's own rasterizer mapped
+them; `GetRenderState` still answers what the game set.
 
 Not done yet: the gamma ramp on 3D frames presented from the GPU, cube maps, rendering to textures used later as textures is read back
 through the CPU, and Z buffers can't be read or copied by DirectDraw (only cleared with
-`DDBLT_DEPTHFILL`). `GetClipStatus` reflects `ProcessVertices` and `SetClipStatus` only.
+`DDBLT_DEPTHFILL`). Direct3D 7's `GetClipStatus` reflects `ProcessVertices` and
+`SetClipStatus` only. Direct3D 3–6: no picking (`Pick` finds nothing), `D3DOP_SPAN` isn't
+drawn, and Ramp devices draw in colour.
+
+What Direct3D 9 lacks is emulated: 8-bit palettized textures are converted through their
+palette on the way to the GPU (and listed by EnumTextureFormats on every device), and the
+software devices render to 8-bit palettized surfaces as XP's RGB and Ramp rasterizers did:
+Direct3D 9 draws in true colour and each pixel read back becomes its palette entry (the
+exact one, else the nearest).
 
 **Behind D7VK** (D7VK as `ddraw.dll`, dd2d9 as `ddraw_.dll`, which `install-dd2d9.sh --d7vk`
 does) dd2d9 instead provides the Direct3D objects D7VK builds on (devices, viewports,
@@ -115,7 +131,12 @@ ini key overrides which Direct3D is offered.
   (`ddraw.dll` refuses any second primary).
   These two only matter behind D7VK, which keeps references the games released (Type
   Wild's DirectDraw object, Jazz Jackrabbit 2's old front buffer), so on XP they're gone
-  and behind D7VK they aren't. They go once dd2d9 does Direct3D itself.
+  and behind D7VK they aren't.
+- **Direct3D 3–6 checks what `d3dim.dll` dereferences blindly**: unknown matrix, material
+  and texture handles, a draw with no current viewport (`D3DERR_NOCURRENTVIEWPORT`), bad
+  vertex types, execute-buffer offsets past the buffer, and NULL pointers give errors
+  instead of crashes. Objects still in use when their DirectDraw object goes are cut loose
+  rather than freed under the game.
 - **`DDPCAPS_PRIMARYSURFACE` is accepted in CreatePalette** (`ddraw.dll` refuses it), for
   games made on Windows 9x.
 
@@ -146,7 +167,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `point`, `linear`, `sharp` (bilinear-sharp: whole-multiple point scaling, then linear) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
-| `d3d` | `auto`: dd2d9's own Direct3D 7, or the objects a wrapper needs when loaded as `ddraw_.dll`; `on`: always the wrapper's objects; `off`: no Direct3D |
+| `d3d` | `auto`: dd2d9's own Direct3D (3–7), or the objects a wrapper needs when loaded as `ddraw_.dll`; `on`: always the wrapper's objects; `off`: no Direct3D |
 | `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |

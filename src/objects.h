@@ -141,7 +141,8 @@ public:
     static Surface* From(void* iface) { return static_cast<Surface*>(ImplFromIface(iface)); }
     void* Iface(int version);
 
-    HRESULT QueryInterface(REFIID riid, void** out);
+    // version: the surface interface called (Direct3D 1-6 objects count their references there).
+    HRESULT QueryInterface(REFIID riid, void** out, int version = 7);
     // As in ddraw.dll, every interface (IDirectDrawSurface .. 7, the gamma control)
     // counts its own references, and AddRef/Release return that count; the surface
     // lives while any is left. A complex surface's root holds its members through the
@@ -288,6 +289,7 @@ public:
     HRESULT ManagedTextureCheck() const;  // Set/GetPriority, Set/GetLOD
     void* d3dTexture = nullptr;  // Direct3D texture object (d3dproxy.cpp), created on demand
     GpuTex* gpuTex = nullptr;    // Direct3D's GPU copy of this texture and its mip levels (gpures.h)
+    void* d3dLegacy = nullptr;   // Direct3D 3-6's textures and device made through QueryInterface (d3d6int.h)
     // The CPU copy is about to be read (written): Direct3D's drawing read back first.
     void CpuAccess(bool write);
 
@@ -524,6 +526,7 @@ public:
     PALETTEENTRY defaultPalette[256];
     void* d3dObject = nullptr;  // Direct3D object (d3dproxy.cpp), shared by its interfaces
     void* d3d7 = nullptr;       // dd2d9's own Direct3D 7 object (d3d7.cpp), while it lives
+    void* d3dLegacy = nullptr;  // dd2d9's own Direct3D 3-6 object (d3d6obj.cpp), while it lives
     bool dd7 = false;           // made by DirectDrawCreateEx (ddraw.dll's DDRAWILCL_DIRECTDRAW7)
     DWORD CoopFlags() const { return coop_; }
     bool alive = true;

@@ -8,6 +8,7 @@
 #include <d3d9.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -81,8 +82,41 @@ static void RowToGpu(const Buffer* b, int y, uint8_t* dst, bool convert, const P
     }
 }
 
+// A palettized render target: Direct3D 9 draws in X8R8G8B8, and each pixel read back
+// becomes the palette's entry for its colour: the exact one when the palette has it, else
+// the nearest (by RGB distance, cached per 15-bit colour).
+struct PaletteMap {
+    PALETTEENTRY pal[256] = {};
+    std::unordered_map<uint32_t, uint8_t> exact;
+    std::vector<int16_t> nearest;  // 32768 entries, -1 until computed
+    void Set(const PALETTEENTRY* p) {
+        if (!memcmp(pal, p, sizeof(pal)) && !exact.empty()) return;
+        memcpy(pal, p, sizeof(pal));
+        exact.clear();
+        for (int i = 255; i >= 0; i--) exact[(uint32_t(p[i].peRed) << 16) | (uint32_t(p[i].peGreen) << 8) | p[i].peBlue] = uint8_t(i);
+        nearest.assign(32768, -1);
+    }
+    uint8_t Index(uint32_t argb) {
+        const uint32_t rgb = argb & 0xFFFFFF;
+        auto it = exact.find(rgb);
+        if (it != exact.end()) return it->second;
+        const uint32_t key = ((rgb >> 9) & 0x7C00) | ((rgb >> 6) & 0x3E0) | ((rgb >> 3) & 0x1F);
+        if (nearest[key] < 0) {
+            const int r = int((rgb >> 16) & 0xFF), g = int((rgb >> 8) & 0xFF), b = int(rgb & 0xFF);
+            int best = 0, bestD = INT_MAX;
+            for (int i = 0; i < 256; i++) {
+                const int dr = r - pal[i].peRed, dg = g - pal[i].peGreen, db = b - pal[i].peBlue;
+                const int dist = dr * dr + dg * dg + db * db;
+                if (dist < bestD) bestD = dist, best = i;
+            }
+            nearest[key] = int16_t(best);
+        }
+        return uint8_t(nearest[key]);
+    }
+};
+
 // One row of a render target back into the CPU copy.
-static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert) {
+static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, PaletteMap* pal) {
     uint8_t* dst = b->Row(y);
     const DWORD bytes = b->fmt.Bytes();
     if (!convert) {
@@ -90,6 +124,10 @@ static void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert) {
         return;
     }
     const auto* in = reinterpret_cast<const uint32_t*>(src);
+    if (b->fmt.pal8) {
+        for (int x = 0; x < b->w; x++) dst[x] = pal ? pal->Index(in[x]) : 0;
+        return;
+    }
     for (int x = 0; x < b->w; x++, dst += bytes) WritePixel(dst, bytes, ARGBToPixel(b->fmt, in[x]));
 }
 
@@ -115,8 +153,18 @@ struct GpuSurf final : Gpu::Owner {
     bool pendingClear = false;
     RECT clearRect = {};
     float clearZ = 1.0f;
+    // A palettized render target's palette (its surface's when last bound or read back).
+    PaletteMap* pal = nullptr;
 
     GpuSurf(Gpu* g, Buffer* b, bool d) : gpu(g), buf(b), depth(d) {}
+    ~GpuSurf() { delete pal; }
+    void SetPalette(const Surface* s) {
+        if (!buf->fmt.pal8) return;
+        const PALETTEENTRY* p = s->EffectivePalette();
+        if (!p) return;
+        if (!pal) pal = new PaletteMap;
+        pal->Set(p);
+    }
     void Drop() {
         if (surf) surf->Release();
         if (sysmem) sysmem->Release();
@@ -181,7 +229,8 @@ static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     D3DLOCKED_RECT lr;
     if (FAILED(g->upload->LockRect(&lr, nullptr, 0))) return;
     for (int y = 0; y < b->h; y++)
-        RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, nullptr, false, 0);
+        RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal ? g->pal->pal : nullptr,
+                 false, 0);
     g->upload->UnlockRect();
     gpu.CloseScene();
     d->StretchRect(g->upload, nullptr, g->surf, nullptr, D3DTEXF_NONE);
@@ -202,7 +251,7 @@ static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     D3DLOCKED_RECT lr;
     if (FAILED(g->sysmem->LockRect(&lr, nullptr, D3DLOCK_READONLY))) return;
     for (int y = 0; y < b->h; y++)
-        RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert);
+        RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal);
     g->sysmem->UnlockRect();
 }
 
@@ -461,6 +510,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     explicit Impl(Gpu& g) : gpu(g) { gpu.AddOwner(this); }
     ~Impl() {
         GpuGuard l(gpu);
+        if (gpu.stateOwner == this) gpu.stateOwner = nullptr;
         ReleaseGpuResources();
         gpu.RemoveOwner(this);
     }
@@ -483,8 +533,9 @@ bool GpuContext::Begin(bool* fresh) {
     *fresh = false;
     p_->dev = p_->gpu.Ensure();
     if (!p_->dev) return false;
-    if (p_->generation != p_->gpu.Generation()) {
+    if (p_->generation != p_->gpu.Generation() || p_->gpu.stateOwner != p_) {
         p_->generation = p_->gpu.Generation();
+        p_->gpu.stateOwner = p_;
         p_->boundRt = p_->boundZ = nullptr;
         *fresh = true;
     }
@@ -550,6 +601,7 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
     if (!rt) return false;
     GpuSurf* r = EnsureSurf(gpu, dev, rt->buf, false);
     if (!r) return false;
+    r->SetPalette(rt);
     if (rt->buf->gpuStale) {
         if (overwriteColor) rt->buf->gpuStale = false;
         else UploadSurf(gpu, dev, r);

@@ -35,7 +35,7 @@ public:
 
     static Surface* S(void* iface) { return Surface::From(iface); }
 
-    STDMETHOD(QueryInterface)(REFIID r, void** p) override { return s->QueryInterface(r, p); }
+    STDMETHOD(QueryInterface)(REFIID r, void** p) override { return s->QueryInterface(r, p, V); }
     STDMETHOD_(ULONG, AddRef)() override { return s->AddRef(Surface::SlotFor(V)); }
     STDMETHOD_(ULONG, Release)() override { return s->Release(Surface::SlotFor(V)); }
     // The interface version of a surface pointer the game passed (by identity): ddraw.dll

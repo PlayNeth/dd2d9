@@ -3,6 +3,60 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.0
+**Direct3D 3–6 in dd2d9 itself** (`src/d3d6*.cpp`), matched to XP SP3's `d3dim.dll`
+(`re/spec/d3d6-*.md`): DirectDraw objects made by `DirectDrawCreate` now offer
+`IDirect3D`, `IDirect3D2` and `IDirect3D3` (and report 3D support), and their surfaces
+`IDirect3DTexture`/`2` and Direct3D 1 devices.
+- EnumDevices and FindDevice list Ramp, RGB and HAL (IDirect3D3: RGB and HAL) with XP's
+  names and descriptors; the HAL's caps come from the Direct3D 9 adapter, the software
+  devices' are XP's fixed tables (the DX3/5 RGB one without alpha blending).
+- Devices v1 (made by a surface's QueryInterface, sharing its reference count), v2 and v3,
+  with XP's creation checks, references, render-state defaults (version-dependent
+  TEXTUREPERSPECTIVE, SPECULARENABLE, COLORKEYENABLE), light states with their override
+  bits, texture stages, transforms, v1 matrix handles, viewports (XP's list order and
+  reference rules), scenes (BeginScene restores lost surfaces for the game, as d3dim does),
+  SetRenderTarget, GetCaps for all three descriptor sizes, EnumTextureFormats with XP's
+  inclusion list, GetStats, clip status, Begin/Vertex/End and all the draws.
+- The legacy render states reach Direct3D 9 the way Microsoft's own DX6 rasterizer took
+  them: TEXTUREHANDLE (stage 0 only while set), TEXTUREMAPBLEND's table, TEXTUREMAG/MIN,
+  TEXTUREADDRESS, WRAPU/V and the rest onto stage 0, last writer wins; Get still answers
+  what the game set.
+- Viewports with D3DVIEWPORT and D3DVIEWPORT2 semantics (the clip volume), TransformVertices,
+  Clear and Clear2 (backgrounds from material handles, textured backgrounds), lights with
+  both the D3DLIGHT (DX3/5) and D3DLIGHT2 (DX6) models, materials and their per-device
+  handles, texture handles (one per surface, as XP's DP2 handles) with SwapTextureHandles
+  and Load.
+- Execute buffers and the whole instruction stream: PROCESSVERTICES (transform, light, copy),
+  points, lines, triangles, state instructions with override bits, matrix load/multiply
+  with live bindings, texture loads, branches, SETSTATUS, and the status written back.
+- A CPU front end does every untransformed vertex, as XP's did (no hardware T&L for DX6):
+  world, view, projection and the viewport's clip matrix, lighting, vertex fog, clip codes
+  and status, clipping where primitives leave a guard band or cross the near or far plane.
+  Direct3D 9 draws the result as transformed vertices.
+- Deliberately safer than `d3dim.dll` where it dereferences blindly: unknown handles, no
+  current viewport, bad vertex types, offsets past an execute buffer and NULL pointers give
+  errors instead of crashes.
+- The viewport's Clear is held to the viewport on version 1 devices too (Wine's test_clear:
+  XP's drivers did it, AMD's didn't); `Clear(n, NULL)` clears nothing and succeeds (Wine's
+  test_clear_rect_count). A hardware device draws untextured from a surface that isn't a
+  texture (Wine's test_texture_wrong_caps). Matrix handles work on every device (Wine's
+  test_multiple_devices).
+- Surface QueryInterface: IDirectDrawColorControl is `E_NOINTERFACE`; other IIDs it doesn't
+  know are `E_INVALIDARG` on DirectDraw 1-4 surfaces, as `d3dim.dll` answers them.
+- Direct3D 9 is shared by several Direct3D devices: one taking it over sends all of its
+  state again.
+- **8-bit palettized render targets** for the software devices (Direct3D 3-6's RGB, Ramp; d3dim700's RGB never had them):
+  drawn in true colour on the GPU, mapped back to palette indices when read (exact entry,
+  else nearest). Direct3D 7's sysmem palettized target fails with E_FAIL as on XP.
+  Palettized textures are listed by EnumTextureFormats on every device
+  (converted on upload, as before), so they no longer land in video memory unlisted (Wine's
+  test_unsupported_formats, test_rt_caps).
+- Lit vertices get a specular alpha of 0, fog aside (Wine's test_lighting on Windows);
+  colour keys act on the texel alone when the game's alpha isn't used (test_colorkey_precision).
+- DX6 ComputeSphereVisibility answers in D3DVIS_* flags; legacy texture Load keeps a colour
+  key only the destination has and refuses a palette into a palette-less destination.
+
 ## 0.8.3
 - **Direct3D frames are presented straight from the GPU**: a flipped-in render target the
   GPU holds the newest copy of is stretched into the window as it is, instead of being

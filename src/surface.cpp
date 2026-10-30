@@ -2,6 +2,7 @@
 #include "wrappers.h"
 #include "gpures.h"
 
+#include "d3d6.h"
 #include "d3dproxy.h"
 
 #include <algorithm>
@@ -259,6 +260,7 @@ Surface::~Surface() {
     for (auto& p : priv_)
         if (p.unk) p.unk->Release();
     D3DProxySurfaceDestroyed(this);
+    D3DLegacySurfaceGone(this);
     if (gpuTex) GpuSurfaceGone(this);
     buf->Release();
     delete static_cast<SurfaceWrap<1>*>(wraps_[0]);
@@ -295,7 +297,7 @@ void* Surface::Iface(int v) {
     }
 }
 
-HRESULT Surface::QueryInterface(REFIID r, void** out) {
+HRESULT Surface::QueryInterface(REFIID r, void** out, int version) {
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
     if (IsBadReadPtr(&r, sizeof(IID))) return DDERR_INVALIDPARAMS;
@@ -318,7 +320,9 @@ HRESULT Surface::QueryInterface(REFIID r, void** out) {
         *out = gamma;
         return S_OK;
     }
-    HRESULT hr = D3DProxyQuerySurface(this, r, out);  // textures and Direct3D 1 devices for a wrapper
+    if (IsEqualGUID(r, IID_IDirectDrawColorControl)) return E_NOINTERFACE;  // ddraw's own; not on these surfaces
+    // Textures and Direct3D 1 devices: a wrapper's when one loaded dd2d9, else dd2d9's own.
+    HRESULT hr = D3DProxyEnabled() ? D3DProxyQuerySurface(this, r, out) : D3DLegacyQuerySurface(this, r, out, version);
     if (hr != E_NOINTERFACE) return hr;
     DD2D9_LOG("Surface::QueryInterface(%s): not supported", GuidName(r));
     return E_NOINTERFACE;

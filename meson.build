@@ -18,7 +18,8 @@ static_link = ['-static', '-static-libgcc', '-static-libstdc++']
 
 ddraw = shared_library('ddraw',
   'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp', 'src/gpu.cpp',
-    'src/gpures.cpp', 'src/d3d7.cpp', 'src/d3dproxy.cpp', 'src/input.cpp',
+    'src/gpures.cpp', 'src/d3d7.cpp', 'src/d3d6obj.cpp', 'src/d3d6vp.cpp',
+    'src/d3d6dev.cpp', 'src/d3d6pipe.cpp', 'src/d3dproxy.cpp', 'src/input.cpp',
   name_prefix : '',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,

@@ -52,6 +52,9 @@ public:
     // Counts device creations and resets: the device's states and D3DPOOL_DEFAULT resources
     // are new since a different value. Lock held.
     unsigned Generation() const { return generation_; }
+    // The GpuContext (gpures.h) whose states the device holds now: another one taking over
+    // sends all of its own again. Lock held.
+    const void* stateOwner = nullptr;
     // Direct3D 9 draws only inside BeginScene/EndScene, and presents only outside: a scene
     // opens with the first draw and closes before anything presents or reads back. Lock held.
     void OpenScene();

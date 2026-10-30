@@ -2,6 +2,7 @@
 #include "wrappers.h"
 #include "gpu.h"
 
+#include "d3d6.h"
 #include "d3dproxy.h"
 #include "d3d7.h"
 
@@ -78,7 +79,9 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out, int fromVersion) {
         return S_OK;
     }
     // Direct3D: objects for a wrapper such as D7VK when one loaded dd2d9, else dd2d9's own.
-    HRESULT hr = D3DProxyEnabled() ? D3DProxyQueryDDraw(this, r, out) : D3D7Query(this, r, out, fromVersion);
+    HRESULT hr = D3DProxyEnabled() ? D3DProxyQueryDDraw(this, r, out)
+                 : dd7               ? D3D7Query(this, r, out, fromVersion)
+                                     : D3DLegacyQuery(this, r, out, fromVersion);
     if (hr != E_NOINTERFACE) return hr;
     DD2D9_LOG("DDraw::QueryInterface(%s): not supported", GuidName(r));
     return E_NOINTERFACE;
@@ -132,6 +135,7 @@ void DDraw::TearDown() {
         Guard l;
         alive = false;
         D3D7Destroy(this);  // before the surfaces, as ddraw.dll releases its Direct3D object
+        D3DLegacyDestroy(this);
         if (primary) {
             primary->isPrimary = false;
             primary = nullptr;
@@ -1439,9 +1443,8 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.ddsCaps.dwCaps = DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER |
                        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE | DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY |
                        DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_VISIBLE;
-    if (D3DProxyEnabled() || (dd7 && g_config.d3d != kD3DOff)) {
-        // A 3D accelerator, as ddraw does with a 3D driver: dd2d9's own Direct3D 7 (on
-        // DirectDrawCreateEx objects; Direct3D 1-3 aren't implemented yet), or a wrapper
+    if (D3DProxyEnabled() || g_config.d3d != kD3DOff) {
+        // A 3D accelerator, as ddraw does with a 3D driver: dd2d9's own Direct3D (3-7), or a wrapper
         // (D7VK) rendering on top of dd2d9. Games check this before they try Direct3D.
         c.dwCaps |= DDCAPS_3D;
         c.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
