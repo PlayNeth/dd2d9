@@ -587,6 +587,13 @@ struct GpuContext::Impl final : Gpu::Owner {
     // (linear) for textures whose levels the GPU made while the game asks for none.
     DWORD mipFilter[8] = {};
     DWORD mipFilterSet[8] = {};
+    // anisotropy=N: each stage's minification filter and anisotropy as the game set them, and
+    // as D3D9 has them (linear minification becomes anisotropic). D3D9's defaults: point, 1.
+    DWORD minFilter[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    DWORD minFilterSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    DWORD maxAniso[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    DWORD anisoLimit = 0;  // anisotropy= within what the GPU can (0: not known yet, or none)
     // alternatepixelcenter: the game's projection, sent moved half a pixel at the next draw
     // of untransformed vertices (it depends on the viewport too).
     D3DMATRIX proj = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}};
@@ -643,7 +650,11 @@ void GpuContext::SetTextureStageState(DWORD stage, DWORD type, DWORD value) {
 }
 
 void GpuContext::SetSamplerState(DWORD stage, DWORD type, DWORD value) {
-    if (type == D3DSAMP_MIPFILTER && stage < 8) p_->mipFilter[stage] = p_->mipFilterSet[stage] = value;
+    if (stage < 8) {
+        if (type == D3DSAMP_MIPFILTER) p_->mipFilter[stage] = p_->mipFilterSet[stage] = value;
+        if (type == D3DSAMP_MINFILTER) p_->minFilter[stage] = p_->minFilterSet[stage] = value;
+        if (type == D3DSAMP_MAXANISOTROPY) p_->maxAniso[stage] = p_->maxAnisoSet[stage] = value;
+    }
     if (p_->dev) p_->dev->SetSamplerState(stage, D3DSAMPLERSTATETYPE(type), value);
 }
 
@@ -737,6 +748,30 @@ void GpuContext::Impl::BindTextures() {
     for (DWORD i = 0; i < 8; i++) {
         IDirect3DTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
         dev->SetTexture(i, t);
+        if (g_config.anisotropy > 1) {
+            if (!anisoLimit) {
+                D3DCAPS9 caps = {};
+                anisoLimit = 1;
+                if (SUCCEEDED(dev->GetDeviceCaps(&caps)) && (caps.TextureFilterCaps & D3DPTFILTERCAPS_MINFANISOTROPIC))
+                    anisoLimit = std::max<DWORD>(1, std::min<DWORD>(DWORD(g_config.anisotropy), caps.MaxAnisotropy));
+                DD2D9_LOG("anisotropy: %lu (the GPU: up to %lu, %s)", static_cast<unsigned long>(anisoLimit),
+                          static_cast<unsigned long>(caps.MaxAnisotropy),
+                          (caps.TextureFilterCaps & D3DPTFILTERCAPS_MINFANISOTROPIC) ? "anisotropic minification" : "none");
+            }
+            // Only where the game filters smoothly: point (pixel art, sharp on purpose) stays.
+            const bool smooth = t && anisoLimit > 1 &&
+                                (minFilter[i] == D3DTEXF_LINEAR || minFilter[i] == D3DTEXF_ANISOTROPIC);
+            const DWORD wantMin = smooth ? DWORD(D3DTEXF_ANISOTROPIC) : minFilter[i];
+            const DWORD wantAniso = smooth ? std::max(anisoLimit, maxAniso[i]) : maxAniso[i];
+            if (wantMin != minFilterSet[i]) {
+                dev->SetSamplerState(i, D3DSAMP_MINFILTER, wantMin);
+                minFilterSet[i] = wantMin;
+            }
+            if (wantAniso != maxAnisoSet[i]) {
+                dev->SetSamplerState(i, D3DSAMP_MAXANISOTROPY, wantAniso);
+                maxAnisoSet[i] = wantAniso;
+            }
+        }
         if (!g_config.mipmaps) continue;
         const bool autogen = t && tex[i]->gpuTex && tex[i]->gpuTex->autogen && t == tex[i]->gpuTex->tex;
         const DWORD want = autogen && mipFilter[i] == D3DTEXF_NONE ? DWORD(D3DTEXF_LINEAR) : mipFilter[i];

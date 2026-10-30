@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.3"
+#define DD2D9_VERSION "0.9.4"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -38,6 +38,7 @@ struct Config {
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
     int cpus = 1;                  // processors the game runs on and is told about; 0: all
     bool mipmaps = false;          // the GPU makes smaller levels for textures the game gave none
+    int anisotropy = 0;            // anisotropic filtering forced on smooth (linear) textures: 2-16; 0/1 off
     bool pixelCenter = false;      // alternatepixelcenter: Direct3D drawn half a pixel up and left
     int log = 0;                   // 0 off, 1 info, 2 trace (every blit, lock, flip and palette change)
     std::wstring logFile;          // empty: dd2d9.log next to the game's executable

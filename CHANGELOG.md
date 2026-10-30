@@ -3,6 +3,13 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.4
+- **`anisotropy=2|4|8|16`**: anisotropic filtering on every texture stage the game filters
+  smoothly (linear or anisotropic minification), at most what the GPU can; point-filtered
+  stages are left as they are. Off by default. The log says what the GPU allows.
+- `d3d7test` checks one-pixel stripes squashed 8x vertically (blurred without anisotropic
+  filtering, kept with it).
+
 ## 0.9.3
 - **`filter=sharp` works at every scale**: it was plain bilinear below 2x (640x480 on a
   1366x768 or 1080p screen) and a two-pass approximation above. Now one pixel shader

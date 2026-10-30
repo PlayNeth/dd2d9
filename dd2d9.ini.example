@@ -77,6 +77,12 @@ cpus=1
 ; transparent texels would fringe the smaller levels). off (default) / on
 mipmaps=off
 
+; Anisotropic filtering: 0 (off, default), 2, 4, 8 or 16 (at most what the GPU can).
+; Textures seen at a grazing angle (floors, roads, walls) stay sharp instead of blurring.
+; Only where the game filters smoothly (linear): point-filtered textures stay as they are.
+; It works on mipmapped textures: for games that have none, together with mipmaps=on.
+anisotropy=0
+
 ; Alternate pixel centre, as ATI's and Nvidia's old drivers offered: Direct3D drawn half a
 ; pixel up and left. For games that show lines or seams at the edges of textures, mostly in
 ; 2D drawn through Direct3D (menus, HUDs, sprites). off (default) / on

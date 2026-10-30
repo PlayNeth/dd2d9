@@ -3,6 +3,7 @@
 //   d3d7test [<w> <h> [<bpp>]]     default 640x480x32
 // Results are appended to d3d7test.txt next to the executable.
 #define WIN32_LEAN_AND_MEAN
+#include <algorithm>
 #include <windows.h>
 #include <ddraw.h>
 #include <d3d.h>
@@ -221,6 +222,61 @@ static int Run(int w, int h, int bpp) {
             const char* centre = q == 0 || q == 0xFFFFFF ? "texel centres (alternatepixelcenter=on)"
                                  : (qg > 0x40 && qg < 0xC0) ? "texel edges (Direct3D's)" : "?";
             CHECK(centre[0] != '?', "checker texture drawn 1:1, bilinear: 0x%06lx, pixel centres on %s", q, centre);
+        }
+        if (checker) checker->Release();
+        checker = nullptr;
+        // One-pixel vertical stripes drawn 64x8, squashed only vertically, with linear and mip
+        // filtering: mipmapped (the game's levels or mipmaps=on), an isotropic filter picks a
+        // level small enough for the vertical squash and blurs the stripes grey; anisotropy=8
+        // and up keeps them.
+        c.dwFlags |= DDSD_MIPMAPCOUNT;
+        c.dwMipMapCount = 7;
+        c.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
+        hr = dd->CreateSurface(&c, &checker, nullptr);
+        CHECK(SUCCEEDED(hr) && checker, "mipmapped stripes texture -> 0x%08lx", hr);
+        IDirectDrawSurface7* level = checker;
+        if (level) level->AddRef();
+        for (int n = 64; level && n >= 1; n /= 2) {  // every level: stripes, the small ones grey
+            DDSURFACEDESC2 m = {};
+            m.dwSize = sizeof(m);
+            if (SUCCEEDED(level->Lock(nullptr, &m, DDLOCK_WAIT, nullptr))) {
+                for (int y = 0; y < n; y++)
+                    for (int x = 0; x < n; x++)
+                        reinterpret_cast<DWORD*>(static_cast<BYTE*>(m.lpSurface) + y * m.lPitch)[x] =
+                            n == 64 ? ((x & 1) ? 0xFFFFFF : 0) : 0x808080;
+                level->Unlock(nullptr);
+            }
+            DDSCAPS2 mc = {DDSCAPS_TEXTURE | DDSCAPS_MIPMAP, 0, 0, {0}};
+            IDirectDrawSurface7* next = nullptr;
+            level->GetAttachedSurface(&mc, &next);
+            level->Release();
+            level = next;
+        }
+        if (level) level->Release();
+        if (checker) {
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFFFF0000, 1.0f, 0);
+            dev->SetTexture(0, checker);
+            dev->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTFN_LINEAR);
+            dev->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTFG_LINEAR);
+            dev->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTFP_LINEAR);
+            dev->BeginScene();
+            // Half a pixel left: 1:1 across, each pixel on a texel's centre (not between two).
+            TV flat[4] = {{-0.5f, 0, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {63.5f, 0, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                          {-0.5f, 8, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {63.5f, 8, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, flat, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            dev->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTFN_POINT);
+            dev->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTFG_POINT);
+            dev->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTFP_NONE);
+            int lo = 255, hi = 0;
+            for (int x = 20; x < 28; x++) {
+                const int g = int((pixel(x, 4) >> 8) & 0xFF);
+                lo = std::min(lo, g);
+                hi = std::max(hi, g);
+            }
+            CHECK(true, "stripes squashed 8x vertically: green %d..%d, %s", lo, hi,
+                  hi - lo > 0x60 ? "stripes kept (anisotropic)" : "blurred (isotropic)");
         }
         if (checker) checker->Release();
     }

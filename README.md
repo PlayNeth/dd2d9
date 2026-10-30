@@ -176,6 +176,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
 | `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
 | `mipmaps` | `off`; `on`: the GPU makes the smaller levels (mipmaps) of textures the game gave none, and filters with them (less shimmer in the distance) |
+| `anisotropy` | `0` (off); `2`, `4`, `8` or `16`: anisotropic filtering on textures the game filters smoothly (linear), sharper at grazing angles (floors, roads); point-filtered ones stay as they are |
 | `alternatepixelcenter` | `off`; `on`: Direct3D drawn half a pixel up and left, as some old drivers offered (lines at the edges of textures in 2D drawn through Direct3D) |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
