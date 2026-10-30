@@ -102,6 +102,15 @@ The gamma ramp (`IDirectDrawGammaControl`) applies to 3D frames presented straig
 GPU too, through a small pixel shader. `d3d=off` offers no Direct3D at all (2D only). D7VK
 isn't needed or supported any more (0.9.0).
 
+- **Compatibility options**: what the game is told about the machine, as a PC of its era
+  would answer, through its imports (as for the mouse). `ram`: Windows reports 2 GB of
+  memory and a 4 GB page file to programs that aren't large-address-aware, and old games
+  overflow adding to them and claim there isn't enough memory; dd2d9 reports 1 GB by
+  default, and pins the game to one processor (`cpus=1`), as the PCs of the era had. `cpu` sets the clock in the registry (2 GHz by
+  default), but games that time the processor with `RDTSC` measure the real one (an
+  instruction a DLL can't intercept), and one that times itself with the registry's figure
+  runs at the wrong speed: `cpu=0` gives it the real clock.
+
 ## Differences from ddraw.dll on purpose
 - **The window's frame sits just off the screen in fullscreen.** `ddraw.dll` leaves the
   window's style alone and draws over the whole screen, frame included. dd2d9 keeps the
@@ -162,6 +171,10 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A
 | `vsync` | `auto` (the game decides), `on`, `off` |
 | `d3d` | `auto` (or `on`): dd2d9's own Direct3D (3–7); `off`: no Direct3D |
 | `d3d9` | `system` (Windows' own `d3d9.dll` for presenting), `game` (the one the game loads) |
+| `ram` | `1024`: MB of memory games are told about (`GlobalMemoryStatus`), at most `2047`; `0`: the real values |
+| `vram` | `512`: MB of video memory DirectDraw reports (`GetCaps`, `GetAvailableVidMem`), `1`–`2047` |
+| `cpu` | `2000`: MHz in the registry's `~MHz`; `0`: the real clock |
+| `cpus` | `1`: processors the game runs on and is told about, as on the single-core PCs of the era; `0`: all |
 | `log` | `0`, `1` (info), `2` (trace every blit, lock, flip and palette change, the game window's messages and every failed call) |
 | `logfile` | path; default `dd2d9.log` next to the game's executable |
 

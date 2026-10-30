@@ -128,6 +128,23 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (v == "auto" || v == "game") g_config.vsync = kVSyncAuto;
         else if (ParseBool(v, &b)) g_config.vsync = b ? kVSyncOn : kVSyncOff;
         else ok = false;
+    } else if (key == "ram" || key == "vram" || key == "cpu" || key == "cpus") {
+        // Whole numbers; ram, cpu and cpus take 0 or off for the real values. Capped below
+        // 2 GB: values from 2048 MB up overflow the signed arithmetic of games of the era.
+        static const struct { const char* key; int* field; int lo, hi; } kNums[] = {
+            {"ram", &g_config.ramMB, 0, 2047},
+            {"vram", &g_config.vramMB, 1, 2047},
+            {"cpu", &g_config.cpuMHz, 0, 100000},
+            {"cpus", &g_config.cpus, 0, 64},
+        };
+        for (const auto& n : kNums) {
+            if (key != n.key) continue;
+            char* end = nullptr;
+            const long x = v == "off" || v == "real" ? 0 : strtol(v.c_str(), &end, 10);
+            if (end && (end == v.c_str() || *end)) ok = false;
+            else if (x < n.lo || x > n.hi) ok = false;
+            else *n.field = int(x);
+        }
     } else if (key == "log") {
         int b;
         if (v == "2" || v == "trace") g_config.log = 2;
@@ -267,6 +284,7 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
+    Log(1, "settings: ram=%d vram=%d cpu=%d cpus=%d", g_config.ramMB, g_config.vramMB, g_config.cpuMHz, g_config.cpus);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }

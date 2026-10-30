@@ -1,4 +1,5 @@
 // DLL entry point, exported functions and COM class factory.
+#include "hooks.h"
 #include "objects.h"
 
 using namespace dd2d9;
@@ -7,6 +8,7 @@ namespace {
 
 // guid: DDCREATE_HARDWAREONLY / DDCREATE_EMULATIONONLY limit the caps reported to one side.
 HRESULT CreateDDraw(REFIID riid, void** out, bool initialized, const GUID* guid = nullptr) {
+    InstallCompatHooks(false);
     auto* dd = new DDraw();
     dd->initialized = initialized;
     dd->dd7 = IsEqualGUID(riid, IID_IDirectDraw7);  // Direct3D 7 (not 1-3) belongs to these
@@ -72,11 +74,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
         InitializeCriticalSection(&g_displayLock);
         LoadConfig(inst);
         LogInit();
+        InstallCompatHooks(true);
     }
     if (reason == DLL_PROCESS_DETACH) {
         if (!reserved) {  // unloaded while the process goes on: nothing may point into it
             CrashLoggerRemove();
-            RemoveMouseHooks();
+            UnpatchAll();
         }
         LogFlush(reserved != nullptr);       // non-null: the process is exiting
     }

@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.1"
+#define DD2D9_VERSION "0.9.2"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -32,6 +32,11 @@ struct Config {
     int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
     bool mouseScale = true;        // map the mouse to the game's display mode when it is scaled or windowed
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
+    // Compatibility (compat.cpp): what the game is told about the machine.
+    int ramMB = 1024;              // GlobalMemoryStatus(Ex) physical memory; 0: the real values
+    int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
+    int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
+    int cpus = 1;                  // processors the game runs on and is told about; 0: all
     int log = 0;                   // 0 off, 1 info, 2 trace (every blit, lock, flip and palette change)
     std::wstring logFile;          // empty: dd2d9.log next to the game's executable
 };
@@ -168,7 +173,11 @@ void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interfac
 // between the real screen and the game's display mode while it is shown scaled or in a
 // window. Installed in every module loaded so far (each time exclusive mode starts).
 void InstallMouseHooks();
-void RemoveMouseHooks();  // the DLL is unloaded while the process goes on
+
+// ---------------------------------------------------------------- compatibility (compat.cpp)
+// ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
+// sets the affinity too) and again for each new DirectDraw object (DLLs loaded since).
+void InstallCompatHooks(bool inLoaderLock);
 // The game's view of a point on the real screen and back; false when 1:1.
 bool MouseToGame(POINT* p);
 bool MouseFromGame(POINT* p);

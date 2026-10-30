@@ -1426,7 +1426,7 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     }
     {
         Guard l;
-        c.dwVidMemTotal = DWORD(kVidMemTotal);
+        c.dwVidMemTotal = DWORD(VidMemTotal());
         c.dwVidMemFree = VidMemFree();
     }
     c.ddsCaps.dwCaps = DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER |
@@ -1509,7 +1509,7 @@ HRESULT DDraw::GetAvailableVidMem(const DDSCAPS2* caps, DWORD* total, DWORD* fre
                             DDSCAPS_SYSTEMMEMORY | DDSCAPS_VISIBLE | DDSCAPS_WRITEONLY | DDSCAPS_OWNDC;
     if ((caps->dwCaps & notMemory) || (!total && !free)) return DDERR_INVALIDPARAMS;
     Guard l;
-    if (total) *total = DWORD(kVidMemTotal);
+    if (total) *total = DWORD(VidMemTotal());
     if (free) *free = VidMemFree();
     return DD_OK;
 }

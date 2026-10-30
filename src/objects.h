@@ -555,13 +555,14 @@ private:
     LONG tornDown_ = 0;
     LONG ifaceRef_[4] = {};  // per interface version: 1, 2, 4, 7
 public:
-    // Video memory as games see it: a fixed total, minus the video-memory surfaces (g_lock).
-    static constexpr uint64_t kVidMemTotal = 512ull << 20;
+    // Video memory as games see it: the configured total (vram=), minus the video-memory
+    // surfaces (g_lock).
+    static uint64_t VidMemTotal() { return uint64_t(g_config.vramMB) << 20; }
     enum CapsSide { kBoth, kHardwareOnly, kEmulationOnly };
     CapsSide capsSide = kBoth;  // from DirectDrawCreate's DDCREATE_HARDWAREONLY / DDCREATE_EMULATIONONLY
     uint64_t vidMemUsed = 0;
     DWORD VidMemFree() const {
-        return DWORD(vidMemUsed < kVidMemTotal ? kVidMemTotal - vidMemUsed : 0);
+        return DWORD(vidMemUsed < VidMemTotal() ? VidMemTotal() - vidMemUsed : 0);
     }
 private:
     void TearDown();         // the last reference is gone (g_lock not held)

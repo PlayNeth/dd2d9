@@ -54,6 +54,24 @@ mouse=scale
 ;   game   - the one the game loads (the game folder's, if there is one)
 d3d9=system
 
+; Compatibility: what the game is told about the machine, as a PC of its era would answer.
+; Memory in MB (GlobalMemoryStatus). Windows tells programs that aren't large-address-aware
+; there are 2 GB of memory and 4 GB of page file, and games of the era overflow adding to
+; that and say there isn't enough memory. 0: the real values. At most 2047.
+ram=1024
+; Video memory in MB that DirectDraw reports (GetCaps, GetAvailableVidMem): 1 to 2047.
+; Try 128 or 256 if a game complains about it.
+vram=512
+; Processor clock in MHz in the registry (~MHz): 2000 (default), as fast as the PCs of the
+; era got. Games that time the processor themselves (RDTSC) still see the real one. A game
+; that times itself with the registry's figure runs at the wrong speed: set 0 (the real
+; clock) for it.
+cpu=2000
+; Processors the game runs on and is told about (GetSystemInfo): 1 (default), as the PCs of
+; the era had; games of the era can crash, stutter or run at the wrong speed on several.
+; 0: all.
+cpus=1
+
 ; Logging: 0 off (default), 1 info, 2 trace (every blit, lock, flip and palette change -
 ; very verbose, for diagnosing rendering problems).
 ; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ...").

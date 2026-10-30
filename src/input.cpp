@@ -5,9 +5,8 @@
 // cursor functions at its own, which translate (see MouseToGame / MouseFromGame in
 // ddraw.cpp); the mouse messages to the game's window are translated in its window
 // procedure (ddraw.cpp, HookProc). DirectInput's relative mouse needs nothing.
+#include "hooks.h"
 #include "objects.h"
-
-#include <tlhelp32.h>
 
 #include <algorithm>
 #include <cstring>
@@ -146,125 +145,26 @@ BOOL WINAPI HookGetWindowRect(HWND h, RECT* rc) {
     return g_getWindowRect(h, rc);
 }
 
-struct Hook {
-    const char* name;
-    void* replacement;
-    void** original;
+ImportHook kHooks[] = {
+    {"user32", "GetCursorPos", reinterpret_cast<void*>(HookGetCursorPos), reinterpret_cast<void**>(&g_getCursorPos)},
+    {"user32", "SetCursorPos", reinterpret_cast<void*>(HookSetCursorPos), reinterpret_cast<void**>(&g_setCursorPos)},
+    {"user32", "GetMessagePos", reinterpret_cast<void*>(HookGetMessagePos), reinterpret_cast<void**>(&g_getMessagePos)},
+    {"user32", "ClipCursor", reinterpret_cast<void*>(HookClipCursor), reinterpret_cast<void**>(&g_clipCursor)},
+    {"user32", "GetClipCursor", reinterpret_cast<void*>(HookGetClipCursor), reinterpret_cast<void**>(&g_getClipCursor)},
+    {"user32", "GetSystemMetrics", reinterpret_cast<void*>(HookGetSystemMetrics), reinterpret_cast<void**>(&g_getSystemMetrics)},
+    {"user32", "ScreenToClient", reinterpret_cast<void*>(HookScreenToClient), reinterpret_cast<void**>(&g_screenToClient)},
+    {"user32", "ClientToScreen", reinterpret_cast<void*>(HookClientToScreen), reinterpret_cast<void**>(&g_clientToScreen)},
+    {"user32", "MapWindowPoints", reinterpret_cast<void*>(HookMapWindowPoints), reinterpret_cast<void**>(&g_mapWindowPoints)},
+    {"user32", "GetClientRect", reinterpret_cast<void*>(HookGetClientRect), reinterpret_cast<void**>(&g_getClientRect)},
+    {"user32", "GetWindowRect", reinterpret_cast<void*>(HookGetWindowRect), reinterpret_cast<void**>(&g_getWindowRect)},
 };
-
-const Hook kHooks[] = {
-    {"GetCursorPos", reinterpret_cast<void*>(HookGetCursorPos), reinterpret_cast<void**>(&g_getCursorPos)},
-    {"SetCursorPos", reinterpret_cast<void*>(HookSetCursorPos), reinterpret_cast<void**>(&g_setCursorPos)},
-    {"GetMessagePos", reinterpret_cast<void*>(HookGetMessagePos), reinterpret_cast<void**>(&g_getMessagePos)},
-    {"ClipCursor", reinterpret_cast<void*>(HookClipCursor), reinterpret_cast<void**>(&g_clipCursor)},
-    {"GetClipCursor", reinterpret_cast<void*>(HookGetClipCursor), reinterpret_cast<void**>(&g_getClipCursor)},
-    {"GetSystemMetrics", reinterpret_cast<void*>(HookGetSystemMetrics), reinterpret_cast<void**>(&g_getSystemMetrics)},
-    {"ScreenToClient", reinterpret_cast<void*>(HookScreenToClient), reinterpret_cast<void**>(&g_screenToClient)},
-    {"ClientToScreen", reinterpret_cast<void*>(HookClientToScreen), reinterpret_cast<void**>(&g_clientToScreen)},
-    {"MapWindowPoints", reinterpret_cast<void*>(HookMapWindowPoints), reinterpret_cast<void**>(&g_mapWindowPoints)},
-    {"GetClientRect", reinterpret_cast<void*>(HookGetClientRect), reinterpret_cast<void**>(&g_getClientRect)},
-    {"GetWindowRect", reinterpret_cast<void*>(HookGetWindowRect), reinterpret_cast<void**>(&g_getWindowRect)},
-};
-
-struct Patched {
-    void** slot;
-    void* original;
-};
-std::vector<Patched>* g_patched;  // g_lock
-
-void WriteSlot(void** slot, void* value) {
-    DWORD old;
-    // Executable too: some linkers put the import table in the code section.
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return;
-    *slot = value;
-    VirtualProtect(slot, sizeof(void*), old, &old);
-}
-
-bool IsUser32(const char* name) {
-    return _strnicmp(name, "user32", 6) == 0 && (name[6] == 0 || _stricmp(name + 6, ".dll") == 0);
-}
-
-// The module's imports of the cursor functions from user32 go to dd2d9's.
-void PatchModule(HMODULE m) {
-    auto* base = reinterpret_cast<uint8_t*>(m);
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress || !dir.Size) return;
-    for (auto* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; d++) {
-        if (!IsUser32(reinterpret_cast<const char*>(base + d->Name))) continue;
-        auto* iat = reinterpret_cast<void**>(base + d->FirstThunk);
-        const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA*>(base + (d->OriginalFirstThunk ? d->OriginalFirstThunk
-                                                                                                    : d->FirstThunk));
-        for (size_t i = 0; names[i].u1.AddressOfData; i++) {
-            for (const Hook& h : kHooks) {
-                bool match;
-                if (d->OriginalFirstThunk && !IMAGE_SNAP_BY_ORDINAL(names[i].u1.Ordinal)) {
-                    const auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names[i].u1.AddressOfData);
-                    match = strcmp(reinterpret_cast<const char*>(ibn->Name), h.name) == 0;
-                } else {
-                    match = iat[i] == *h.original;  // no names (bound): by address
-                }
-                if (!match || iat[i] == h.replacement) continue;
-                g_patched->push_back({&iat[i], iat[i]});
-                WriteSlot(&iat[i], h.replacement);
-            }
-        }
-    }
-}
-
-// Windows' modules, and the graphics, sound and input DLLs a game folder may hold (D7VK,
-// DXVK, dgVoodoo, ...): those work with the real screen.
-bool LeaveAlone(const wchar_t* path, const wchar_t* name) {
-    wchar_t sys[MAX_PATH], win[MAX_PATH];
-    const UINT ns = GetSystemDirectoryW(sys, MAX_PATH), nw = GetWindowsDirectoryW(win, MAX_PATH);
-    if ((ns && _wcsnicmp(path, sys, ns) == 0) || (nw && _wcsnicmp(path, win, nw) == 0)) return true;
-    static const wchar_t* kNames[] = {L"ddraw.dll", L"ddraw_.dll", L"d3d8.dll", L"d3d9.dll", L"d3d10core.dll",
-                                      L"d3d11.dll", L"dxgi.dll", L"opengl32.dll", L"dinput.dll", L"dinput8.dll",
-                                      L"dsound.dll", L"winmm.dll", L"glide.dll", L"glide2x.dll", L"glide3x.dll"};
-    for (const wchar_t* n : kNames)
-        if (_wcsicmp(name, n) == 0) return true;
-    return false;
-}
 
 }  // namespace
 
 void InstallMouseHooks() {
     if (!g_config.mouseScale) return;
-    Guard l;
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (!user32) return;
-    if (!g_patched) {
-        g_patched = new std::vector<Patched>;
-        for (const Hook& h : kHooks) *h.original = reinterpret_cast<void*>(GetProcAddress(user32, h.name));
-    }
-    for (const Hook& h : kHooks)
-        if (!*h.original) return;
-    HMODULE self = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&InstallMouseHooks), &self);
-    // The game's own modules (its executable and the DLLs it brought), not Windows'
-    // and not dd2d9 itself.
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
-    MODULEENTRY32W me = {};
-    me.dwSize = sizeof(me);
-    const size_t before = g_patched->size();
-    for (BOOL more = Module32FirstW(snap, &me); more; more = Module32NextW(snap, &me)) {
-        if (me.hModule == self || LeaveAlone(me.szExePath, me.szModule)) continue;
-        PatchModule(me.hModule);
-    }
-    CloseHandle(snap);
-    if (g_patched->size() != before)
-        DD2D9_LOG("mouse: %u cursor imports translated for the game's display mode", unsigned(g_patched->size() - before));
-}
-
-void RemoveMouseHooks() {
-    if (!g_patched) return;
-    for (const Patched& p : *g_patched) WriteSlot(p.slot, p.original);
-    g_patched->clear();
+    if (const unsigned n = PatchGameModules(kHooks, sizeof(kHooks) / sizeof(kHooks[0])))
+        DD2D9_LOG("mouse: %u cursor imports translated for the game's display mode", n);
 }
 
 }  // namespace dd2d9

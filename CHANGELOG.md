@@ -3,6 +3,21 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.2
+- **Compatibility options** (`src/compat.cpp`), what the game is told about the machine:
+  - `ram=1024` (default): `GlobalMemoryStatus(Ex)` reports 1 GB of memory (3/4 of it free
+    at most) and a 1.5 GB commit limit. Windows tells programs that aren't
+    large-address-aware 2 GB and a 4 GB page file, which old games overflow and then
+    claim there isn't enough memory. `ram=0` gives the real values.
+  - `vram=512` (default, as before): the video memory DirectDraw reports.
+  - `cpu=2000` (default): the registry's `~MHz` for every processor reads 2 GHz
+    (`RDTSC` can't be faked from a DLL; `cpu=0` gives the real clock).
+  - `cpus=1` (default): the game runs on one processor (its affinity) and is told so
+    (`GetSystemInfo`'s count and mask), as on the PCs of its era; `cpus=0` gives all.
+  The imports are patched from `DllMain`, before the game's code runs, and again for each
+  new DirectDraw object. The import patching is shared with the mouse translation
+  (`src/hooks.cpp`).
+
 ## 0.9.1
 - **The gamma ramp applies to Direct3D frames presented from the GPU** (0.8.3 showed them
   without it): the frame goes through a small pixel shader that looks each channel up in
