@@ -3,6 +3,14 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.15
+- **The exclusive window is made topmost again every 1.5 s** if something took that away,
+  as `ddraw.dll`'s timer does (a hidden window stays hidden; not while the game is in the
+  background, or with `DDSCL_NOWINDOWCHANGES`). Jazz Jackrabbit 2 hides its window and
+  changes its extended style around the mode change when a level starts after the first
+  boot: it then sat under the taskbar, looking windowed, until Alt+Enter. Wine's
+  `test_window_style` "Expected WS_EX_TOPMOST" passes now (ddraw1/2/4/7).
+
 ## 0.9.14
 - **`overlaybias` finds NFS III's light maps**: its trace showed every world draw alpha
   blended with depth writes on, so "blends" took in everything and the bias moved it all

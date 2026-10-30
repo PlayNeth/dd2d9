@@ -500,6 +500,30 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc) {
 
 }  // namespace
 
+// As ddraw.dll: about every 1.5 s while a game holds exclusive mode in front, its window is
+// made topmost again if something took that away (the game itself changing its extended
+// style, or hiding and showing its window around a mode change: Jazz Jackrabbit 2 then
+// sat under the taskbar until Alt+Enter); a hidden window stays hidden. A timer on the
+// window, run by the game's own message loop.
+static const UINT_PTR kTopmostTimer = 0x64643239;  // "dd29"
+
+static void CALLBACK TopmostTimerProc(HWND h, UINT, UINT_PTR, DWORD) {
+    if (!TryEnterCriticalSection(&g_displayLock)) return;  // next time
+    if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->KeepTopmost();
+    LeaveCriticalSection(&g_displayLock);
+}
+
+// Called with g_displayLock held.
+void DDraw::KeepTopmost() {
+    if (!Exclusive() || !alive || applying_ || suspended_ || deviceState_ == kDevLost || !hwnd_ ||
+        (coop_ & DDSCL_NOWINDOWCHANGES) || IsIconic(hwnd_))
+        return;
+    if ((modeSet_ ? activeDisplay_ : g_config.display) == kDisplayWindow) return;
+    if (GetWindowLongW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST) return;
+    DD2D9_LOG("window %p was no longer topmost: made topmost again", static_cast<void*>(hwnd_));
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 void DDraw::HookWindow() {
     if (!hwnd_ || !IsWindow(hwnd_)) return;
     // As ddraw.dll: no "Not Responding" ghost window replaces the game's while it is busy
@@ -514,6 +538,7 @@ void DDraw::HookWindow() {
     (void)noGhosting;
     if (g_hook.hwnd == hwnd_) {  // already in this window's chain (maybe from an earlier DirectDraw object)
         g_hook.owner = this;
+        SetTimer(hwnd_, kTopmostTimer, 1500, TopmostTimerProc);  // (again: harmless)
         return;
     }
     if (g_hook.hwnd && IsWindow(g_hook.hwnd)) {
@@ -539,6 +564,8 @@ void DDraw::HookWindow() {
     g_hook.orig = reinterpret_cast<WNDPROC>(prev);
     g_hook.hwnd = hwnd_;
     g_hook.owner = this;
+    // (Only from the window's own thread; elsewhere SetTimer refuses, and there is none.)
+    SetTimer(hwnd_, kTopmostTimer, 1500, TopmostTimerProc);
     // HookProc may stay in the window's chain for good (see UnhookWindow), and
     // wrappers such as D7VK free and reload this DLL (Direct3D <-> software
     // switches): keep the code loaded for the rest of the process.
@@ -555,6 +582,7 @@ void DDraw::UnhookWindow() {
     if (g_hook.owner != this) return;
     g_hook.owner = nullptr;
     HWND h = g_hook.hwnd;
+    if (h && IsWindow(h)) KillTimer(h, kTopmostTimer);
     if (h && IsWindow(h)) {
         // Something subclassed the window after us: stay in its chain, forwarding only.
         if (GetProc(h, g_hook.unicode) != reinterpret_cast<LONG_PTR>(HookProc)) return;

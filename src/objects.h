@@ -496,6 +496,7 @@ public:
     Presenter* GetPresenter() { return presenter_; }
     Gpu& GetGpu() { return *gpu_; }
     void OnActivate(bool active, DWORD thread);  // WM_ACTIVATEAPP while exclusive (thread: its lParam)
+    void KeepTopmost();  // the 1.5 s timer while exclusive: topmost again if that was taken away
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
     void CheckCover(HWND h);       // the window moved in exclusive mode; g_displayLock held
     void OnPrimaryReleased();
