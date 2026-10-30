@@ -752,6 +752,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     bool alphaBlend = false;  // ALPHABLENDENABLE
     float gameBias = 0.0f;  // the game's depth bias (ZBIAS); biasSet: as D3D9 has it
     float biasSet = 0.0f;
+    float slopeSet = 0.0f;  // SLOPESCALEDEPTHBIAS as D3D9 has it (only the overlay slack sets it)
     DWORD maxAnisoSet[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     DWORD anisoLimit = 0;  // anisotropy= within what the GPU can (0: not known yet, or none)
     // alternatepixelcenter: the game's projection, sent moved half a pixel at the next draw
@@ -830,6 +831,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
     if (state == 195) {  // D3DRS_DEPTHBIAS (from ZBIAS): the game's, before the overlay tolerance
         memcpy(&p_->gameBias, &value, 4);
         p_->biasSet = -1.0f;  // re-sent at the next draw
+        p_->slopeSet = -2.0f;
     }
     if (state == 195 && (value & 0x7FFFFFFF)) {  // (not -0: ZBIAS 0)
         static bool logged;
@@ -1143,20 +1145,25 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // game asked for. Its depth equals the surface's only to within rounding (the polygons
     // are cut differently), which the 16-bit depth buffers of the era rounded the same way,
     // and the overlay won; with today's 24 bits less-or-equal fails on half its pixels, in
-    // a fine hatch (NFS III's headlights and light maps on the road). Deeper Z buffers: 16
-    // steps of a 24-bit one.
+    // a fine hatch (NFS III's headlights and light maps on the road). overlaybias=N 16-bit
+    // steps (on: one) whatever the Z buffer (the games' depth maths was made for that precision, NFS3+
+    // asks for 32 bits), and a slope-scaled one pixel's depth change: the polygons'
+    // mismatch grows with the depth gradient (a road at a grazing angle).
     {
-        float slack = 0.0f;
-        if (g_config.overlayBias && zEnabled && (!p.zWrite || p.alphaBlend)) {
-            const bool z16 = p.z && p.z->buf->fmt.bpp == 16;
-            slack = z16 ? 1.0f / 65535.0f : 16.0f / 16777216.0f;
-        }
-        const float bias = p.gameBias - slack;
+        const bool overlay = g_config.overlayBias > 0 && zEnabled && (!p.zWrite || p.alphaBlend);
+        const float bias = p.gameBias - (overlay ? float(g_config.overlayBias) / 65535.0f : 0.0f);
+        const float slope = overlay ? -1.0f : 0.0f;  // D3DRS_SLOPESCALEDEPTHBIAS: a pixel's depth change
         if (bias != p.biasSet) {
             DWORD b;
             memcpy(&b, &bias, 4);
             p.dev->SetRenderState(D3DRENDERSTATETYPE(195), b);
             p.biasSet = bias;
+        }
+        if (slope != p.slopeSet) {
+            DWORD b;
+            memcpy(&b, &slope, 4);
+            p.dev->SetRenderState(D3DRENDERSTATETYPE(175), b);
+            p.slopeSet = slope;
         }
     }
     const bool shift = g_config.pixelCenter;

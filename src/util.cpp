@@ -151,6 +151,13 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (end && (end == v.c_str() || *end)) ok = false;
         else if (x < 0 || x > 1000) ok = false;
         else g_config.fpsLimit = int(x);
+    } else if (key == "overlaybias") {
+        int b;
+        char* end = nullptr;
+        const long x = ParseBool(v, &b) ? b : strtol(v.c_str(), &end, 10);
+        if (end && (end == v.c_str() || *end)) ok = false;
+        else if (x < 0 || x > 4096) ok = false;
+        else g_config.overlayBias = int(x);
     } else if (key == "wbuffer") {
         int b;
         if (v == "force") g_config.wbuffer = 2;
@@ -175,11 +182,9 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (end && (end == v.c_str() || *end)) ok = false;
         else if (x < 0 || x > 16) ok = false;
         else g_config.anisotropy = int(x);
-    } else if (key == "mipmaps" || key == "alternatepixelcenter" || key == "render32" || key == "depth24" ||
-               key == "overlaybias") {
+    } else if (key == "mipmaps" || key == "alternatepixelcenter" || key == "render32" || key == "depth24") {
         int b;
         bool* field = key == "mipmaps" ? &g_config.mipmaps : key == "render32" ? &g_config.render32
-                      : key == "overlaybias" ? &g_config.overlayBias
                       : key == "depth24" ? &g_config.depth24 : &g_config.pixelCenter;
         if (ParseBool(v, &b)) *field = b != 0;
         else ok = false;
@@ -322,11 +327,11 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
-    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s wbuffer=%s overlaybias=%s", g_config.fpsLimit, g_config.ramMB,
+    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d texfilter=%s wbuffer=%s overlaybias=%d", g_config.fpsLimit, g_config.ramMB,
         g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
         g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa,
         g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off",
-        g_config.overlayBias ? "on" : "off");
+        g_config.overlayBias);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }

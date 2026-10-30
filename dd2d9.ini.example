@@ -94,7 +94,10 @@ antialiasing=0
 ; Overlays (light maps, decals: passes that don't write depth or that blend) pulled forward
 ; one step of the depth precision the game asked for. They differ from the surface under
 ; them only by rounding, which the 16-bit depth buffers of the era rounded the same way;
-; deeper ones show it as hatched z-fighting (NFS III's headlights on the road). on / off
+; deeper ones show it as hatched z-fighting (NFS III's headlights on the road), plus more
+; where the surface is seen at a grazing angle. on (one 16-bit step), off, or a number of
+; steps for games that still flicker (try 2, 4, 8: the larger, the more an overlay can show
+; through things just in front of it)
 overlaybias=on
 
 ; W buffering, which most cards of the era had and today's don't:

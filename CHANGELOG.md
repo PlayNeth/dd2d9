@@ -3,6 +3,13 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.12
+- `overlaybias`: one 16-bit depth step whatever the game's Z buffer (NFS3+ asks for a 32-bit
+  one, which got 16 steps of a 24-bit one: too little), plus a slope-scaled bias of one
+  pixel's depth change (the mismatch grows with the depth gradient: roads at a grazing
+  angle). `overlaybias=N` gives N steps, for games whose overlays need more.
+- `filter=sharp`'s rewritten shader is taken by Windows' Direct3D 9 (Intel UHD 620).
+
 ## 0.9.11
 - **No more hatched z-fighting of light maps and decals** (`overlaybias=on`, default): a
   pass laid on a surface already drawn (it doesn't write depth, or it blends) is pulled
