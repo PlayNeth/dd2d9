@@ -310,8 +310,8 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     if (buf->fmt.fourcc) return DDERR_UNSUPPORTED;
     // What Direct3D drew into either surface is read back first.
     if (src && src != this) src->CpuAccess(false);
-    CpuAccess(true);
     const RECT bounds = {0, 0, buf->w, buf->h};
+    CpuAccess(true, dstRect ? dstRect : &bounds);  // (the rectangle before clipping: at most that)
     RECT d = dstRect ? *dstRect : bounds;
     if (d.right <= d.left || d.bottom <= d.top) return DDERR_INVALIDRECT;
 

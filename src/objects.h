@@ -55,6 +55,15 @@ struct Buffer {
     // behind. g_lock (and the Gpu lock for gpu).
     GpuSurf* gpu = nullptr;
     bool gpuStale = true;   // the CPU copy changed since the render target's GPU copy was made
+    // Where (gpuStale): the union of what the CPU wrote since; kAllRect: all of it.
+    static constexpr RECT kAllRect = {0, 0, 0x7FFFFFFF, 0x7FFFFFFF};
+    RECT gpuDirty = kAllRect;
+    void MarkGpuStale(const RECT* area) {
+        const RECT a = area ? *area : kAllRect;
+        if (!gpuStale) gpuDirty = a;
+        else UnionRect(&gpuDirty, &gpuDirty, &a);
+        gpuStale = true;
+    }
     // Changes to the CPU copy (a texture's GPU copy is current while equal). Drawn from one
     // counter for every buffer: a buffer made where a freed one was can't match its value.
     unsigned cpuSerial = NextCpuSerial();
@@ -300,7 +309,7 @@ public:
     GpuTex* gpuTex = nullptr;    // Direct3D's GPU copy of this texture and its mip levels (gpures.h)
     void* d3dLegacy = nullptr;   // Direct3D 3-6's textures and device made through QueryInterface (d3d6int.h)
     // The CPU copy is about to be read (written): Direct3D's drawing read back first.
-    void CpuAccess(bool write);
+    void CpuAccess(bool write, const RECT* area = nullptr);  // area: what a write covers (null: all)
 
 private:
     struct PrivateData {
@@ -373,6 +382,8 @@ private:
 
     bool usingGpu_ = false;            // presenting through the shared device (an owner of it)
     IDirect3DSurface9* staging_ = nullptr;
+    std::vector<uint32_t> frame_;  // the CPU frame converted outside the Gpu lock (X8R8G8B8, frameW_ wide)
+    UINT frameW_ = 0, frameH_ = 0;
     // filter=sharp: the frame copied into a texture, drawn through a sharp-bilinear shader.
     IDirect3DTexture9* sharpTex_ = nullptr;
     IDirect3DPixelShader9* sharpPs_ = nullptr;

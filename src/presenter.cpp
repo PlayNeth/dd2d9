@@ -4,6 +4,7 @@
 #include "gpures.h"
 
 #include <d3d9.h>
+#include "devstate.h"
 
 #include <cmath>
 
@@ -199,20 +200,9 @@ bool Presenter::EnsureStaging(IDirect3DDevice9* d, UINT w, UINT h) {
 //   oC0 = (r4.x, r5.y, r6.z, 1)
 static const DWORD kGammaPs[] = {0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000, 0xa00f0800, 0x0200001f, 0x90000000, 0xa00f0801, 0x05000051, 0xa00f0000, 0x3f7f0000, 0x3b000000, 0x3f000000, 0x3f800000, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001, 0x800f0001, 0xa0aa0000, 0x02000001, 0x800f0002, 0xa0aa0000, 0x02000001, 0x800f0003, 0xa0aa0000, 0x04000004, 0x80010001, 0x80000000, 0xa0000000, 0xa0550000, 0x04000004, 0x80010002, 0x80550000, 0xa0000000, 0xa0550000, 0x04000004, 0x80010003, 0x80aa0000, 0xa0000000, 0xa0550000, 0x03000042, 0x800f0004, 0x80e40001, 0xa0e40801, 0x03000042, 0x800f0005, 0x80e40002, 0xa0e40801, 0x03000042, 0x800f0006, 0x80e40003, 0xa0e40801, 0x02000001, 0x800f0007, 0xa0ff0000, 0x02000001, 0x80010007, 0x80000004, 0x02000001, 0x80020007, 0x80550005, 0x02000001, 0x80040007, 0x80aa0006, 0x02000001, 0x800f0800, 0x80e40007, 0x0000ffff};
 
-// After drawing into one of the presenter's surfaces: the device's own back buffer as its
-// render target again, so the device holds no reference to a surface of ours or of a swap
-// chain that may be released (or keep a Reset from succeeding).
-static void RestoreTarget(IDirect3DDevice9* d) {
-    IDirect3DSurface9* own = nullptr;
-    if (SUCCEEDED(d->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &own))) {
-        d->SetRenderTarget(0, own);
-        own->Release();
-    }
-}
-
 // The frame (src's rectangle r) with the gamma ramp applied, or null (shown without it).
-// Gpu lock held, outside a scene. The device's state is a GpuContext's: afterwards the next
-// one sends all of its own again.
+// Gpu lock held, outside a scene. The device's state is a GpuContext's: what this changes
+// is put back after (SavedDeviceState).
 IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r) {
     if (gammaFailed_) return nullptr;
     const UINT w = UINT(r.right - r.left), h = UINT(r.bottom - r.top);
@@ -258,6 +248,8 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     if (FAILED(gammaSrc_->GetSurfaceLevel(0, &level))) return nullptr;
     d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT);
     level->Release();
+    // The device's state as the game's Direct3D context left it: put back at the return.
+    const SavedDeviceState saved(d);
     d->SetRenderTarget(0, gammaOut_);
     d->SetDepthStencilSurface(nullptr);
     const D3DVIEWPORT9 vp = {0, 0, w, h, 0.0f, 1.0f};
@@ -295,8 +287,6 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     d->SetPixelShader(nullptr);
     d->SetTexture(0, nullptr);
     d->SetTexture(1, nullptr);
-    RestoreTarget(d);
-    gpu.stateOwner = nullptr;  // the next Direct3D context sends all its state again
     return gammaOut_;
 }
 
@@ -393,6 +383,7 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
     if (FAILED(sharpTex_->GetSurfaceLevel(0, &level))) return false;
     d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT);
     level->Release();
+    const SavedDeviceState saved(d);  // put back at the return
     d->SetRenderTarget(0, bb);
     d->SetDepthStencilSurface(nullptr);
     D3DSURFACE_DESC bd;
@@ -433,8 +424,6 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
     gpu.CloseScene();
     d->SetPixelShader(nullptr);
     d->SetTexture(0, nullptr);
-    RestoreTarget(d);
-    gpu.stateOwner = nullptr;  // the next Direct3D context sends all its state again
     return true;
 }
 
@@ -697,6 +686,22 @@ void Presenter::Loop() {
             lockTime = Seconds() - t0;
         }
         if (!primaryExists) continue;
+        // The CPU frame converted here, before the shared device is taken: the game's
+        // Direct3D calls wait for that lock, and conversion is the slow part (the lock then
+        // covers a row copy into the staging surface only). frame_ holds the last converted
+        // frame, as staging_ does: a new size converts it whole.
+        double convertTime = 0;
+        if (frameW_ != sw || frameH_ != sh) {
+            frame_.assign(size_t(sw) * sh, 0);
+            frameW_ = sw;
+            frameH_ = sh;
+            if (snap.buf) area = src;  // (the reference to the pixels is held: all of them)
+        }
+        if (snap.buf && !gpuFrame) {
+            const double t0 = Seconds();
+            Convert(snap, area, frame_.data() + size_t(area.top - src.top) * sw + (area.left - src.left), int(sw * 4));
+            convertTime = Seconds() - t0;
+        }
         // The shared device again (taken after g_lock, never the other way round: the game's
         // Direct3D calls hold g_lock and then take it). It may have been lost meanwhile,
         // taking the staging surface with it.
@@ -712,7 +717,6 @@ void Presenter::Loop() {
             active_ = false;
             continue;
         }
-        double convertTime = 0;
         // The frame's source: the render target as it is, or the staging surface the CPU copy
         // is converted into (also when the render target went meanwhile: read back then).
         IDirect3DSurface9* source = staging_;
@@ -738,14 +742,21 @@ void Presenter::Loop() {
             }
         }
         if (snap.buf) {
+            // (A GPU frame whose render target went meanwhile: converted only now.)
+            if (gpuFrame) {
+                const double t0 = Seconds();
+                Convert(snap, area, frame_.data() + size_t(area.top - src.top) * sw + (area.left - src.left), int(sw * 4));
+                convertTime = Seconds() - t0;
+            }
             RECT dst = {area.left - src.left, area.top - src.top, area.right - src.left, area.bottom - src.top};
             D3DLOCKED_RECT lr;
-            if (SUCCEEDED(staging_->LockRect(&lr, &dst, 0))) {
-                const double t0 = Seconds();  // the lock itself may wait for the GPU: not counted
-                Convert(snap, area, lr.pBits, lr.Pitch);
-                convertTime = Seconds() - t0;
+            if (!IsRectEmpty(&dst) && SUCCEEDED(staging_->LockRect(&lr, &dst, 0))) {
+                const size_t rowBytes = size_t(dst.right - dst.left) * 4;
+                for (LONG y = dst.top; y < dst.bottom; y++)
+                    memcpy(static_cast<uint8_t*>(lr.pBits) + size_t(y - dst.top) * lr.Pitch,
+                           frame_.data() + size_t(y) * sw + dst.left, rowBytes);
                 staging_->UnlockRect();
-            } else {
+            } else if (!IsRectEmpty(&dst)) {
                 stagingStale_ = true;  // convert everything next time
             }
             snap.buf->Release();

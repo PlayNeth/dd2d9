@@ -27,7 +27,8 @@ struct GpuTex;
 
 // The CPU copy is about to be read (and written, with `write`): read the GPU copy back if
 // it is newer. Surfaces without a GPU copy cost nothing. g_lock held; takes the Gpu lock.
-void GpuCpuAccess(Surface* s, bool write);
+// area: the part a write covers (null: all), uploaded alone later.
+void GpuCpuAccess(Surface* s, bool write, const RECT* area = nullptr);
 // A Blt DDBLT_DEPTHFILL into a Z buffer with a GPU copy: done there (true), or not (false).
 bool GpuDepthFill(Surface* s, const RECT& r, DWORD value);
 // The buffer's render target when its GPU copy is the newest (Direct3D drew there since

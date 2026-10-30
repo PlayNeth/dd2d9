@@ -8,6 +8,7 @@
 #include "objects.h"
 
 #include <d3d9.h>
+#include "devstate.h"
 
 #include <algorithm>
 #include <climits>
@@ -177,7 +178,8 @@ struct GpuSurf final : Gpu::Owner {
     IDirect3DSurface9* ms = nullptr;
     IDirect3DTexture9* msCopy = nullptr;
     bool msNewer = false;  // `ms` has drawing `surf` lacks
-    bool msStale = false;  // `surf` has the CPU's changes `ms` lacks
+    bool msStale = false;  // `surf` has the CPU's changes `ms` lacks, in msDirty
+    RECT msDirty = {};
     IDirect3DSurface9* sysmem = nullptr;   // read-back staging
     IDirect3DSurface9* upload = nullptr;   // upload staging (D3DPOOL_DEFAULT, lockable)
     // A DDBLT_DEPTHFILL waiting for the Z buffer's next use (it can't be written directly).
@@ -222,6 +224,7 @@ struct GpuSurf final : Gpu::Owner {
         Drop();
         buf->cpuStale = false;
         buf->gpuStale = true;
+        buf->gpuDirty = Buffer::kAllRect;
     }
     void GpuReleased() override {
         ReleaseGpuResources();
@@ -311,11 +314,17 @@ static GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth)
 }
 
 // antialiasing: the CPU's changes (in `surf`) into the multisampled surface, drawn as a
-// quad from a texture copy of `surf` (StretchRect can't write a multisampled surface). The
-// device's state is kept around it (a state block): it happens in the middle of the game's
-// drawing. Gpu lock held.
+// quad from a texture copy of `surf` (StretchRect can't write a multisampled surface), over
+// the part changed (msDirty) only. The device state it sets is put back after
+// (SavedDeviceState): it happens in the middle of the game's drawing. Gpu lock held.
 static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     const Buffer* b = g->buf;
+    const RECT bounds = {0, 0, b->w, b->h};
+    RECT rc;
+    if (!IntersectRect(&rc, &g->msDirty, &bounds)) {
+        g->msStale = false;
+        return;
+    }
     if (!g->msCopy && FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &g->msCopy, nullptr))) {
         g->msCopy = nullptr;
         return;
@@ -323,11 +332,10 @@ static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     IDirect3DSurface9* level = nullptr;
     if (FAILED(g->msCopy->GetSurfaceLevel(0, &level))) return;
     gpu.CloseScene();
-    const HRESULT hr = d->StretchRect(g->surf, nullptr, level, nullptr, D3DTEXF_NONE);
+    const HRESULT hr = d->StretchRect(g->surf, &rc, level, &rc, D3DTEXF_NONE);
     level->Release();
     if (FAILED(hr)) return;
-    IDirect3DStateBlock9* sb = nullptr;
-    if (FAILED(d->CreateStateBlock(D3DSBT_ALL, &sb))) return;
+    const SavedDeviceState saved(d);  // the game's context state, put back at the return
     d->SetRenderTarget(0, g->ms);
     d->SetDepthStencilSurface(nullptr);
     const D3DVIEWPORT9 vp = {0, 0, DWORD(b->w), DWORD(b->h), 0.0f, 1.0f};
@@ -336,7 +344,7 @@ static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     d->SetVertexShader(nullptr);
     d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
     d->SetTexture(0, g->msCopy);
-    for (DWORD i = 1; i < 8; i++) d->SetTexture(i, nullptr);
+    d->SetTexture(1, nullptr);
     const DWORD tss[][2] = {{D3DTSS_COLOROP, D3DTOP_SELECTARG1}, {D3DTSS_COLORARG1, D3DTA_TEXTURE},
                             {D3DTSS_ALPHAOP, D3DTOP_SELECTARG1}, {D3DTSS_ALPHAARG1, D3DTA_TEXTURE},
                             {D3DTSS_TEXCOORDINDEX, 0}, {D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE}};
@@ -354,13 +362,13 @@ static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
                            {D3DRS_CLIPPLANEENABLE, 0}, {D3DRS_SPECULARENABLE, FALSE}, {D3DRS_WRAP0, 0},
                            {D3DRS_TEXTUREFACTOR, 0xFFFFFFFF}};
     for (const auto& t : rs) d->SetRenderState(D3DRENDERSTATETYPE(t[0]), t[1]);
-    const float w = float(b->w), h = float(b->h);
-    const float q[4][6] = {{-0.5f, -0.5f, 0, 1, 0, 0}, {w - 0.5f, -0.5f, 0, 1, 1, 0},
-                           {-0.5f, h - 0.5f, 0, 1, 0, 1}, {w - 0.5f, h - 0.5f, 0, 1, 1, 1}};
+    // The dirty rectangle only, texel for pixel (pixel centres on texel centres).
+    const float iw = 1.0f / float(b->w), ih = 1.0f / float(b->h);
+    const float x0 = float(rc.left) - 0.5f, y0 = float(rc.top) - 0.5f, x1 = float(rc.right) - 0.5f, y1 = float(rc.bottom) - 0.5f;
+    const float u0 = rc.left * iw, v0 = rc.top * ih, u1 = rc.right * iw, v1 = rc.bottom * ih;
+    const float q[4][6] = {{x0, y0, 0, 1, u0, v0}, {x1, y0, 0, 1, u1, v0}, {x0, y1, 0, 1, u0, v1}, {x1, y1, 0, 1, u1, v1}};
     gpu.OpenScene();
     if (SUCCEEDED(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0])))) g->msStale = false;  // (else tried again)
-    sb->Apply();
-    sb->Release();
 }
 
 // antialiasing: what Direct3D drew, into the resolved image (before it is read).
@@ -371,11 +379,17 @@ static void Resolve(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     g->msNewer = false;
 }
 
-// The CPU copy into a render target.
-// gpuStale stays set until the copy is made (tried again at the next use).
+// The CPU copy into a render target: the part written since (Buffer::gpuDirty). gpuStale
+// stays set until the copy is made (tried again at the next use).
 static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     Buffer* b = g->buf;
     if (g->depth) {  // can't be written: only DDBLT_DEPTHFILL reaches it (GpuSurf::fills)
+        b->gpuStale = false;
+        return;
+    }
+    const RECT bounds = {0, 0, b->w, b->h};
+    RECT rc;
+    if (!IntersectRect(&rc, &b->gpuDirty, &bounds)) {
         b->gpuStale = false;
         return;
     }
@@ -385,14 +399,24 @@ static void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
         return;
     }
     D3DLOCKED_RECT lr;
-    if (FAILED(g->upload->LockRect(&lr, nullptr, 0))) return;
+    if (FAILED(g->upload->LockRect(&lr, &rc, 0))) return;
     const RowConverter conv(b->fmt, g->pal ? g->pal->pal : nullptr);
-    for (int y = 0; y < b->h; y++) RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert ? &conv : nullptr);
+    const DWORD bytes = b->fmt.Bytes(), width = DWORD(rc.right - rc.left);
+    for (LONG y = rc.top; y < rc.bottom; y++) {
+        const uint8_t* from = b->Row(y) + size_t(rc.left) * bytes;
+        uint8_t* to = static_cast<uint8_t*>(lr.pBits) + size_t(y - rc.top) * lr.Pitch;
+        if (g->convert) conv.Run(from, reinterpret_cast<uint32_t*>(to), int(width));
+        else memcpy(to, from, size_t(width) * bytes);
+    }
     g->upload->UnlockRect();
     gpu.CloseScene();
-    if (FAILED(d->StretchRect(g->upload, nullptr, g->surf, nullptr, D3DTEXF_NONE))) return;
+    if (FAILED(d->StretchRect(g->upload, &rc, g->surf, &rc, D3DTEXF_NONE))) return;
     b->gpuStale = false;
-    if (g->ms) g->msStale = true;  // copied on into the multisampled one when drawn into
+    if (g->ms) {  // copied on into the multisampled one when drawn into
+        if (!g->msStale) g->msDirty = rc;
+        else UnionRect(&g->msDirty, &g->msDirty, &rc);
+        g->msStale = true;
+    }
 }
 
 // A render target back into the CPU copy.
@@ -417,7 +441,7 @@ static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     b->cpuSerial = NextCpuSerial();  // the CPU copy changed: a texture made from it is behind
 }
 
-void GpuCpuAccess(Surface* s, bool write) {
+void GpuCpuAccess(Surface* s, bool write, const RECT* area) {
     Buffer* b = s->buf;
     GpuSurf* g = b->gpu;
     if (g && g->gpu && b->cpuStale) {
@@ -427,7 +451,7 @@ void GpuCpuAccess(Surface* s, bool write) {
         if (IDirect3DDevice9* d = gpu.Ensure(); d && g->surf) ReadBack(gpu, d, g);
         b->cpuStale = false;
     }
-    if (write) b->gpuStale = true;
+    if (write) b->MarkGpuStale(area);
 }
 
 IDirect3DSurface9* GpuNewestSurface(Buffer* b) {

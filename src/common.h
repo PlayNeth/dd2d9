@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "0.9.17"
+#define DD2D9_VERSION "0.9.18"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -197,10 +197,12 @@ void InstallCompatHooks(bool inLoaderLock);
 // covering most of the primary). Called without g_lock.
 void LimitFrame();
 // The game's view of a point on the real screen and back; false when 1:1.
-bool MouseToGame(POINT* p);
+bool MouseToGame(POINT* p, bool wait = true);
 bool MouseFromGame(POINT* p);
 // Where the game's display mode is on the real screen, and the window showing it; false
 // when 1:1 (or mapping is off).
-bool GameImage(RECT* image, SIZE* mode, HWND* window = nullptr);
+bool GameImage(RECT* image, SIZE* mode, HWND* window = nullptr, bool wait = true);
+// Something GameImage's result depends on changed (display state, the game window's place).
+void GameImageChanged();
 
 }  // namespace dd2d9

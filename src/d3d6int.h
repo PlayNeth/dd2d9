@@ -687,9 +687,12 @@ Device* DevFrom(IDirect3DDevice3* p);
 // ---- the pipeline (d3d6pipe.cpp)
 // Transforms (and lights, fogs) untransformed vertices of a Direct3D 6 FVF into PVerts
 // with the device's current transforms and viewport mapping. clip: compute clip codes
-// (and merge them into the clip status); light: as B §2.3 decided.
+// (and merge them into the clip status); light: as B §2.3 decided. Only vertices lo..hi
+// (an indexed draw's) are lit, fogged and given colours and texture coordinates: the others
+// get their position and clip code only (for the clip status and extents, as XP's
+// transform of all of them made them), or nothing where neither is kept.
 void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
-                    bool extents, PVert* out);
+                    bool extents, PVert* out, DWORD lo = 0, DWORD hi = 0xFFFFFFFF);
 // Lights one vertex position/normal (model space) into diffuse/specular (C §2.2).
 void SetupLights(Device* d);
 // Draws PVerts (indexed or not): screen coordinates as they are where clip is false or every

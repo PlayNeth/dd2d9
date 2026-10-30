@@ -66,26 +66,38 @@ void Project(const VpMap& m, PVert* p) {
 
 thread_local std::vector<PVert> t_pverts;
 thread_local std::vector<uint8_t> t_out;
+thread_local std::vector<WORD> t_idx;
+thread_local std::vector<LightC> t_lights;
 
 }  // namespace
 
 // ---------------------------------------------------------------- transform and light
 
 void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
-                    bool extents, PVert* out) {
+                    bool extents, PVert* out, DWORD lo, DWORD hi) {
     const Layout in(fvf & 0xFFFF);
     const D3DMATRIX wv = Mul(d->world, d->view);
     const D3DMATRIX M = Mul(Mul(wv, d->proj), d->map.mclip);
-    std::vector<LightC> lights;
+    std::vector<LightC>& lights = t_lights;  // (storage kept between draws)
+    lights.clear();
     if (light) ActiveLights(d, &lights);
+    const LightC* const lightsEnd = lights.data() + lights.size();
     const D3DMATERIAL& mat = d->curMat;
     const Color amb = FromArgb(d->ls.ambient);
     const bool spec = d->rs[29] == TRUE && mat.dvPower > 0.001f;
     const bool fog = d->rs[28] == TRUE && d->ls.fogMode != D3DFOG_NONE;
     const float fs = F(d->ls.fogStart), fe = F(d->ls.fogEnd), fd = F(d->ls.fogDensity);
     const Vec3 origin = {wv._41, wv._42, wv._43};
+    const VpMap map = d->map;
+    float ext[4] = {d->ext[0], d->ext[1], d->ext[2], d->ext[3]};
     DWORD orCodes = 0, andCodes = 0xFFFF;
     for (DWORD i = 0; i < n; i++) {
+        const bool used = i >= lo && i <= hi;
+        if (!used && !clip && !extents) {  // nothing kept from it
+            if (i < lo) i = lo - 1;  // on to lo
+            else break;               // (past hi: none left)
+            continue;
+        }
         const uint8_t* v = src + size_t(i) * stride;
         PVert& o = out[i];
         const float* p = reinterpret_cast<const float*>(v);
@@ -107,12 +119,12 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
         }
         o.code = code;
         if (!code) {
-            Project(d->map, &o);
+            Project(map, &o);
             if (extents) {
-                d->ext[0] = std::min(d->ext[0], o.sx);
-                d->ext[1] = std::min(d->ext[1], o.sy);
-                d->ext[2] = std::max(d->ext[2], o.sx);
-                d->ext[3] = std::max(d->ext[3], o.sy);
+                ext[0] = std::min(ext[0], o.sx);
+                ext[1] = std::min(ext[1], o.sy);
+                ext[2] = std::max(ext[2], o.sx);
+                ext[3] = std::max(ext[3], o.sy);
             }
         } else {  // XP's TL buffer: an outside vertex keeps its clip coordinates there
             o.sx = o.cx;
@@ -120,6 +132,7 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
             o.sz = o.cz;
             o.rhw = o.cw;
         }
+        if (!used) continue;  // drawn by no index: its position (and code) only
         const DWORD vd = in.diffuse >= 0 ? *reinterpret_cast<const DWORD*>(v + in.diffuse) : 0xFFFFFFFF;
         const DWORD vs = in.specular >= 0 ? *reinterpret_cast<const DWORD*>(v + in.specular) : 0;
         DWORD diffuse = vd, specular = vs;
@@ -135,15 +148,19 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
             const Vec3 n0 = {nn[0], nn[1], nn[2]};
             // Lit in model space on XP: the normal keeps its length through world and view.
             const Vec3 N = [&] {
-                const Vec3 t = Norm(XformDir(n0, wv));
-                const float len = sqrtf(Dot(n0, n0));
-                return Vec3{t.x * len, t.y * len, t.z * len};
+                const Vec3 t = XformDir(n0, wv);
+                const float tt = Dot(t, t);
+                if (!(tt > 0)) return t;
+                const float k = sqrtf(Dot(n0, n0) / tt);  // |n0| / |t|: one root
+                return Vec3{t.x * k, t.y * k, t.z * k};
             }();
             float dr = mat.emissive.r + amb.r * mat.ambient.r, dg = mat.emissive.g + amb.g * mat.ambient.g,
                   db = mat.emissive.b + amb.b * mat.ambient.b;
             float sr = 0, sg = 0, sb = 0;
-            const Vec3 V = Norm({-P.x, -P.y, -P.z});
-            for (const LightC& l : lights) {
+            Vec3 V = {0, 0, 0};  // toward the eye: for specular only
+            if (spec) V = Norm({-P.x, -P.y, -P.z});
+            for (const LightC* lp = lights.data(); lp != lightsEnd; lp++) {
+                const LightC& l = *lp;
                 Vec3 L;
                 float f = 1.0f;
                 if (l.type == D3DLIGHT_DIRECTIONAL) {
@@ -211,6 +228,7 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
         o.specular = specular;
         for (DWORD t = 0; t < in.texCount; t++) memcpy(o.tex[t], v + in.tex[t], 8);
     }
+    if (extents) memcpy(d->ext, ext, sizeof(ext));
     if (clip && n) d->status = (d->status | (orCodes & 0xFFF)) & ((DWORD(andCodes) << 12) | 0xFF000FFF);
 }
 
@@ -266,21 +284,24 @@ PVert Lerp(const PVert& a, const PVert& b, float t, DWORD ntex) {
 }
 
 // Sutherland-Hodgman against the planes in `mask`; the first vertex stays first when inside.
-void ClipPoly(std::vector<PVert>* poly, WORD mask, DWORD ntex) {
-    std::vector<PVert> next;
-    for (int plane = 0; plane < 6 && poly->size() >= 2; plane++) {
+// A triangle gains at most one vertex per plane: 9 at most (kMaxPoly).
+constexpr int kMaxPoly = 12;
+int ClipPoly(PVert (&poly)[kMaxPoly], int n, WORD mask, DWORD ntex) {
+    PVert next[kMaxPoly];
+    for (int plane = 0; plane < 6 && n >= 2; plane++) {
         if (!(mask & (1 << plane))) continue;
-        next.clear();
-        const size_t n = poly->size();
-        for (size_t i = 0; i < n; i++) {
-            const PVert& a = (*poly)[i];
-            const PVert& b = (*poly)[(i + 1) % n];
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            const PVert& a = poly[i];
+            const PVert& b = poly[i + 1 < n ? i + 1 : 0];
             const float da = PlaneDist(a, plane), db = PlaneDist(b, plane);
-            if (da >= 0) next.push_back(a);
-            if ((da >= 0) != (db >= 0)) next.push_back(Lerp(a, b, da / (da - db), ntex));
+            if (da >= 0 && m < kMaxPoly) next[m++] = a;
+            if ((da >= 0) != (db >= 0) && m < kMaxPoly) next[m++] = Lerp(a, b, da / (da - db), ntex);
         }
-        poly->swap(next);
+        for (int k = 0; k < m; k++) poly[k] = next[k];
+        n = m;
     }
+    return n;
 }
 
 // Output vertices: XYZRHW, diffuse, specular, ntex pairs of texture coordinates.
@@ -289,10 +310,13 @@ struct Emitter {
     UINT stride;
     std::vector<uint8_t>& buf;
     DWORD count = 0;
-    Emitter(DWORD nt, std::vector<uint8_t>& b) : ntex(nt), stride(24 + 8 * nt), buf(b) { buf.clear(); }
+    // expect: the vertices likely added (more grows the buffer).
+    Emitter(DWORD nt, std::vector<uint8_t>& b, size_t expect) : ntex(nt), stride(24 + 8 * nt), buf(b) {
+        if (buf.size() < expect * stride) buf.resize(expect * stride);
+    }
     void Add(const PVert& p) {
-        const size_t o = buf.size();
-        buf.resize(o + stride);
+        const size_t o = size_t(count) * stride;
+        if (o + stride > buf.size()) buf.resize(std::max(buf.size() * 2, o + stride));
         float* f = reinterpret_cast<float*>(buf.data() + o);
         f[0] = p.sx;
         f[1] = p.sy;
@@ -333,8 +357,9 @@ void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WO
         }
         if (andGb) return;  // all outside one plane
     }
-    Emitter e(ntex, t_out);
-    std::vector<WORD> outIdx;
+    Emitter e(ntex, t_out, hi - lo + 1);
+    std::vector<WORD>& outIdx = t_idx;
+    outIdx.clear();
     D3DPRIMITIVETYPE outType = t;
     UINT prims;
     if (!clip || !orGb) {
@@ -388,7 +413,7 @@ void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WO
             prims = e.count / 2;
         } else {
             outType = D3DPT_TRIANGLELIST;
-            std::vector<PVert> poly;
+            PVert poly[kMaxPoly];
             const DWORD tris = PrimCount(t, count);
             for (DWORD k = 0; k < tris; k++) {
                 DWORD i0, i1, i2;
@@ -411,9 +436,9 @@ void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WO
                     addProjected(c);
                     continue;
                 }
-                poly.assign({a, b, c});
-                ClipPoly(&poly, ca | cb | cc, ntex);
-                for (size_t j = 1; j + 1 < poly.size(); j++) {
+                poly[0] = a, poly[1] = b, poly[2] = c;
+                const int pn = ClipPoly(poly, 3, ca | cb | cc, ntex);
+                for (int j = 1; j + 1 < pn; j++) {
                     addProjected(poly[0]);
                     addProjected(poly[j]);
                     addProjected(poly[j + 1]);
@@ -507,8 +532,14 @@ HRESULT Device::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT
     }
     const bool light = (fvf & D3DFVF_NORMAL) && !(flags & D3DDP_DONOTLIGHT) && FindMatHandle(ls.material);
     const bool clip = !(flags & D3DDP_DONOTCLIP);
-    t_pverts.resize(n);
-    TransformVerts(this, v, stride, fvf, n, clip, light, !(flags & D3DDP_DONOTUPDATEEXTENTS), t_pverts.data());
+    DWORD lo = 0, hi = n - 1;  // the vertices the indices use: the only ones lit
+    if (idx) {
+        lo = 0xFFFF, hi = 0;
+        for (DWORD i = 0; i < ni; i++) lo = std::min<DWORD>(lo, idx[i]), hi = std::max<DWORD>(hi, idx[i]);
+        if (hi >= n) lo = 1, hi = 0;  // past the vertices: none lit (DrawPVerts draws nothing)
+    }
+    if (t_pverts.size() < n) t_pverts.resize(n);
+    TransformVerts(this, v, stride, fvf, n, clip, light, !(flags & D3DDP_DONOTUPDATEEXTENTS), t_pverts.data(), lo, hi);
     DrawPVerts(this, t, t_pverts.data(), n, idx, ni, clip, std::min<DWORD>((fvf >> 8) & 0xF, 8));
     return D3D_OK;
 }

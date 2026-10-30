@@ -3,6 +3,31 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 0.9.18 (optimizations)
+No behaviour changes intended; each one checked with the full test set.
+- **Presenter: the frame is converted before taking the GPU lock**, which now covers only
+  copying the converted rows into the upload surface (the game's Direct3D draws on the
+  same device no longer wait for the conversion).
+- **Presenter's gamma and sharp-bilinear passes put back only the device state they
+  change** (`SavedDeviceState`, src/devstate.h) instead of the game's Direct3D context
+  sending all of its state again (some 450 calls) after every present.
+- **antialiasing: CPU changes reach the GPU by dirty rectangle.** A lock or blit marks the
+  rectangle it covers (`Buffer::gpuDirty`); only that part is uploaded and drawn into the
+  multisampled surface, which also uses `SavedDeviceState` instead of a D3D9 state block.
+  A HUD blit no longer copies the whole frame twice.
+- **Direct3D 3-6 indexed draws light only the vertices the indices use.** The others get
+  their position and clip code only (the clip status and extents stay as XP's transform
+  of all of them made them), or are skipped where neither is kept.
+- **Direct3D 3-6 pipeline:** clipping uses fixed arrays instead of vectors per triangle;
+  the output vertex buffer grows geometrically instead of once per vertex; index and light
+  lists reuse their storage; the eye vector is computed only for specular; the normal's
+  length takes one square root instead of two; extents accumulate in locals.
+- **Mouse: the game's image on the screen is a snapshot** (`GameImage`), so cursor
+  functions and mouse messages neither wait for the DirectDraw lock nor ask Windows for
+  the window's geometry each call. It's made again after a display-state change or a
+  move of the game's window (and every 250 ms in case one went unseen); the window
+  procedure never waits for it.
+
 ## 0.9.17 (review of 0.9.0-0.9.16)
 Fixes from a line-by-line review (four reviewers, each finding checked against the code):
 - **Direct3D 7: vertex buffers processed with `D3DVOP_CLIP` are drawn clipped.**

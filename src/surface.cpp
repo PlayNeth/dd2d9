@@ -1126,7 +1126,7 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
         }
     }
     GdiFlush();
-    CpuAccess(!(flags & DDLOCK_READONLY));  // what Direct3D drew is read back first
+    CpuAccess(!(flags & DDLOCK_READONLY), &area);  // what Direct3D drew is read back first
     uint8_t* p = buf->bits + area.top * buf->pitch + area.left * LONG(buf->fmt.Bytes());
     if (fast) {
     } else if (r) {
@@ -1285,9 +1285,9 @@ void Surface::FillRect(const RECT& r, DWORD value) {
     MarkDirtyIfVisible(&c);
 }
 
-void Surface::CpuAccess(bool write) {
-    if (buf->gpu) GpuCpuAccess(this, write);  // reads back what Direct3D drew, if newer
-    else if (write) buf->gpuStale = true;
+void Surface::CpuAccess(bool write, const RECT* area) {
+    if (buf->gpu) GpuCpuAccess(this, write, area);  // reads back what Direct3D drew, if newer
+    else if (write) buf->MarkGpuStale(area);
     if (write) buf->cpuSerial = NextCpuSerial();              // a texture's GPU copy is made from its levels' buffers
 }
 

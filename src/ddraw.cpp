@@ -8,6 +8,7 @@
 #include <mmsystem.h>
 #include <windowsx.h>
 
+#include <atomic>
 #include <algorithm>
 #include <intrin.h>
 
@@ -129,6 +130,7 @@ void DDraw::TearDown() {
             RestoreSavedWindow(true);
             UnhookWindow();
             if (g_exclusiveDD == this) g_exclusiveDD = nullptr;
+            GameImageChanged();
         }
         Guard l;
         alive = false;
@@ -217,22 +219,77 @@ bool DDraw::ImageOnScreen(RECT* image, SIZE* mode) const {
     return true;
 }
 
-// The exclusive object's image, for the mouse (see input.cpp).
-bool GameImage(RECT* image, SIZE* mode, HWND* window) {
-    if (!g_config.mouseScale) return false;
-    Guard l;
+// The exclusive object's image, for the mouse (see input.cpp): a snapshot, so the cursor
+// functions and mouse messages (many a frame) neither wait for g_lock nor ask Windows for
+// the window's geometry each time. Made again after GameImageChanged (the display state
+// or the game window's position changed), and at least every 250 ms in case a change went
+// unseen.
+namespace {
+struct ImageSnap {
+    bool ok;
+    RECT image;
+    SIZE mode;
+    HWND window;
+};
+SRWLOCK g_snapLock = SRWLOCK_INIT;  // (innermost: held for the copy only)
+ImageSnap g_snap = {};
+std::atomic<bool> g_snapDirty{true};
+std::atomic<ULONGLONG> g_snapTime{0};
+
+void TakeSnapshot(ULONGLONG now) {  // g_lock held
+    g_snapDirty.store(false);  // first: a change while it's made marks it again
+    ImageSnap s = {};
     const DDraw* d = g_exclusiveDD;
-    if (!d || !d->ImageOnScreen(image, mode)) return false;
-    if (window) *window = d->Window();
+    if (d && d->ImageOnScreen(&s.image, &s.mode)) {
+        s.ok = true;
+        s.window = d->Window();
+    }
+    AcquireSRWLockExclusive(&g_snapLock);  // under g_lock: snapshots stored in the order made
+    g_snap = s;
+    ReleaseSRWLockExclusive(&g_snapLock);
+    g_snapTime.store(now);
+}
+}  // namespace
+
+void GameImageChanged() { g_snapDirty.store(true); }
+namespace {
+// GameImageChanged at the end of a scope that moves or resizes the game's window.
+struct ImageChangedAtExit {
+    ImageChangedAtExit() = default;
+    ~ImageChangedAtExit() { GameImageChanged(); }
+};
+}  // namespace
+
+bool GameImage(RECT* image, SIZE* mode, HWND* window, bool wait) {
+    if (!g_config.mouseScale) return false;
+    const ULONGLONG now = GetTickCount64();
+    const bool dirty = g_snapDirty.load();
+    if (dirty || now - g_snapTime.load() > 250) {
+        if (TryEnterCriticalSection(&g_lock)) {
+            TakeSnapshot(now);
+            LeaveCriticalSection(&g_lock);
+            if (g_deferredCount && !LockHeldByMe()) RunDeferred();
+        } else if (dirty && wait) {  // after a change: as it is now (as before the snapshot)
+            Guard l;
+            TakeSnapshot(now);
+        }  // else the last one (the periodic check, or a window procedure, which never waits)
+    }
+    AcquireSRWLockShared(&g_snapLock);
+    const ImageSnap s = g_snap;
+    ReleaseSRWLockShared(&g_snapLock);
+    if (!s.ok) return false;
+    *image = s.image;
+    *mode = s.mode;
+    if (window) *window = s.window;
     return true;
 }
 
 // The real screen to the game's display mode (its screen as the game sees it, at 0,0):
 // scaled, and kept on the game's screen as the real cursor is kept on the real one.
-bool MouseToGame(POINT* p) {
+bool MouseToGame(POINT* p, bool wait) {
     RECT r;
     SIZE m;
-    if (!GameImage(&r, &m)) return false;
+    if (!GameImage(&r, &m, nullptr, wait)) return false;
     const LONG w = std::max<LONG>(r.right - r.left, 1), h = std::max<LONG>(r.bottom - r.top, 1);
     p->x = std::clamp<LONG>(LONG(int64_t(p->x - r.left) * m.cx / w), 0, m.cx - 1);
     p->y = std::clamp<LONG>(LONG(int64_t(p->y - r.top) * m.cy / h), 0, m.cy - 1);
@@ -394,6 +451,11 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc);
 
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
+    switch (msg) {  // where the game's image is on the screen may have changed (GameImage)
+    case WM_WINDOWPOSCHANGED: case WM_SIZE: case WM_MOVE: case WM_DISPLAYCHANGE: case WM_SHOWWINDOW:
+    case WM_ACTIVATEAPP: case WM_DESTROY: case WM_DPICHANGED: GameImageChanged(); break;
+    default: break;
+    }
     const UINT deferred = DeferredActivateMsg();
     const UINT checkCover = CheckCoverMsg();
     if (checkCover && msg == checkCover) {
@@ -484,7 +546,7 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // coordinates, the others the client area's.
         POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL) ClientToScreen(h, &p);
-        if (MouseToGame(&p)) lp = MAKELPARAM(p.x, p.y);
+        if (MouseToGame(&p, false)) lp = MAKELPARAM(p.x, p.y);
     } else if (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_SCREENSAVE) {
         // As ddraw.dll (FUN_7375dcdc): no screensaver in exclusive mode. The monitor may
         // still power down (SC_MONITORPOWER goes through).
@@ -628,6 +690,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         if (cover) {
             DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
             suspended_ = true;      // first: the presenter must not create a new device from here on
+            GameImageChanged();
             if (switched_) {
                 ChangeDisplay(nullptr, 0);
                 switched_ = false;
@@ -655,6 +718,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // Only now: until the mode is switched back the presenter must not create
         // a device (it would make a windowed one, then replace it right away).
         suspended_ = false;
+        GameImageChanged();
         MarkDirty();
     } else if (display != kDisplayWindow && !(coop_ & DDSCL_NOWINDOWCHANGES)) {
         // ddraw.dll makes the exclusive window topmost once it is in front.
@@ -666,6 +730,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
 // WM_DISPLAYCHANGE on the exclusive window (ours or anyone's mode change). Called with
 // g_displayLock held.
 void DDraw::OnDisplayChange() {
+    const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     if (!Exclusive() || !alive || (coop_ & DDSCL_NOWINDOWCHANGES) || !hwnd_ || IsIconic(hwnd_)) return;
     const int display = modeSet_ ? activeDisplay_ : g_config.display;
     if (display == kDisplayWindow) return;
@@ -680,6 +745,7 @@ void DDraw::OnDisplayChange() {
 // area is the monitor, the frame just outside it. A window region shows only that part,
 // so the frame can't appear on a monitor next to this one. g_displayLock held.
 void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
+    const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
@@ -771,6 +837,7 @@ void DDraw::ConfineCursor(bool on) {
 // fullscreen) covers the real one again. A game that keeps changing it wins after a few
 // tries rather than the two fighting.
 void DDraw::CheckCover(HWND h, bool moved) {
+    const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     if (!Exclusive() || !alive || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
         (coop_ & DDSCL_NOWINDOWCHANGES) || IsIconic(h) || !IsWindowVisible(h))
         return;
@@ -816,6 +883,7 @@ bool DDraw::CoverSize(HWND h, SIZE* out) const {
 //   borderless: no mode change; a borderless window covering the monitor, image scaled
 // Called with g_displayLock held and g_lock not held.
 void DDraw::ApplyWindow() {
+    const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     if (!Exclusive() || !hwnd_ || !IsWindow(hwnd_)) return;
     int display = g_config.display;
     // Before SetDisplayMode: as in ddraw.dll, switch and borderless cover the screen at the
@@ -835,6 +903,7 @@ void DDraw::ApplyWindow() {
         UpdateRefreshRate();
     }
     activeDisplay_ = display;
+    GameImageChanged();
     // The game's mode shown scaled or in a window: its cursor functions are pointed at
     // dd2d9's (input.cpp), which show it the mode as its screen. A real mode switch
     // leaves its imports alone. Again for each mode: modules loaded since are covered.
@@ -910,6 +979,7 @@ void DDraw::RestoreDisplay() {
         UpdateRefreshRate();
     }
     suspended_ = false;
+    GameImageChanged();
 }
 
 // Leaving exclusive mode: the window gets its style back, keeping WS_VISIBLE and
@@ -1076,6 +1146,7 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
         if (version == 1) ddraw1Coop_ = true;
         Guard l;
         if (hwnd) hwnd_ = hwnd;
+        GameImageChanged();
         return DD_OK;
     }
     if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
@@ -1119,6 +1190,7 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
             RestoreSavedWindow(!(flags & DDSCL_NOWINDOWCHANGES));
         } else {
             suspended_ = false;
+            GameImageChanged();
             // The window stays as it is but for being topmost, as with ddraw.dll.
             if (!(flags & DDSCL_NOWINDOWCHANGES) && hwnd_ && IsWindow(hwnd_))
                 SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -1149,11 +1221,13 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     }
     if (flags & DDSCL_EXCLUSIVE) g_exclusiveDD = this;
     else if (g_exclusiveDD == this) g_exclusiveDD = nullptr;
+    GameImageChanged();
     {
         Guard l;
         coop_ = flags;
         if (hwnd) hwnd_ = hwnd;
         if (restore) modeSet_ = false;
+        GameImageChanged();
         ApplyGamma();
     }
     if (Exclusive()) HookWindow();
@@ -1202,6 +1276,7 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
         modeBpp_ = bpp;
         modeRefresh_ = rr;
         suspended_ = false;
+        GameImageChanged();
     }
     if (Exclusive()) {
         ApplyWindow();
@@ -1334,8 +1409,10 @@ void DDraw::TakeOverExclusive(DDraw* prev, HWND hwnd) {
         prev->coverSize_ = {};
     }
     prev->suspended_ = false;
+    GameImageChanged();
     Guard l;
     prev->coop_ = (prev->coop_ & ~(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_ALLOWMODEX)) | DDSCL_NORMAL;
+    GameImageChanged();
     prev->ApplyGamma();
 }
 
@@ -1348,6 +1425,7 @@ HRESULT DDraw::RestoreDisplayMode() {
     {
         Guard l;
         modeSet_ = false;
+        GameImageChanged();
     }
     ApplyWindow();  // still exclusive: the window covers the screen at the desktop mode
     InvalidateSurfaces();
