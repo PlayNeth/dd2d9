@@ -31,6 +31,9 @@ struct GpuTex;
 void GpuCpuAccess(Surface* s, bool write, const RECT* area = nullptr);
 // A Blt DDBLT_DEPTHFILL into a Z buffer with a GPU copy: done there (true), or not (false).
 bool GpuDepthFill(Surface* s, const RECT& r, DWORD value);
+// A Z buffer whose GPU copy DirectDraw can read and write (INTZ): DDBLT_DEPTHFILL then
+// needs no read back first.
+bool GpuDepthWritable(const Buffer* b);
 // The buffer's render target when its GPU copy is the newest (Direct3D drew there since
 // the CPU copy was last read back), for presenting it as it is; null otherwise. Gpu lock held.
 IDirect3DSurface9* GpuNewestSurface(Buffer* b);

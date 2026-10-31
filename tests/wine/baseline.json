@@ -26,7 +26,7 @@
    "crash": false
   },
   "ddraw1:test_caps": {
-   "nfail": 4,
+   "nfail": 0,
    "crash": false
   },
   "ddraw1:test_ck_complex": {
@@ -78,7 +78,7 @@
    "crash": false
   },
   "ddraw1:test_coop_level_create_device_window": {
-   "nfail": 5,
+   "nfail": 0,
    "crash": false
   },
   "ddraw1:test_coop_level_d3d_state": {
@@ -382,7 +382,7 @@
    "crash": false
   },
   "ddraw2:test_caps": {
-   "nfail": 4,
+   "nfail": 0,
    "crash": false
   },
   "ddraw2:test_ck_complex": {
@@ -434,7 +434,7 @@
    "crash": false
   },
   "ddraw2:test_coop_level_create_device_window": {
-   "nfail": 5,
+   "nfail": 0,
    "crash": false
   },
   "ddraw2:test_coop_level_d3d_state": {
@@ -486,11 +486,11 @@
    "crash": false
   },
   "ddraw2:test_depth_blit": {
-   "nfail": 8,
+   "nfail": 0,
    "crash": false
   },
   "ddraw2:test_depth_readback": {
-   "nfail": 1,
+   "nfail": 0,
    "crash": false
   },
   "ddraw2:test_device_qi": {
@@ -746,7 +746,7 @@
    "crash": false
   },
   "ddraw4:test_block_formats_creation": {
-   "nfail": 50,
+   "nfail": 0,
    "crash": false
   },
   "ddraw4:test_blt": {
@@ -758,7 +758,7 @@
    "crash": false
   },
   "ddraw4:test_caps": {
-   "nfail": 4,
+   "nfail": 0,
    "crash": false
   },
   "ddraw4:test_ck_complex": {
@@ -818,7 +818,7 @@
    "crash": false
   },
   "ddraw4:test_coop_level_create_device_window": {
-   "nfail": 5,
+   "nfail": 0,
    "crash": false
   },
   "ddraw4:test_coop_level_d3d_state": {
@@ -870,11 +870,11 @@
    "crash": false
   },
   "ddraw4:test_depth_blit": {
-   "nfail": 8,
+   "nfail": 0,
    "crash": false
   },
   "ddraw4:test_depth_readback": {
-   "nfail": 1,
+   "nfail": 0,
    "crash": false
   },
   "ddraw4:test_device_qi": {
@@ -1190,7 +1190,7 @@
    "crash": false
   },
   "ddraw7:test_block_formats_creation": {
-   "nfail": 50,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_blt": {
@@ -1202,7 +1202,7 @@
    "crash": false
   },
   "ddraw7:test_caps": {
-   "nfail": 4,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_ck_complex": {
@@ -1262,7 +1262,7 @@
    "crash": false
   },
   "ddraw7:test_compressed_surface_stretch": {
-   "nfail": 60,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_compute_sphere_visibility": {
@@ -1274,7 +1274,7 @@
    "crash": false
   },
   "ddraw7:test_coop_level_create_device_window": {
-   "nfail": 5,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_coop_level_d3d_state": {
@@ -1326,15 +1326,15 @@
    "crash": false
   },
   "ddraw7:test_depth_blit": {
-   "nfail": 8,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_depth_readback": {
-   "nfail": 1,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_device_load": {
-   "nfail": 11,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_device_qi": {
@@ -1378,15 +1378,15 @@
    "crash": false
   },
   "ddraw7:test_fog_interpolation": {
-   "nfail": 2,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_fog_process_vertices": {
-   "nfail": 12,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_fog_special": {
-   "nfail": 1,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_gdi_surface": {
@@ -1414,7 +1414,7 @@
    "crash": false
   },
   "ddraw7:test_lighting": {
-   "nfail": 3,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_lighting_interface_versions": {
@@ -1494,7 +1494,7 @@
    "crash": false
   },
   "ddraw7:test_process_vertices": {
-   "nfail": 4,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_range_colorkey": {
@@ -1510,7 +1510,7 @@
    "crash": false
   },
   "ddraw7:test_rt_caps": {
-   "nfail": 26,
+   "nfail": 28,
    "crash": false
   },
   "ddraw7:test_set_render_state": {
@@ -1530,7 +1530,7 @@
    "crash": false
   },
   "ddraw7:test_specular_lighting": {
-   "nfail": 47,
+   "nfail": 0,
    "crash": false
   },
   "ddraw7:test_surface_attachment": {

@@ -337,6 +337,52 @@ They are forwarded to Direct3D texture-manager callbacks stored after the Direct
 | UpdateOverlayZOrder (7_UpdateOverlayZOrder.c) | — | DDERR_NOTAOVERLAYSURFACE (35) |
 | EnumOverlayZOrders (7_EnumOverlayZOrders.c) | `IsBadCodePtr(cb)` → INVALIDPARAMS (44-48). Flags not 0/1 → INVALIDPARAMS (78-79) | **enumerates the device's overlay z-order list (empty without overlays) → DD_OK** |
 
+## Overlays — `7_UpdateOverlay.c` and helpers `FUN_7373d771`, `FUN_7373d81a`, `FUN_7373d8a1`
+
+UpdateOverlay(src, dest, dst, flags, fx), in order:
+1. This lost → SURFACELOST. Dest read unchecked (NULL faults → INVALIDPARAMS from the SEH wrapper); dest lost → SURFACELOST.
+2. `flags & 0xF8000000` → INVALIDPARAMS. fx given and `fx->dwSize != 0x38`, or fx NULL with DDOVER_DDFX → INVALIDPARAMS
+   (fx is checked whenever it is given, with or without DDOVER_DDFX).
+3. This not DDSCAPS_OVERLAY → NOTAOVERLAYSURFACE; dest an execute buffer → INVALIDSURFACETYPE; another device → DEVICEDOESNTOWNSURFACE.
+4. `FUN_7373d771`: neither in system memory → the driver's caps must have DDCAPS_OVERLAY (else NOOVERLAYHW); either in
+   system memory → the HEL's (else DDERR_UNSUPPORTED; the HEL has no overlays).
+5. NULL rectangles: the whole destination / the whole overlay. Each must be non-empty and inside its surface → INVALIDRECT.
+6. Alignment caps (DDCAPS_ALIGN*) → XALIGN.
+7. Unless DDOVER_HIDE, `FUN_7373d81a`: the **width's** factor `dstW*1000` against `dwMinOverlayStretch*srcW` and
+   `dwMaxOverlayStretch*srcW` (0: no maximum) → INVALIDPARAMS; any size change needs DDCAPS_OVERLAYSTRETCH, and per axis
+   the arbitrary DDFXCAPS_OVERLAYSTRETCH/SHRINK bit or a whole factor with the N bit → NOSTRETCHHW.
+8. With any of `0x703C00` (keys, AUTOFLIP, BOB, OVERRIDEBOBWEAVE), `FUN_7373d8a1`: AUTOFLIP needs a video port, BOB the
+   bob caps, BOBHARDWARE never → INVALIDPARAMS. Override keys need DDCAPS_COLORKEY and DDCKEYCAPS_SRCOVERLAY / DESTOVERLAY
+   → NOCOLORKEYHW (taken from fx). DDOVER_KEYSRC with KEYSRCOVERRIDE, or without a source overlay key on This →
+   INVALIDPARAMS, else it becomes KEYSRCOVERRIDE with This's key **as it is now**; DDOVER_KEYDEST likewise with the
+   destination's DESTOVERLAY key.
+9. DDOVER_SHOW sets DDSCAPS_VISIBLE on This, else DDOVER_HIDE clears it (put back if the driver fails). The driver's
+   result is returned; on success every member of This's flip chain stores the rectangles, the position (the
+   destination's top-left), the flags and (DDOVER_DDFX) a copy of fx, and This references the destination
+   (`lpSurfaceOverlaying`, AddRef; the previous one released).
+
+GetOverlayPosition: `*x = *y = 0`; lost → SURFACELOST; not an overlay → NOTAOVERLAYSURFACE; not visible →
+OVERLAYNOTVISIBLE; no destination → NOOVERLAYDEST; else the stored position.
+SetOverlayPosition(x, y): the same checks, then `0 <= x <= destW - dstW` and `0 <= y <= destH - dstH` → else
+INVALIDPOSITION; system memory → UNSUPPORTED; the destination rectangle moves.
+
+The z-order is one list per device (`DDRAWI_DIRECTDRAW_GBL + 0x44C`): every overlay surface is put at its front when
+created. UpdateOverlayZOrder (no lost check): 0 SENDTOFRONT, 1 SENDTOBACK, 2 MOVEFORWARD, 3 MOVEBACKWARD (swaps with the
+neighbour, none at an end), 4 INSERTINFRONTOF / 5 INSERTINBACKOF the reference (not an overlay → NOTAOVERLAYSURFACE,
+another device → DEVICEDOESNTOWNSURFACE, not listed → INVALIDPARAMS), other values → INVALIDPARAMS; a visible overlay
+is then updated again. EnumOverlayZOrders walks the whole list (1 front to back, 0 back to front), handing each
+surface out through the caller's interface version (QueryInterface: referenced) with its description.
+
+SetColorKey (section 3 of surface-flip-key-palette.md): DDCKEY_DESTOVERLAY needs DDCAPS_OVERLAY (NOOVERLAYHW) and
+DDRAWISURF_HASOVERLAYDATA, which creation gives overlays and (with overlay caps) the primary (NOTAOVERLAYSURFACE).
+Removing an overlay key clears the overlay's KEYSRC/KEYSRCOVERRIDE or KEYDEST/KEYDESTOVERRIDE flags and updates a
+visible overlay again. Flip takes DDFLIP_EVEN/ODD on overlays.
+
+dd2d9 (overlay.cpp) offers overlays to DirectDraw objects in exclusive mode only (a windowed program paints the
+destination key on the desktop with GDI, which dd2d9's primary never sees), and follows this with its own caps: overlay, stretch, FourCC, DESTOVERLAY and SRCOVERLAY keys, arbitrary
+stretching and shrinking, mirroring, stretch 1..100000, 16 visible overlays (a 17th → OUTOFCAPS). Overlays are laid
+over the primary when presented; on any other destination they are kept but not shown.
+
 ---
 
 ## Differences from dd2d9

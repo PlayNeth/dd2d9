@@ -2,6 +2,7 @@
 //   ddtest unit     - pixel-exact checks of blits, keys, conversion, GDI, flipping, surface lifetimes
 //   ddtest fs8      - exclusive 640x480x8 flip-chain animation with palette and GDI text
 //   ddtest pattern  - a still test image in exclusive 640x480x8 (or "pattern <w> <h>") for comparing filters
+//   ddtest overlay  - overlay surfaces laid over an exclusive-mode primary (read back from the screen)
 //   ddtest win      - windowed (DDSCL_NORMAL) 32-bit desktop, blits to the primary through a clipper
 //   ddtest fuzz     - random same-format blits (keys, ranges, mirroring, stretching, overlap)
 //                     compared with a reference implementation, for 8/16/32-bit formats
@@ -339,11 +340,127 @@ static int RunUnit() {
             l.dwSize = sizeof(l);
             yuy->Lock(nullptr, &l, 0, nullptr);
             CHECK((l.dwFlags & DDSD_PITCH) && l.lPitch >= 128, "YUY2 surface has 2 bytes per pixel (pitch %ld)", l.lPitch);
+            // White, black, then two of BT.601 red (video levels), as Y0 U Y1 V.
+            static const BYTE kYuy[8] = {235, 128, 16, 128, 81, 90, 81, 240};
+            memcpy(l.lpSurface, kYuy, 8);
             yuy->Unlock(nullptr);
+            // Blitted to RGB (as a video player shows a frame): converted; stretched too.
+            auto nearRgb = [](DWORD a, DWORD b) {
+                for (int sh = 0; sh < 24; sh += 8)
+                    if (abs(int((a >> sh) & 255) - int((b >> sh) & 255)) > 2) return false;
+                return true;
+            };
+            IDirectDrawSurface7* rgb = Make32(dd, 8, 1);
+            RECT four = {0, 0, 4, 1}, eight = {0, 0, 8, 1};
+            hr = rgb->Blt(&four, yuy, &four, DDBLT_WAIT, nullptr);
+            DDSURFACEDESC2 r = {};
+            r.dwSize = sizeof(r);
+            rgb->Lock(nullptr, &r, DDLOCK_WAIT, nullptr);
+            DWORD got[8];
+            memcpy(got, r.lpSurface, 32);
+            rgb->Unlock(nullptr);
+            CHECK(SUCCEEDED(hr) && nearRgb(got[0], 0xFFFFFF) && nearRgb(got[1], 0) && nearRgb(got[2], 0xFF0000) && nearRgb(got[3], 0xFF0000),
+                  "YUY2 blitted to RGB (0x%08lx): %06lx %06lx %06lx %06lx", hr, got[0] & 0xFFFFFF, got[1] & 0xFFFFFF,
+                  got[2] & 0xFFFFFF, got[3] & 0xFFFFFF);
+            hr = rgb->Blt(&eight, yuy, &four, DDBLT_WAIT, nullptr);
+            rgb->Lock(nullptr, &r, DDLOCK_WAIT, nullptr);
+            memcpy(got, r.lpSurface, 32);
+            rgb->Unlock(nullptr);
+            CHECK(SUCCEEDED(hr) && nearRgb(got[0], 0xFFFFFF) && nearRgb(got[1], 0xFFFFFF) && nearRgb(got[2], 0) && nearRgb(got[3], 0) &&
+                      nearRgb(got[5], 0xFF0000),
+                  "YUY2 stretched 2x into RGB (0x%08lx): %06lx %06lx %06lx", hr, got[0] & 0xFFFFFF, got[2] & 0xFFFFFF, got[5] & 0xFFFFFF);
+            // RGB into UYVY (U Y0 V Y1): the pair's chroma averaged.
+            d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('U', 'Y', 'V', 'Y');
+            IDirectDrawSurface7* uyvy = nullptr;
+            hr = dd->CreateSurface(&d, &uyvy, nullptr);
+            if (uyvy) {
+                hr = uyvy->Blt(&four, rgb, &eight, DDBLT_WAIT, nullptr);  // (shrunk back: white, black, red, red)
+                DDSURFACEDESC2 u = {};
+                u.dwSize = sizeof(u);
+                uyvy->Lock(nullptr, &u, DDLOCK_WAIT, nullptr);
+                BYTE ub[8];
+                memcpy(ub, u.lpSurface, 8);
+                uyvy->Unlock(nullptr);
+                auto close = [](int a, int b) { return abs(a - b) <= 2; };
+                CHECK(SUCCEEDED(hr) && close(ub[1], 235) && close(ub[3], 16) && close(ub[0], 128) && close(ub[2], 128) &&
+                          close(ub[5], 81) && close(ub[7], 81) && close(ub[4], 90) && close(ub[6], 240),
+                      "RGB blitted into UYVY (0x%08lx): %u %u %u %u  %u %u %u %u", hr, ub[0], ub[1], ub[2], ub[3], ub[4], ub[5],
+                      ub[6], ub[7]);
+                uyvy->Release();
+            } else {
+                CHECK(false, "UYVY surface -> 0x%08lx", hr);
+            }
+            // YUY2 to YUY2 unstretched: copied as it is.
+            d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('Y', 'U', 'Y', '2');
+            IDirectDrawSurface7* yuy2 = nullptr;
+            hr = dd->CreateSurface(&d, &yuy2, nullptr);
+            if (yuy2) {
+                RECT at = {8, 2, 12, 3};
+                hr = yuy2->Blt(&at, yuy, &four, DDBLT_WAIT, nullptr);
+                DDSURFACEDESC2 u = {};
+                u.dwSize = sizeof(u);
+                yuy2->Lock(nullptr, &u, DDLOCK_WAIT, nullptr);
+                const bool same = memcmp(static_cast<BYTE*>(u.lpSurface) + 2 * u.lPitch + 16, kYuy, 8) == 0;
+                yuy2->Unlock(nullptr);
+                CHECK(SUCCEEDED(hr) && same, "YUY2 to YUY2 copied as it is (0x%08lx)", hr);
+                yuy2->Release();
+            }
+            // A colour key on the YUY2 source, in its own packing (the first pixel of the
+            // pair: white): white pixels skipped, the others drawn.
+            {
+                DDCOLORKEY k = {0x8010'80EBu, 0x8010'80EBu};  // Y0 235, U 128, Y1 16, V 128
+                hr = yuy->SetColorKey(DDCKEY_SRCBLT, &k);
+                DDBLTFX bfx = {};
+                bfx.dwSize = sizeof(bfx);
+                bfx.dwFillColor = 0x0000FF;
+                rgb->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &bfx);
+                const HRESULT hk = rgb->Blt(&four, yuy, &four, DDBLT_KEYSRC | DDBLT_WAIT, nullptr);
+                rgb->Lock(nullptr, &r, DDLOCK_WAIT, nullptr);
+                memcpy(got, r.lpSurface, 32);
+                rgb->Unlock(nullptr);
+                CHECK(SUCCEEDED(hr) && SUCCEEDED(hk) && (got[0] & 0xFFFFFF) == 0x0000FF && nearRgb(got[1], 0) &&
+                          nearRgb(got[2], 0xFF0000),
+                      "YUY2 source colour key (0x%08lx 0x%08lx): %06lx %06lx %06lx", hr, hk, got[0] & 0xFFFFFF,
+                      got[1] & 0xFFFFFF, got[2] & 0xFFFFFF);
+            }
+            rgb->Release();
             yuy->Release();
         } else {
             CHECK(false, "YUY2 surface -> 0x%08lx", hr);
         }
+        // RGB into an 8-bit surface: each pixel the nearest palette entry.
+        {
+            IDirectDrawSurface7* rgb8 = Make32(dd, 4, 1);
+            IDirectDrawSurface7* p8 = MakeSurface(dd, 4, 1, 8, 0, 0, 0);
+            PALETTEENTRY pe[256] = {};
+            for (int i = 0; i < 256; i++) pe[i] = {BYTE(i & 0x40), BYTE(i & 0x20), BYTE(i & 0x10), 0};
+            pe[5] = {255, 0, 0, 0};
+            pe[9] = {0, 255, 0, 0};
+            IDirectDrawPalette* pal8 = nullptr;
+            dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, pe, &pal8, nullptr);
+            if (rgb8 && p8 && pal8) {
+                p8->SetPalette(pal8);
+                const DWORD px[4] = {0xFF0000, 0x00FF00, 0xF01010, 0x000000};
+                Put32(rgb8, px, 4);
+                hr = p8->Blt(nullptr, rgb8, nullptr, DDBLT_WAIT, nullptr);
+                DDSURFACEDESC2 l8 = {};
+                l8.dwSize = sizeof(l8);
+                p8->Lock(nullptr, &l8, DDLOCK_WAIT, nullptr);
+                BYTE ix[4];
+                memcpy(ix, l8.lpSurface, 4);
+                p8->Unlock(nullptr);
+                CHECK(SUCCEEDED(hr) && ix[0] == 5 && ix[1] == 9 && ix[2] == 5 && ix[3] == 0,
+                      "RGB blitted into an 8-bit surface: nearest palette entries (0x%08lx): %u %u %u %u", hr, ix[0], ix[1],
+                      ix[2], ix[3]);
+            }
+            if (pal8) pal8->Release();
+            if (p8) p8->Release();
+            if (rgb8) rgb8->Release();
+        }
+        DWORD codes[16] = {}, n = 16, count = 0;
+        dd->GetFourCCCodes(&count, nullptr);
+        dd->GetFourCCCodes(&n, codes);
+        CHECK(count == 7 && n == 7 && codes[0] == MAKEFOURCC('Y', 'U', 'Y', '2'), "GetFourCCCodes: %lu codes (%lu copied)", count, n);
         d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('X', 'Y', 'Z', 'W');
         IDirectDrawSurface7* unk = nullptr;
         hr = dd->CreateSurface(&d, &unk, nullptr);
@@ -660,6 +777,13 @@ static int RunFullscreen8(int modeW, int modeH) {
         hr = front->Lock(nullptr, &ld, DDLOCK_WAIT, nullptr);
         CHECK(hr == DD_OK && ld.lpSurface, "primary still lockable in the background (0x%08lx)", hr);
         if (SUCCEEDED(hr)) front->Unlock(nullptr);
+        // Its back buffer isn't, as with ddraw.dll (NFS Porsche Unleashed, finding it locked,
+        // flipped without unlocking).
+        DDSURFACEDESC2 bd = {};
+        bd.dwSize = sizeof(bd);
+        hr = back->Lock(nullptr, &bd, DDLOCK_WAIT, nullptr);
+        CHECK(hr == DDERR_SURFACELOST && !bd.lpSurface, "back buffer not lockable in the background (0x%08lx)", hr);
+        if (SUCCEEDED(hr)) back->Unlock(nullptr);
     }
     SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
     Pump();
@@ -766,6 +890,153 @@ static int RunWindowed() {
 // Lifetimes of complex surfaces, as in ddraw: each member counts its own
 // references, and releasing the root destroys the structure. A member the game
 // still references stays usable on its own until released.
+// Direct3D 1 execute buffers: Pick (the triangle under a point, its offset and depth) and
+// D3DOP_SPAN (drawn on XP's driver path).
+static int RunExecute() {
+    IDirectDraw* dd = nullptr;
+    if (FAILED(DirectDrawCreate(nullptr, &dd, nullptr))) return 1;
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    DDSURFACEDESC sd = {};
+    sd.dwSize = sizeof(sd);
+    sd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    sd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+    sd.dwWidth = sd.dwHeight = 64;
+    sd.ddpfPixelFormat.dwSize = sizeof(sd.ddpfPixelFormat);
+    sd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    sd.ddpfPixelFormat.dwRGBBitCount = 32;
+    sd.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    sd.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    sd.ddpfPixelFormat.dwBBitMask = 0xFF;
+    IDirectDrawSurface* rt = nullptr;
+    IDirect3D* d3d = nullptr;
+    IDirect3DDevice* dev = nullptr;
+    IDirect3DViewport* vp = nullptr;
+    IDirect3DExecuteBuffer* eb = nullptr;
+    HRESULT hr = dd->CreateSurface(&sd, &rt, nullptr);
+    if (SUCCEEDED(hr)) hr = dd->QueryInterface(IID_IDirect3D, reinterpret_cast<void**>(&d3d));
+    if (SUCCEEDED(hr)) hr = rt->QueryInterface(IID_IDirect3DHALDevice, reinterpret_cast<void**>(&dev));
+    if (SUCCEEDED(hr)) hr = d3d->CreateViewport(&vp, nullptr);
+    if (SUCCEEDED(hr)) hr = dev->AddViewport(vp);
+    D3DVIEWPORT vd = {};
+    vd.dwSize = sizeof(vd);
+    vd.dwWidth = vd.dwHeight = 64;
+    vd.dvScaleX = vd.dvScaleY = 32.0f;
+    vd.dvMaxX = vd.dvMaxY = 1.0f;
+    vd.dvMaxZ = 1.0f;
+    if (SUCCEEDED(hr)) hr = vp->SetViewport(&vd);
+    D3DEXECUTEBUFFERDESC ed = {};
+    ed.dwSize = sizeof(ed);
+    ed.dwFlags = D3DDEB_BUFSIZE;
+    ed.dwBufferSize = 1024;
+    if (SUCCEEDED(hr)) hr = dev->CreateExecuteBuffer(&ed, &eb, nullptr);
+    CHECK(SUCCEEDED(hr), "Direct3D 1 device, viewport and execute buffer (0x%08lx)", hr);
+    if (FAILED(hr)) {
+        if (eb) eb->Release();
+        if (vp) vp->Release();
+        if (dev) dev->Release();
+        if (d3d) d3d->Release();
+        if (rt) rt->Release();
+        dd->Release();
+        DestroyWindow(hwnd);
+        return 1;
+    }
+    // Three pretransformed vertices (a triangle in the top-left half, z 0.5) and two for a span.
+    ed.dwSize = sizeof(ed);
+    eb->Lock(&ed);
+    auto* base = static_cast<BYTE*>(ed.lpData);
+    auto* v = reinterpret_cast<D3DTLVERTEX*>(base);
+    const D3DTLVERTEX tv[5] = {{{10}, {10}, {0.5f}, {1}, {0xFFFFFFFF}, {0}, {0}, {0}},
+                               {{50}, {10}, {0.5f}, {1}, {0xFFFFFFFF}, {0}, {0}, {0}},
+                               {{10}, {50}, {0.5f}, {1}, {0xFFFFFFFF}, {0}, {0}, {0}},
+                               {{60}, {60}, {0.5f}, {1}, {0xFF00FF00}, {0}, {0}, {0}},
+                               {{61}, {60}, {0.5f}, {1}, {0xFF00FF00}, {0}, {0}, {0}}};
+    memcpy(v, tv, sizeof(tv));
+    BYTE* p = base + sizeof(tv);
+    const DWORD instrStart = DWORD(p - base);
+    auto ins = [&](BYTE op, BYTE size, WORD count) {
+        D3DINSTRUCTION i = {op, size, count};
+        memcpy(p, &i, sizeof(i));
+        p += sizeof(i);
+    };
+    ins(D3DOP_PROCESSVERTICES, sizeof(D3DPROCESSVERTICES), 1);
+    D3DPROCESSVERTICES pv = {D3DPROCESSVERTICES_COPY, 0, 0, 5};
+    memcpy(p, &pv, sizeof(pv));
+    p += sizeof(pv);
+    ins(D3DOP_TRIANGLE, sizeof(D3DTRIANGLE), 1);
+    const DWORD triOffset = DWORD(p - base) - instrStart;
+    D3DTRIANGLE t = {};
+    t.v1 = 0, t.v2 = 1, t.v3 = 2;
+    t.wFlags = D3DTRIFLAG_EDGEENABLETRIANGLE;
+    memcpy(p, &t, sizeof(t));
+    p += sizeof(t);
+    ins(D3DOP_SPAN, sizeof(D3DSPAN), 1);
+    D3DSPAN sp = {2, 3};
+    memcpy(p, &sp, sizeof(sp));
+    p += sizeof(sp);
+    ins(D3DOP_EXIT, 0, 0);
+    eb->Unlock();
+    D3DEXECUTEDATA xd = {};
+    xd.dwSize = sizeof(xd);
+    xd.dwVertexCount = 5;
+    xd.dwInstructionOffset = instrStart;
+    xd.dwInstructionLength = DWORD(p - base) - instrStart;
+    eb->SetExecuteData(&xd);
+
+    D3DRECT in = {20, 20, 21, 21}, out = {55, 55, 56, 56};
+    hr = dev->Pick(eb, vp, 0, &in);
+    DWORD n = 0;
+    dev->GetPickRecords(&n, nullptr);
+    D3DPICKRECORD rec[4] = {};
+    DWORD room = 4;
+    if (n) dev->GetPickRecords(&room, rec);
+    CHECK(SUCCEEDED(hr) && n == 1 && rec[0].bOpcode == D3DOP_TRIANGLE && rec[0].dwOffset == triOffset &&
+              rec[0].dvZ > 0.49f && rec[0].dvZ < 0.51f,
+          "Pick inside a triangle: %lu record(s), opcode %u, offset %lu (expected %lu), z %.3f", n, rec[0].bOpcode,
+          rec[0].dwOffset, triOffset, rec[0].dvZ);
+    dev->Pick(eb, vp, 0, &out);
+    n = 9;
+    dev->GetPickRecords(&n, nullptr);
+    CHECK(n == 0, "Pick outside it: %lu records", n);
+
+    // The span is drawn on XP's driver path: executed unclipped, or (as here) clipped after a
+    // PROCESSVERTICES COPY. (Clipped otherwise it's skipped.)
+    auto pixel = [&](int x, int y) {
+        DDSURFACEDESC l = {};
+        l.dwSize = sizeof(l);
+        DWORD c = 0;
+        if (SUCCEEDED(rt->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) {
+            c = reinterpret_cast<const DWORD*>(static_cast<BYTE*>(l.lpSurface) + y * l.lPitch)[x] & 0xFFFFFF;
+            rt->Unlock(nullptr);
+        }
+        return c;
+    };
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    rt->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    dev->BeginScene();
+    dev->Execute(eb, vp, D3DEXECUTE_CLIPPED);
+    dev->EndScene();
+    const DWORD clippedSpan = pixel(60, 60), tri = pixel(20, 20);
+    rt->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    dev->BeginScene();
+    dev->Execute(eb, vp, D3DEXECUTE_UNCLIPPED);
+    dev->EndScene();
+    const DWORD unclippedSpan = pixel(60, 60);
+    CHECK(tri == 0xFFFFFF && clippedSpan == 0x00FF00 && unclippedSpan == 0x00FF00,
+          "D3DOP_SPAN after a COPY: clipped 0x%06lx, unclipped 0x%06lx (both drawn), triangle 0x%06lx", clippedSpan,
+          unclippedSpan, tri);
+
+    eb->Release();
+    vp->Release();
+    dev->Release();
+    d3d->Release();
+    rt->Release();
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 static int RunLifetime() {
     IDirectDraw7* dd = nullptr;
     HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
@@ -1198,6 +1469,216 @@ static int RunMouse() {
     return 0;
 }
 
+// Overlays (emulated): none offered to a windowed program; in exclusive mode (at the screen's
+// own size) UpdateOverlay and its siblings, and the presenter laying them over the primary
+// (read back from the screen): a YUY2 overlay stretched behind a destination key, an RGB one
+// with a source key, z-order, flip chains.
+static IDirectDrawSurface7* MakeOverlay(IDirectDraw7* dd, int w, int h, DWORD fourCC, DWORD extraCaps = 0, DWORD backs = 0) {
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | (backs ? DDSD_BACKBUFFERCOUNT : 0);
+    d.dwWidth = w;
+    d.dwHeight = h;
+    d.dwBackBufferCount = backs;
+    d.ddsCaps.dwCaps = DDSCAPS_OVERLAY | extraCaps;
+    d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    if (fourCC) {
+        d.ddpfPixelFormat.dwFlags = DDPF_FOURCC;
+        d.ddpfPixelFormat.dwFourCC = fourCC;
+    } else {
+        d.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        d.ddpfPixelFormat.dwRGBBitCount = 16;
+        d.ddpfPixelFormat.dwRBitMask = 0xF800;
+        d.ddpfPixelFormat.dwGBitMask = 0x07E0;
+        d.ddpfPixelFormat.dwBBitMask = 0x001F;
+    }
+    IDirectDrawSurface7* s = nullptr;
+    HRESULT hr = dd->CreateSurface(&d, &s, nullptr);
+    CHECK(SUCCEEDED(hr), "overlay: CreateSurface %dx%d fourcc 0x%08lx -> 0x%08lx", w, h, fourCC, hr);
+    return s;
+}
+
+static HRESULT WINAPI ListZ(IDirectDrawSurface7* s, DDSURFACEDESC2*, void* ctx) {
+    static_cast<std::vector<IDirectDrawSurface7*>*>(ctx)->push_back(s);
+    s->Release();
+    return DDENUMRET_OK;
+}
+
+static int RunOverlay() {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    DDCAPS hal = {}, hel = {};
+    hal.dwSize = hel.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&hal, nullptr);
+    CHECK(!(hal.dwCaps & DDCAPS_OVERLAY) && !(hal.dwCKeyCaps & DDCKEYCAPS_DESTOVERLAY), "overlay: none for a windowed program");
+    {
+        DDSURFACEDESC2 o = {};
+        o.dwSize = sizeof(o);
+        o.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        o.dwWidth = o.dwHeight = 16;
+        o.ddsCaps.dwCaps = DDSCAPS_OVERLAY;
+        IDirectDrawSurface7* none = nullptr;
+        CHECK(dd->CreateSurface(&o, &none, nullptr) == DDERR_NOOVERLAYHW, "overlay: a windowed program can't make one");
+    }
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    CHECK(SUCCEEDED(dd->SetDisplayMode(sw, sh, 32, 0, 0)), "overlay: exclusive at %dx%dx32", sw, sh);
+    hal = {};
+    hal.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&hal, &hel);
+    CHECK((hal.dwCaps & DDCAPS_OVERLAY) && (hal.dwCKeyCaps & DDCKEYCAPS_DESTOVERLAY) && (hal.ddsCaps.dwCaps & DDSCAPS_OVERLAY) &&
+              !(hel.dwCaps & DDCAPS_OVERLAY),
+          "overlay: caps 0x%08lx, key caps 0x%08lx, emulation layer 0x%08lx", hal.dwCaps, hal.dwCKeyCaps, hel.dwCaps);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    if (!prim) return 1;
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    RECT all = {0, 0, 320, 240}, keyArea = {40, 40, 160, 160};
+    fx.dwFillColor = 0x000040;
+    prim->Blt(&all, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    fx.dwFillColor = 0xFF00FF;
+    prim->Blt(&keyArea, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    DDCOLORKEY key = {0xFF00FF, 0xFF00FF};
+    CHECK(prim->SetColorKey(DDCKEY_DESTOVERLAY, &key) == DD_OK, "overlay: destination key on the primary");
+    IDirectDrawSurface7* plain = Make32(dd, 8, 8);
+    CHECK(plain->SetColorKey(DDCKEY_DESTOVERLAY, &key) == DDERR_NOTAOVERLAYSURFACE, "overlay: no destination key on an offscreen surface");
+
+    // A: YUY2 32x32, left half white, right half black.
+    IDirectDrawSurface7* a = MakeOverlay(dd, 32, 32, MAKEFOURCC('Y', 'U', 'Y', '2'));
+    // B: R5G6B5 16x16, red with a green 8x8 middle (its source key).
+    IDirectDrawSurface7* b = MakeOverlay(dd, 16, 16, 0);
+    if (!a || !b) return 1;
+    d = {};
+    d.dwSize = sizeof(d);
+    a->Lock(nullptr, &d, DDLOCK_WAIT, nullptr);
+    CHECK(d.ddsCaps.dwCaps == (DDSCAPS_OVERLAY | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM), "overlay: caps 0x%08lx", d.ddsCaps.dwCaps);
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 16; x++)
+            reinterpret_cast<DWORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] = x < 8 ? 0x80EB80EB : 0x80108010;
+    a->Unlock(nullptr);
+    d = {};
+    d.dwSize = sizeof(d);
+    b->Lock(nullptr, &d, DDLOCK_WAIT, nullptr);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++)
+            reinterpret_cast<WORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] =
+                (x >= 4 && x < 12 && y >= 4 && y < 12) ? 0x07E0 : 0xF800;
+    b->Unlock(nullptr);
+    DDCOLORKEY green = {0x07E0, 0x07E0};
+    CHECK(b->SetColorKey(DDCKEY_SRCOVERLAY, &green) == DD_OK, "overlay: source key");
+
+    LONG x = -1, y = -1;
+    CHECK(a->GetOverlayPosition(&x, &y) == DDERR_OVERLAYNOTVISIBLE && x == 0 && y == 0, "overlay: hidden, no position");
+    CHECK(plain->UpdateOverlay(nullptr, prim, nullptr, DDOVER_SHOW, nullptr) == DDERR_NOTAOVERLAYSURFACE, "overlay: not an overlay");
+    RECT r = {20, 20, 180, 180};
+    CHECK(a->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_KEYSRC, nullptr) == DDERR_INVALIDPARAMS,
+          "overlay: DDOVER_KEYSRC without a source key");
+    CHECK(a->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_AUTOFLIP, nullptr) == DDERR_INVALIDPARAMS, "overlay: no autoflip");
+    RECT bad = {300, 0, 200, 10};
+    CHECK(a->UpdateOverlay(nullptr, prim, &bad, DDOVER_SHOW, nullptr) == DDERR_INVALIDRECT, "overlay: bad rectangle");
+    CHECK(a->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_KEYDEST, nullptr) == DD_OK, "overlay: A shown behind the destination key");
+    RECT rb = {200, 40, 264, 104};
+    CHECK(b->UpdateOverlay(nullptr, prim, &rb, DDOVER_SHOW | DDOVER_KEYSRC, nullptr) == DD_OK, "overlay: B shown with its source key");
+    CHECK(a->GetOverlayPosition(&x, &y) == DD_OK && x == 20 && y == 20, "overlay: position %ld,%ld", x, y);
+    CHECK(a->SetOverlayPosition(100000, 0) == DDERR_INVALIDPOSITION, "overlay: position off the screen");
+    CHECK(a->SetOverlayPosition(10, 10) == DD_OK && a->GetOverlayPosition(&x, &y) == DD_OK && x == 10 && y == 10,
+          "overlay: moved to %ld,%ld", x, y);
+    a->SetOverlayPosition(20, 20);
+    DDSCAPS2 caps = {};
+    a->GetCaps(&caps);
+    CHECK(caps.dwCaps & DDSCAPS_VISIBLE, "overlay: shown, DDSCAPS_VISIBLE");
+    hal = {};
+    hal.dwSize = sizeof(hal);
+    dd->GetCaps(&hal, nullptr);
+    CHECK(hal.dwCurrVisibleOverlays == 2, "overlay: %lu visible", hal.dwCurrVisibleOverlays);
+
+    // Z-order: the newer in front; then A sent to the front.
+    std::vector<IDirectDrawSurface7*> z;
+    a->EnumOverlayZOrders(1 /* DDENUMOVERLAYZ_FRONTTOBACK */, &z, ListZ);
+    CHECK(z.size() == 2 && z[0] == b && z[1] == a, "overlay: z-order B, A");
+    CHECK(a->UpdateOverlayZOrder(0 /* DDOVERZ_SENDTOFRONT */, nullptr) == DD_OK, "overlay: A to the front");
+    z.clear();
+    b->EnumOverlayZOrders(0 /* DDENUMOVERLAYZ_BACKTOFRONT */, &z, ListZ);
+    CHECK(z.size() == 2 && z[0] == b && z[1] == a, "overlay: back to front B, A");
+
+    // On the screen.
+    for (int i = 0; i < 10; i++) {
+        Pump();
+        Sleep(100);
+    }
+    HDC sdc = GetDC(nullptr);
+    auto px = [&](int sx, int sy) { return GetPixel(sdc, sx, sy) & 0xFFFFFF; };
+    const COLORREF blue = RGB(0, 0, 0x40), white = RGB(255, 255, 255), black = RGB(0, 0, 0), red = RGB(255, 0, 0);
+    CHECK(px(30, 30) == blue, "overlay: outside the key, the primary (%06lx)", px(30, 30));
+    CHECK(px(60, 100) == white, "overlay: A's left half in the key (%06lx)", px(60, 100));
+    CHECK(px(150, 100) == black, "overlay: A's right half in the key (%06lx)", px(150, 100));
+    CHECK(px(170, 100) == blue, "overlay: past the key, the primary (%06lx)", px(170, 100));
+    CHECK(px(210, 50) == red, "overlay: B (%06lx)", px(210, 50));
+    CHECK(px(232, 72) == blue, "overlay: B's keyed middle shows the primary (%06lx)", px(232, 72));
+    // Mirrored left to right: A's black half on the left.
+    DDOVERLAYFX ofx = {};
+    ofx.dwSize = sizeof(ofx);
+    ofx.dwDDFX = DDOVERFX_MIRRORLEFTRIGHT;
+    CHECK(a->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_KEYDEST | DDOVER_DDFX, &ofx) == DD_OK, "overlay: A mirrored");
+    for (int i = 0; i < 5; i++) {
+        Pump();
+        Sleep(100);
+    }
+    CHECK(px(60, 100) == black && px(150, 100) == white, "overlay: mirrored (%06lx %06lx)", px(60, 100), px(150, 100));
+    // A blit into a visible overlay shows.
+    fx.dwFillColor = 0xFFE0;  // yellow
+    b->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    for (int i = 0; i < 5; i++) {
+        Pump();
+        Sleep(100);
+    }
+    CHECK(px(210, 50) == RGB(255, 255, 0) && px(232, 72) == RGB(255, 255, 0), "overlay: B filled (%06lx %06lx)", px(210, 50),
+          px(232, 72));
+    CHECK(a->UpdateOverlay(nullptr, a, nullptr, DDOVER_SHOW, nullptr) == DDERR_INVALIDSURFACETYPE, "overlay: not on an overlay");
+    CHECK(a->UpdateOverlay(nullptr, prim, nullptr, DDOVER_HIDE, nullptr) == DD_OK, "overlay: A hidden");
+    for (int i = 0; i < 5; i++) {
+        Pump();
+        Sleep(100);
+    }
+    CHECK(px(60, 100) == RGB(255, 0, 255), "overlay: hidden, the key colour (%06lx)", px(60, 100));
+    CHECK(a->GetOverlayPosition(&x, &y) == DDERR_OVERLAYNOTVISIBLE, "overlay: hidden again");
+    ReleaseDC(nullptr, sdc);
+
+    // A flip chain of overlays; DDFLIP_EVEN/ODD only for those.
+    IDirectDrawSurface7* chain = MakeOverlay(dd, 16, 16, 0, DDSCAPS_FLIP | DDSCAPS_COMPLEX, 1);
+    if (chain) {
+        CHECK(chain->Flip(nullptr, DDFLIP_WAIT) == DD_OK, "overlay: flip chain flips");
+        CHECK(chain->Flip(nullptr, DDFLIP_EVEN) == DD_OK, "overlay: DDFLIP_EVEN");
+        chain->Release();
+    }
+    // System memory: no overlays (ddraw.dll's answer).
+    IDirectDrawSurface7* sys = nullptr;
+    d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    d.dwWidth = d.dwHeight = 16;
+    d.ddsCaps.dwCaps = DDSCAPS_OVERLAY | DDSCAPS_SYSTEMMEMORY;
+    CHECK(dd->CreateSurface(&d, &sys, nullptr) == DDERR_NOOVERLAYHW, "overlay: none in system memory");
+
+    // The primary released first: the visible overlay still holds it, as in ddraw.dll.
+    prim->Release();
+    b->Release();
+    a->Release();
+    plain->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
@@ -1217,9 +1698,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
         r = RunFullscreen8(w, h);
     }
     else if (strstr(cmd, "mouse")) r = RunMouse();
+    else if (strstr(cmd, "overlay")) r = RunOverlay();
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
-    else r = RunUnit() | RunLifetime() | RunCoopModes();
+    else r = RunUnit() | RunExecute() | RunLifetime() | RunCoopModes();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);

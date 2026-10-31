@@ -102,8 +102,8 @@ inline D3DDEVICEDESC7 HalDesc(bool tnl) {
     p.dwDestBlendCaps = c.destBlendCaps & 0x1FFF;
     p.dwAlphaCmpCaps = c.alphaCmpCaps & 0xFF;
     p.dwShadeCaps = c.shadeCaps | 0xC528A;
-    // No cube maps yet (gpures.cpp makes 2D textures only).
-    p.dwTextureCaps = (c.textureCaps & 0x5E7) | D3DPTEXTURECAPS_TRANSPARENCY;
+    // Cube maps where D3D9 has them (gpures.cpp: EnsureCube).
+    p.dwTextureCaps = (c.textureCaps & (0x5E7 | D3DPTEXTURECAPS_CUBEMAP)) | D3DPTEXTURECAPS_TRANSPARENCY;
     DWORD f = c.textureFilterCaps & 0x07030700;
     if (f & D3DPTFILTERCAPS_MINFPOINT) f |= D3DPTFILTERCAPS_NEAREST;
     if (f & D3DPTFILTERCAPS_MINFLINEAR) f |= D3DPTFILTERCAPS_LINEAR;

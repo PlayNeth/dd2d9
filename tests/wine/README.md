@@ -29,7 +29,7 @@ so the mode-switch tests fail there).
 - To look at one sub-test: `WT_ONLY=test_lost_device WINETEST_PLATFORM=windows wine work/ddraw7.exe`,
   with `log=2` in a `dd2d9.ini` next to it.
 
-`baseline.json` was made from dd2d9 0.9.0 with Wine 11.0 (WoW64) on Xvnc. Another Wine
+`baseline.json` was last recorded from dd2d9 1.1.0 (first made from 0.9.0) with Wine 11.0 (WoW64) on Xvnc. Another Wine
 version or X server may move a few display-related results; compare runs from the
 same machine when in doubt. A full run takes a few hours; the four `ddrawN` files can
 run at once (`--only`, each with its own `--display` and `--prefix`), but then the
@@ -40,16 +40,13 @@ The differences dd2d9 makes on purpose (see the main README), and environment on
 
 | Sub-tests | Why |
 | --- | --- |
-| `test_window_style`, `test_redundant_mode_set`, parts of `test_coop_level_mode_set` | in exclusive mode dd2d9 grows the window so that its frame lies off the screen (`ddraw.dll` puts the whole window on it) |
+| `test_window_style`, `test_redundant_mode_set`, parts of `test_coop_level_mode_set` | in exclusive mode dd2d9 grows the window so that its frame lies off the screen (`ddraw.dll` puts the whole window on it); and leaving exclusive mode for another window in the same call, DirectDraw 2+ resize the new window, dd2d9 the old one |
 | `test_p8_blit` | 8-bit to RGB blits go through the palette |
 | `test_rt_caps`, `test_set_render_state`, `d3d test_get_caps*` (SetRenderTarget) | XP's d3dim700 codes: SetRenderTarget's surface checks return DDERR_INVALIDPARAMS and retired render states are accepted; newer Windows (which the tests follow) returns INVALIDCAPS / INVALIDPARAMS |
-| `test_depth_blit`, `test_depth_readback` | Z buffers live on the GPU: DirectDraw can't read or copy them |
-| `test_block_formats_creation`, `test_compressed_surface_stretch` | DXT surfaces in game memory, and blits of DXT surfaces, aren't supported |
-| `test_specular_lighting`, `test_fog_process_vertices`, `test_process_vertices`, `test_lighting`, `test_fog_*` | ProcessVertices quirks (specular with a local viewer, vertex blending beyond the FVF) and D3D9's lighting and fog at the edges |
-| `test_device_load` | Load of mip levels the sizes don't line up for |
+| `test_map_synchronisation` | a vertex buffer written while the GPU still draws from it (`DDLOCK_NOOVERWRITE`) shows in that draw on Windows; dd2d9 hands the vertices over at the draw |
+| `test_draw_primitive` (one check) | the first `DrawIndexedPrimitiveVB` with no indices fails on Windows and the same call then succeeds (Wine fails it too) |
 | `test_cross_device_blt` | dd2d9 converts between pixel formats in Blt; `ddraw.dll` refuses (`DDERR_UNSUPPORTED`) |
 | `test_compute_sphere_visibility` (ddraw4, tests 2 and 5) | Windows' DX6 answers there aren't understood (Wine fails them too) |
-| `test_coop_level_create_device_window` | `DDSCL_CREATEDEVICEWINDOW` isn't implemented |
 | `test_surface_attachment`, `test_flip` (ddraw1) | a reference `ddraw.dll` leaks when a DirectDraw 1 flip chain shrinks |
 | `test_getdc` (A2R10G10B10) | Wine's GDI has no DC for that format; Windows does |
 | `test_initialize` | COM registration in the test prefix |

@@ -530,7 +530,8 @@ Then:
 dd2d9 (`DDraw::SetCooperativeLevel`, ddraw.cpp:694-796; window handling `ApplyWindow`/`CoverMonitor`/`HookWindow`
 434-554):
 - the same validation for flags 1-6;
-- CREATEDEVICEWINDOW unsupported (the focus window is used);
+- CREATEDEVICEWINDOW makes the DirectDrawDeviceWnd window (same class, window procedure and focus/window
+  bookkeeping: `lclWnd_`, `focusWnd_`, `deviceWnd_`) but hidden; dd2d9 presents into the focus window (1.0.3);
 - DirectDraw 1 mode retention (`ddraw1Coop_`), as XP's V1SCLBEHAVIOUR;
 - non-topmost on leaving;
 - **a second object takes exclusive mode over** (`TakeOverExclusive`, 898);
@@ -873,7 +874,8 @@ shows up with invalid parameters, unusual sequences or exact-return-code checks.
 - No overlays or video ports (NOOVERLAYHW, no IDDVideoPortContainer), no FourCC codes reported.
 - No Direct3D of its own: Direct3D IIDs go to D7VK through `D3DProxyQueryDDraw`, not to d3dim.
 - The caps contents, the fixed 512 MB video memory, the emulated scan line and vertical-blank status.
-- DDSCL_CREATEDEVICEWINDOW uses the focus window instead of creating one.
+- DDSCL_CREATEDEVICEWINDOW's window is made hidden (WS_POPUP without WS_VISIBLE): the picture goes to the focus
+  window.
 - Members of complex surfaces don't die with their root (surface-other.md). That is the reason for difference 2's workaround.
 
 ### Matches (verified)

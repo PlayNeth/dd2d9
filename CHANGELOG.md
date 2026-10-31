@@ -3,6 +3,155 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.1.0
+The release after 1.0.1: 1.0.2, 1.0.3 and 1.0.4 (below), and the fixes that testing them in
+games brought.
+
+Since 1.0.1, in short:
+- **Wine's ddraw test suite:** failed checks down from 463 to 162; 386 of its 423 sub-tests
+  clean. The rest are deliberate differences or the test machine (tests/wine/README.md).
+- **Direct3D 7 as Windows draws it:** ProcessVertices lighting (normals, vertex blending,
+  specular power), fog with equal start and end and exponential vertex fog, `Load` of mip
+  levels.
+- **Z buffers DirectDraw can lock and blit**, where the GPU has the INTZ depth format and
+  antialiasing is off (new `zaccess=off` turns it off); a small lock reads back only its
+  rectangle.
+- **FourCC surfaces:** DXT1–5 in the game's memory, and blits to and from DXT, YUY2 and
+  UYVY surfaces. `GetFourCCCodes` lists them.
+- **`DDSCL_CREATEDEVICEWINDOW`** makes `ddraw.dll`'s device window.
+- **Direct3D 3–6** caches its list of active lights; `DDCREATE_EMULATIONONLY` objects make
+  system-memory surfaces.
+
+New in 1.1.0:
+- **antialias2d=off: 2D draws that write depth are antialiased with the rest.** That path
+  draws 2D without antialiasing into a surface with no Z buffer, so a draw there wrote no
+  depth. NFS Porsche Unleashed draws its menu labels with the depth test passing always
+  but writing depth, then translucent button panels behind them: the panels covered the
+  labels, which came out dim. The published 1.0.1 already kept such draws out of that path
+  (a fix made in review); the game showed why, and a draw with no Z buffer attached now
+  takes the 2D path too. New d3d7test check.
+- **In the background after Alt+Tab, back buffers can't be locked**, as with `ddraw.dll`
+  (the primary and offscreen surfaces still can: Captain Claw, 0.7.19). NFS Porsche
+  Unleashed stopped with "D3D pageflip called in while locked" when Alt+Tabbed or the
+  Windows key was pressed. New ddtest check.
+- **`zaccess=off`** (new option): Z buffers on the GPU only, as before 1.0.3, in case a
+  driver misbehaves with the INTZ depth textures that let DirectDraw read and write them.
+- `drawtrace=on` also shows the fog states, marks the draws taken as 2D without
+  antialiasing (`FLAT2D`), and logs the copies between the antialiased and resolved images.
+- New d3d7test check: a back buffer locked after every flip finds the frame drawn into it.
+
+The last of what the README listed as not implemented:
+- **Overlays in exclusive mode.** Overlay surfaces (video memory; RGB, YUY2 or UYVY) are
+  made, and the presenter lays the visible ones over the primary: stretched or shrunk,
+  mirrored, behind a destination colour key and with a source key, in their z-order.
+  Windowed programs still get no overlay hardware: they paint the destination key into
+  their window with GDI, which dd2d9's primary doesn't see (the DirectX 7 SDK's DDOverlay
+  sample showed nothing), and overlays outside their window couldn't be shown. `UpdateOverlay`,
+  `Get`/`SetOverlayPosition`, `UpdateOverlayZOrder`, `EnumOverlayZOrders`, overlay keys in
+  `SetColorKey` and overlay flip chains (`DDFLIP_EVEN`/`ODD`) follow `ddraw.dll`'s checks;
+  the caps report the overlay hardware. New `videooverlay=off` reports none, as before.
+  Wine's overlay tests run windowed, so they still skip. New `ddtest overlay` (exclusive,
+  read back from the screen).
+- **Cube maps** in Direct3D 7: D3D9 cube textures, each face with its mip levels, faces
+  Direct3D drew into read back first; `Load` copies the faces it is told to. Caps say
+  `D3DPTEXTURECAPS_CUBEMAP` where the GPU has it. Wine's `test_device_load` passes all its
+  checks, and the DirectX 7 SDK's EnvCube sample (a cube map drawn into every frame) looks
+  as with Wine's own ddraw. New d3d7test check.
+- **Blits that convert to an 8-bit surface** pick the nearest palette entry (they wrote
+  index 0).
+- **Colour keys on FourCC surfaces** (YUY2, UYVY, DXT) work in blits: compared as the
+  colour they decode to.
+- **Direct3D 3–6 `Pick`** finds the triangles under the point, with their offset and
+  depth, as XP's driver path did (`GetPickRecords`); **`D3DOP_SPAN`** is drawn (as points)
+  where XP drew it: unclipped execution, or after a `PROCESSVERTICES` copy.
+- **Ramp devices light in the mono model**: the lights' brightness shades the material's
+  colours, as XP's Ramp rasterizer did.
+- **Direct3D 7 `GetClipStatus`** follows what is drawn: the clip codes of untransformed
+  vertices, and their extents with `D3DRENDERSTATE_EXTENTS` (from the first call on, as it
+  costs a transform of each vertex). New d3d7test check.
+- New ddtest checks for the 8-bit conversion, FourCC keys, Pick and spans.
+
+## 1.0.4
+- **Small Z buffer locks read back only their rectangle.** 1.0.3 copied the whole Z buffer
+  back for every lock: an 8x8 lock each frame (a lens flare's occlusion test) cost as
+  much as a whole one. A lock of at most 64x64 pixels now copies just that part through a
+  small target, the rest of the CPU copy staying behind until something reads it (what
+  DirectDraw wrote into a part goes up to the GPU first). New `ddbench zlock`: under Wine
+  (software rendering) an 8x8 lock went from about 1.7 to 0.6 ms a frame at 640x480 and
+  from 4 to 0.6 ms at 1024x768; the rest is waiting for the GPU, which a read needs. New
+  d3d7test check: Z read and written in small and whole locks, and drawn against.
+- **YUY2 and UYVY surfaces blit** to and from any surface (a video player decoding into
+  an offscreen surface and blitting it to the screen, stretched or not): converted
+  through 32-bit colour with BT.601 video levels, the chroma of a written pixel pair
+  averaged. A plain copy between two surfaces of one YUV format is copied as it is. A
+  colour fill of a YUV surface writes the value as it is (Wine's `test_color_fill`).
+  `GetFourCCCodes` now lists YUY2, UYVY and DXT1–5 and the caps say `DDCAPS_BLTFOURCC`, as
+  a driver that blits them does (until now none were listed, so a game that checks first
+  never used them). New ddtest checks. Wine's `test_rt_caps` now runs its YUY2 flip-chain
+  case, which meets the known difference in SetRenderTarget's codes (XP's
+  `DDERR_INVALIDPARAMS`, newer Windows' `DDERR_INVALIDCAPS`): 2 more expected failures,
+  162 in all.
+
+## 1.0.3
+The three missing features behind Wine test failures (failed checks down from 367 to 160;
+37 of 423 sub-tests left, each a difference on purpose, a feature still missing or the test
+machine: tests/wine/README.md):
+- **DXT1–5 surfaces in game memory** (`DDSD_LPSURFACE`): taken by their linear size, which
+  must hold every block (a pitch is refused; IDirectDraw4 takes a pitch flag alone), and
+  `GetSurfaceDesc` reports a linear size of ~0 for them, as `ddraw.dll`
+  (`test_block_formats_creation`, ddraw4/7).
+- **Blits from, to and between DXT surfaces:** each compressed side is decoded to A8R8G8B8
+  for the blit (stretching, keys and mirroring as any blit), and the destination's blocks
+  that the rectangle touches are encoded again (new `src/dxt.cpp`). As Windows' drivers
+  encode: the two colours farthest apart are a block's endpoints (two colours come back
+  exactly), and a source without alpha is opaque. Fills into them still fail with
+  `DDERR_UNSUPPORTED` (`test_compressed_surface_stretch`,
+  `test_surface_format_conversion_alpha`'s DXT cases, which used to be skipped).
+- **Z buffers readable and writable by DirectDraw:** where the GPU samples `INTZ` depth
+  textures (nearly all, DXVK too) and antialiasing is off, a Z buffer is made as one. Lock
+  and Blt read it back by drawing it into an R32F target, and what DirectDraw writes goes
+  up by drawing it with a shader writing depth, before the next draw or clear that needs
+  it (a whole-target clear skips the upload). Depth fills stay on the GPU as before
+  (`test_depth_blit`, `test_depth_readback`, ddraw2/4/7).
+- **`DDSCL_CREATEDEVICEWINDOW`** makes `ddraw.dll`'s "DirectDrawDeviceWnd" window, owned
+  by the focus window, handing it the keyboard focus. It stays hidden (the picture still
+  goes to the focus window) and is destroyed by the next call with another window or the
+  release. SetCooperativeLevel's rules about the focus window follow `ddraw.dll`'s
+  window-and-focus bookkeeping: `SetCooperativeLevel(NULL, DDSCL_NORMAL)` forgets the
+  focus window for `DDERR_NOFOCUSWINDOW`, and `DDSCL_SETFOCUSWINDOW` with
+  `DDSCL_CREATEDEVICEWINDOW` and no window makes the device window, then fails with
+  `DDERR_NOHWND` (`test_coop_level_create_device_window`, all four interfaces).
+
+## 1.0.2
+Wine's test suite down from 463 failed checks to 367 (50 of 423 sub-tests left, all either
+differences on purpose, missing features or the test machine: tests/wine/README.md):
+- **DirectDraw objects made with `DDCREATE_EMULATIONONLY`** put their surfaces in system
+  memory (unless video memory is asked for) and refuse 24-bit Z buffers, as the emulation
+  layer does (`test_caps`, all four interfaces).
+- **Direct3D 7 ProcessVertices lighting, as XP's:**
+  - normals go through the transpose of the inverse of the whole 4x4 world x view: a
+    non-affine world turns them to zero, a singular one (no inverse) too (`test_lighting`);
+  - normals are normalized only with `NORMALIZENORMALS`, so a world or view that shrinks
+    lights stronger and saturates (`test_fog_process_vertices`: 57% green became full);
+  - a material with specular power 0 keeps the last power above 0
+    (`test_specular_lighting`, 47 checks);
+  - vertex blending reads `VERTEXBLEND`'s count of weights after the position, whatever
+    the FVF declares (this undoes 0.9.17's cap at the FVF's weights, which Wine's test on
+    Windows contradicts), blends the matrices' whole 4-component results (a world with a w
+    column), and blends each matrix's normal by the weights without normalizing the sum
+    (`test_process_vertices`, `test_lighting`).
+- **Direct3D 7 fog, as Windows draws it:** exponential vertex fog with lighting off on
+  vertices that bring a specular colour takes the fog factor from its alpha
+  (`test_fog_interpolation`); FOGSTART equal to FOGEND makes table fog a step at that depth
+  and linear vertex fog fog everything (`test_fog_special`). Sent per draw (`SendFog`).
+- **`IDirect3DDevice7::Load` of mip levels:** each smaller level's source rectangle rounds
+  outward and the destination point halves, also over the source levels skipped to reach
+  the destination's size (`test_device_load`: the levels were off by a pixel, and a load
+  into a smaller texture failed).
+- **Direct3D 3-6 keeps its list of active lights between draws** while no light, viewport
+  light list, current viewport or view matrix changes (`g_lightGen`).
+- The Wine test baseline is updated, and its README lists the newly triaged sub-tests.
+
 ## 1.0.1
 - **Transformed vertices are drawn without Direct3D 9's clipping**, so depth past [0, 1]
   is clamped per pixel as the hardware of the era did, not cut off. NFS Porsche

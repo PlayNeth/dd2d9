@@ -34,6 +34,14 @@ public:
     HRESULT UnlockAs(LPRECT r) { return s->Unlock(nullptr, r, V); }
 
     static Surface* S(void* iface) { return Surface::From(iface); }
+    // A blit into a visible overlay changes what the presenter shows over the primary.
+    HRESULT OverlayDrawn(HRESULT hr) {
+        if (SUCCEEDED(hr) && (s->desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY)) {
+            Guard l;
+            s->MarkDirtyIfVisible();
+        }
+        return hr;
+    }
 
     STDMETHOD(QueryInterface)(REFIID r, void** p) override { return s->QueryInterface(r, p, V); }
     STDMETHOD_(ULONG, AddRef)() override { return s->AddRef(Surface::SlotFor(V)); }
@@ -64,7 +72,7 @@ public:
         Surface* ss = S(src);
         if (src && !ss) return DDERR_INVALIDPARAMS;
         const bool srcOld = ss && (static_cast<void*>(src) == ss->Iface(1) || static_cast<void*>(src) == ss->Iface(2));
-        return TraceFail("Blt", s, s->Blt(d, ss, sr, f, fx, V, srcOld));
+        return OverlayDrawn(TraceFail("Blt", s, s->Blt(d, ss, sr, f, fx, V, srcOld)));
     }
     // ddraw.dll checks the batch, then doesn't do it.
     STDMETHOD(BltBatch)(LPDDBLTBATCH b, DWORD n, DWORD) {
@@ -85,7 +93,7 @@ public:
     STDMETHOD(BltFast)(DWORD x, DWORD y, I* src, LPRECT sr, DWORD t) {
         Surface* ss = S(src);
         if (!ss) return DDERR_INVALIDPARAMS;
-        return TraceFail("BltFast", s, s->BltFast(x, y, ss, sr, t, V));
+        return OverlayDrawn(TraceFail("BltFast", s, s->BltFast(x, y, ss, sr, t, V)));
     }
     STDMETHOD(DeleteAttachedSurface)(DWORD f, I* a) {
         Guard l;
@@ -95,9 +103,10 @@ public:
     STDMETHOD(EnumAttachedSurfaces)(LPVOID ctx, typename T::CB cb) {
         return s->EnumAttachedSurfaces(V, ctx, reinterpret_cast<void*>(cb));
     }
-    STDMETHOD(EnumOverlayZOrders)(DWORD f, LPVOID, typename T::CB cb) {
-        if (!cb || f > 1) return DDERR_INVALIDPARAMS;  // DDENUMOVERLAYZ_BACKTOFRONT (0) or _FRONTTOBACK (1)
-        return DD_OK;  // no overlays to list
+    STDMETHOD(EnumOverlayZOrders)(DWORD f, LPVOID ctx, typename T::CB cb) {
+        if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(reinterpret_cast<void*>(cb)))) return DDERR_INVALIDPARAMS;
+        if (f > 1) return DDERR_INVALIDPARAMS;  // DDENUMOVERLAYZ_BACKTOFRONT (0) or _FRONTTOBACK (1)
+        return s->EnumOverlayZOrders(f, V, ctx, reinterpret_cast<void*>(cb));
     }
     STDMETHOD(Flip)(I* target, DWORD f) {
         Surface* t = S(target);
@@ -139,7 +148,7 @@ public:
         if (!x || !y) return DDERR_INVALIDPARAMS;
         *x = *y = 0;
         Guard l;
-        return s->IsLost() ? DDERR_SURFACELOST : DDERR_NOTAOVERLAYSURFACE;
+        return s->GetOverlayPosition(x, y);
     }
     STDMETHOD(GetPalette)(LPDIRECTDRAWPALETTE* p) { Guard l; return s->GetPalette(p); }
     STDMETHOD(GetPixelFormat)(LPDDPIXELFORMAT pf) { Guard l; return s->GetPixelFormat(pf); }
@@ -159,28 +168,25 @@ public:
     STDMETHOD(Restore)() { Guard l; return TraceFail("Restore", s, s->Restore()); }
     STDMETHOD(SetClipper)(LPDIRECTDRAWCLIPPER c) { Guard l; return s->SetClipper(c); }
     STDMETHOD(SetColorKey)(DWORD f, LPDDCOLORKEY k) { Guard l; return s->SetColorKey(f, k, V); }
-    STDMETHOD(SetOverlayPosition)(LONG, LONG) {
+    STDMETHOD(SetOverlayPosition)(LONG x, LONG y) {
         Guard l;
-        return s->IsLost() ? DDERR_SURFACELOST : DDERR_NOTAOVERLAYSURFACE;
+        return s->SetOverlayPosition(x, y);
     }
     STDMETHOD(SetPalette)(LPDIRECTDRAWPALETTE p) { Guard l; return s->SetPalette(p, V); }
     STDMETHOD(Unlock)(typename T::UL u) { return UnlockAs(u); }
-    STDMETHOD(UpdateOverlay)(LPRECT, I* dest, LPRECT, DWORD f, LPDDOVERLAYFX fx) {
-        DD2D9_STUB("UpdateOverlay");
+    STDMETHOD(UpdateOverlay)(LPRECT sr, I* dest, LPRECT dr, DWORD f, LPDDOVERLAYFX fx) {
         Guard l;
         if (s->IsLost()) return DDERR_SURFACELOST;
-        Surface* d = S(dest);
-        if (!d) return DDERR_INVALIDPARAMS;
-        if (d->IsLost()) return DDERR_SURFACELOST;
-        if ((f & 0xF8000000) || ((f & DDOVER_DDFX) && (!fx || fx->dwSize != sizeof(DDOVERLAYFX))))
-            return DDERR_INVALIDPARAMS;
-        return DDERR_NOTAOVERLAYSURFACE;
+        return TraceFail("UpdateOverlay", s, s->UpdateOverlay(sr, S(dest), dr, f, fx));
     }
     STDMETHOD(UpdateOverlayDisplay)(DWORD f) {
         if (f & ~DWORD(DDOVER_REFRESHDIRTYRECTS | DDOVER_REFRESHALL)) return DDERR_INVALIDPARAMS;
         return (s->desc.ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ? DDERR_UNSUPPORTED : DD_OK;
     }
-    STDMETHOD(UpdateOverlayZOrder)(DWORD, I*) { return DDERR_NOTAOVERLAYSURFACE; }
+    STDMETHOD(UpdateOverlayZOrder)(DWORD f, I* ref) {
+        Guard l;
+        return s->UpdateOverlayZOrder(f, S(ref));
+    }
     // IDirectDrawSurface2+
     STDMETHOD(GetDDInterface)(LPVOID* out) { Guard l; return s->GetDDInterface(out); }
     STDMETHOD(PageLock)(DWORD f) { return s->PageLock(f); }
@@ -282,10 +288,22 @@ public:
     STDMETHOD(FlipToGDISurface)() { DD2D9_READY(); return d->FlipToGDISurface(); }
     STDMETHOD(GetCaps)(LPDDCAPS drv, LPDDCAPS hel) { DD2D9_READY(); return d->GetCaps(drv, hel); }
     STDMETHOD(GetDisplayMode)(typename T::Desc* desc) { DD2D9_READY(); return d->GetDisplayMode(desc, V); }
-    STDMETHOD(GetFourCCCodes)(LPDWORD n, LPDWORD) {
+    STDMETHOD(GetFourCCCodes)(LPDWORD n, LPDWORD codes) {
         DD2D9_READY();
         if (!n) return DDERR_INVALIDPARAMS;
-        *n = 0;
+        // The FourCC surfaces dd2d9 makes and blits, as a driver lists them. As ddraw.dll:
+        // no array, the count; otherwise at most *n codes, *n set to how many.
+        static const DWORD kCodes[] = {MAKEFOURCC('Y', 'U', 'Y', '2'), MAKEFOURCC('U', 'Y', 'V', 'Y'),
+                                       MAKEFOURCC('D', 'X', 'T', '1'), MAKEFOURCC('D', 'X', 'T', '2'),
+                                       MAKEFOURCC('D', 'X', 'T', '3'), MAKEFOURCC('D', 'X', 'T', '4'),
+                                       MAKEFOURCC('D', 'X', 'T', '5')};
+        const DWORD total = DWORD(sizeof(kCodes) / sizeof(kCodes[0]));
+        if (codes) {
+            *n = *n < total ? *n : total;
+            for (DWORD i = 0; i < *n; i++) codes[i] = kCodes[i];
+        } else {
+            *n = total;
+        }
         return DD_OK;
     }
     STDMETHOD(GetGDISurface)(SI** out) { DD2D9_READY(); return d->GetGDISurface(reinterpret_cast<void**>(out), T::SV); }

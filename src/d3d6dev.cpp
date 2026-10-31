@@ -740,7 +740,7 @@ HRESULT Device::Download(Viewport* vp) {
     if (!vp->dataSet) return D3DERR_VIEWPORTDATANOTSET;
     MakeMap(vp->data, &map);  // degenerate data keeps the previous mapping
     downloaded = vp->id;
-    vp->lightsDirty = true;
+    vp->lightsDirty = true, g_lightGen++;
     ApplyViewport9();
     return D3D_OK;
 }
@@ -1203,21 +1203,38 @@ HRESULT Device::F1::Execute(IDirect3DExecuteBuffer* b, IDirect3DViewport* v, DWO
     return o->ExecuteE(static_cast<ExecBuf*>(b), VpFrom(v), flags);
 }
 
-// Picking isn't emulated: no records (XP ignores ExecutePick's result too).
+// The execute buffer walked as XP's D3DHAL_ExecutePick walks it (ExecuteI with `picking`:
+// transforms and state, no drawing), the hits kept for GetPickRecords. Its result is ignored,
+// as XP's: D3D_OK.
 HRESULT Device::F1::Pick(IDirect3DExecuteBuffer* b, IDirect3DViewport* v, DWORD, D3DRECT* r) {
     if (!b || !v || !r) return DDERR_INVALIDOBJECT;
     Guard l;
     ExecBuf* eb = static_cast<ExecBuf*>(b);
     if (eb->dev != o || VpFrom(v)->dev != o) return DDERR_INVALIDPARAMS;
     if (eb->locked) return D3DERR_EXECUTE_LOCKED;
-    o->pickCount = 0;
+    o->pickRecs.clear();
+    // What the walk's vertices would leave in the clip status, extents and statistics is
+    // put back: a pick isn't a draw.
+    const DWORD status = o->status;
+    float ext[4];
+    memcpy(ext, o->ext, sizeof(ext));
+    const D3DSTATS stats = o->stats;
+    o->picking = r;
+    o->ExecuteE(eb, VpFrom(v), D3DEXECUTE_CLIPPED);
+    o->picking = nullptr;
+    o->status = status;
+    memcpy(o->ext, ext, sizeof(ext));
+    o->stats = stats;
     return D3D_OK;
 }
 
-HRESULT Device::F1::GetPickRecords(DWORD* n, D3DPICKRECORD*) {
+// As XP: the records copied when there is room for all of them, the count written always.
+HRESULT Device::F1::GetPickRecords(DWORD* n, D3DPICKRECORD* recs) {
     if (!n) return DDERR_INVALIDPARAMS;  // XP writes it unchecked
     Guard l;
-    *n = o->pickCount;
+    const DWORD count = DWORD(o->pickRecs.size());
+    if (recs && *n >= count) std::copy(o->pickRecs.begin(), o->pickRecs.end(), recs);
+    *n = count;
     return D3D_OK;
 }
 

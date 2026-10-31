@@ -629,6 +629,7 @@ void Presenter::Loop() {
         // pixels: they are converted without it, so the game's Blt, Lock and Flip
         // never wait for the conversion.
         Snapshot snap;
+        std::vector<OverlayLayer*> overlays;  // shown over the primary (overlay.cpp)
         bool gpuFrame = false;     // snap.buf's render target is the newest copy: presented from it
         RECT area = {0, 0, 0, 0};  // what to convert, in primary surface coordinates
         uint64_t seq = 0;
@@ -646,6 +647,10 @@ void Presenter::Loop() {
                 // The staging surface holds the last converted frame: a partial update
                 // needs it to show this very surface and buffer, at the same position.
                 all = all || stagingStale_ || !EqualRect(&src, &lastSrc_) || p != lastPrimary_ || p->buf != lastBuf_;
+                // Overlays shown on it: laid over the whole frame, converted whole (and the next
+                // frame too, see stagingStale_ below: what they covered comes back).
+                TakeOverlays(p, &overlays);
+                if (!overlays.empty()) all = true;
                 if (p->dcOut) all = true;  // GDI may be drawing anywhere
                 else if (p->lockCount) UnionRect(&changed, &changed, &p->lockArea);  // being written right now
                 if (all) area = src;
@@ -656,7 +661,9 @@ void Presenter::Loop() {
                 // applied there. So does a source rectangle outside the surface (a window
                 // partly off the screen), which StretchRect would refuse.
                 const bool inside = src.left >= 0 && src.top >= 0 && src.right <= p->buf->w && src.bottom <= p->buf->h;
-                if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale && (p->buf->fmt.pal8 || !inside)) {
+                // So does one with overlays over it.
+                if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale &&
+                    (p->buf->fmt.pal8 || !inside || !overlays.empty())) {
                     GpuCpuAccess(p, false);
                     area = src;
                 }
@@ -677,7 +684,7 @@ void Presenter::Loop() {
                 lastSrc_ = src;
                 lastPrimary_ = p;
                 lastBuf_ = p->buf;
-                if (!gpuFrame) stagingStale_ = false;
+                if (!gpuFrame) stagingStale_ = !overlays.empty();
                 DD2D9_TRACE("present #%llu: primary %p, area %ld,%ld-%ld,%ld, palette %p v%lu",
                            static_cast<unsigned long long>(seq), static_cast<void*>(p), area.left, area.top,
                            area.right, area.bottom, static_cast<const void*>(p->ShownPalette()),
@@ -700,8 +707,10 @@ void Presenter::Loop() {
         if (snap.buf && !gpuFrame) {
             const double t0 = Seconds();
             Convert(snap, area, frame_.data() + size_t(area.top - src.top) * sw + (area.left - src.left), int(sw * 4));
+            if (!overlays.empty()) DrawOverlays(overlays, snap.buf, src, frame_.data(), sw);
             convertTime = Seconds() - t0;
         }
+        DropOverlays(&overlays);
         // The shared device again (taken after g_lock, never the other way round: the game's
         // Direct3D calls hold g_lock and then take it). It may have been lost meanwhile,
         // taking the staging surface with it.

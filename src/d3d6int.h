@@ -367,7 +367,7 @@ public:
     int bgDepthSlot = -1;
     void* bgDepthIface = nullptr;   // the interface pointer the game gave / GetBackgroundDepth returns
     std::vector<Light*> lights;     // in the order added (XP's list walked from the oldest)
-    bool lightsDirty = true;
+    bool lightsDirty = true;  // (with g_lightGen: what TransformVerts's light cache keys on)
     void Orphan();
 
 private:
@@ -380,6 +380,10 @@ Viewport* VpFrom(IUnknown* p);  // any IDirect3DViewport version (one pointer)
 // A vertex through the front end: XP's clip space (0 <= x', y', z' <= w inside, C §1.6),
 // the screen form (for outside vertices of a clipped batch, XP's TL buffer holds the clip
 // coordinates there instead), colours and texture coordinates.
+// Counts changes to any light or viewport's light list (g_lock): the CPU pipeline's cached
+// list of active lights (TransformVerts) is made again when it moves.
+inline unsigned g_lightGen = 0;
+
 struct PVert {
     float cx, cy, cz, cw;     // clip space
     float sx, sy, sz, rhw;    // screen
@@ -469,7 +473,10 @@ public:
     std::vector<WORD> batchI;
     // Execute (C §6)
     std::vector<PVert> tl;       // the TL buffer, indices of execute-buffer primitives
-    DWORD pickCount = 0;
+    // Pick (B §9.2): while set, ExecuteI picks instead of drawing: the triangles that cover
+    // the rectangle's top-left pixel, recorded as XP's rasterizer does.
+    const D3DRECT* picking = nullptr;
+    std::vector<D3DPICKRECORD> pickRecs;
 
     // The DirectDraw object kept (not freed) while the device lives: releasing its last
     // surfaces in ~Device may otherwise free it, and its Gpu, before `ctx` (destroyed after

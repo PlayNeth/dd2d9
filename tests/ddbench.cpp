@@ -6,10 +6,16 @@
 //   ddbench window [seconds]
 //                           windowed primary: small Blts to the primary (a cursor / HUD
 //                           pattern), to see how much the presenter converts
+//   ddbench zlock [w h]     Direct3D 7 frames (clear, a triangle) on an offscreen target
+//                           with a 16-bit Z buffer, each frame waited for (a 1x1 read of
+//                           the target): the frame time without locking the Z buffer, with
+//                           an 8x8 lock of it (a lens flare's occlusion test) and with a
+//                           whole-surface lock
 // Results are appended to ddbench.txt next to the executable.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ddraw.h>
+#include <d3d.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -317,6 +323,92 @@ static int RunWindow(double seconds) {
     return 0;
 }
 
+static int RunZLock(int w, int h) {
+    IDirectDraw7* dd = nullptr;
+    if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+    d.dwWidth = DWORD(w);
+    d.dwHeight = DWORD(h);
+    SetFormat(&d.ddpfPixelFormat, 32);
+    IDirectDrawSurface7* rt = nullptr;
+    if (FAILED(dd->CreateSurface(&d, &rt, nullptr))) return 2;
+    DDSURFACEDESC2 z = {};
+    z.dwSize = sizeof(z);
+    z.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    z.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY;
+    z.dwWidth = DWORD(w);
+    z.dwHeight = DWORD(h);
+    z.ddpfPixelFormat.dwSize = sizeof(z.ddpfPixelFormat);
+    z.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER;
+    z.ddpfPixelFormat.dwZBufferBitDepth = 16;
+    z.ddpfPixelFormat.dwZBitMask = 0xFFFF;
+    IDirectDrawSurface7* zs = nullptr;
+    if (FAILED(dd->CreateSurface(&z, &zs, nullptr)) || FAILED(rt->AddAttachedSurface(zs))) return 3;
+    IDirect3D7* d3d = nullptr;
+    IDirect3DDevice7* dev = nullptr;
+    if (FAILED(dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d))) ||
+        FAILED(d3d->CreateDevice(IID_IDirect3DHALDevice, rt, &dev)))
+        return 4;
+    dev->SetRenderState(D3DRENDERSTATE_ZENABLE, TRUE);
+    dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
+    struct V { float x, y, z, rhw; DWORD c; };
+    const float fw = float(w), fh = float(h);
+    V tri[3] = {{fw * 0.5f, fh * 0.1f, 0.5f, 1, 0xFFFF0000}, {fw * 0.9f, fh * 0.9f, 0.5f, 1, 0xFF00FF00},
+                {fw * 0.1f, fh * 0.9f, 0.5f, 1, 0xFF0000FF}};
+    const char* names[3] = {"no Z lock", "8x8 Z lock (READONLY)", "whole Z lock"};
+    volatile DWORD sink = 0;
+    // A first round unmeasured: the first use of each path makes its resources (and the
+    // driver may compile shaders then).
+    for (int pass = 0; pass < 6; pass++) {
+        const int mode = pass % 3;
+        const bool measured = pass >= 3;
+        int frames = 0;
+        double worst = 0;
+        const double t0 = Now();
+        while (measured ? Now() - t0 < 2.0 : frames < 3) {
+            const double f0 = Now();
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+            dev->BeginScene();
+            dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, tri, 3, 0);
+            dev->EndScene();
+            if (mode) {
+                RECT r = {w / 2 - 4, h / 2 - 4, w / 2 + 4, h / 2 + 4};
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (SUCCEEDED(zs->Lock(mode == 1 ? &r : nullptr, &l, DDLOCK_WAIT | (mode == 1 ? DDLOCK_READONLY : 0), nullptr))) {
+                    sink = sink + *static_cast<volatile WORD*>(l.lpSurface);
+                    zs->Unlock(mode == 1 ? &r : nullptr);
+                }
+            }
+            {  // every mode ends the frame waiting for the GPU, as presenting it would
+                RECT r = {0, 0, 1, 1};
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (SUCCEEDED(rt->Lock(&r, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                    sink = sink + *static_cast<volatile DWORD*>(l.lpSurface);
+                    rt->Unlock(&r);
+                }
+            }
+            worst = std::max(worst, Now() - f0);
+            frames++;
+        }
+        const double t = Now() - t0;
+        if (!measured) continue;
+        fprintf(g_out, "zlock %dx%d: %-22s %7.3f ms/frame (worst %.3f)\n", w, h, names[mode], t / frames * 1000, worst * 1000);
+        fflush(g_out);
+    }
+    dev->Release();
+    d3d->Release();
+    zs->Release();
+    rt->Release();
+    dd->Release();
+    return int(sink & 0);
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
@@ -339,6 +431,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
         sscanf(cmd, "%*s %lf", &seconds);
         fprintf(g_out, "== ddbench window\n");
         r = RunWindow(seconds);
+    } else if (!strcmp(mode, "zlock")) {
+        sscanf(cmd, "%*s %d %d", &w, &h);
+        fprintf(g_out, "== ddbench zlock\n");
+        r = RunZLock(w, h);
     }
     fclose(g_out);
     return r;

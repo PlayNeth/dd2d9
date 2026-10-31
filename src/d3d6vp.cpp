@@ -51,6 +51,7 @@ Viewport::~Viewport() {
         l->Release();
     }
     lights.clear();
+    g_lightGen++;
     if (dev) dev->RemoveViewport(this);
     if (d3d_) {
         auto it = std::find(d3d_->viewports.begin(), d3d_->viewports.end(), this);
@@ -390,6 +391,7 @@ HRESULT Viewport::AddLight(IDirect3DLight* p) {
     lights.push_back(light);
     light->vp = this;
     lightsDirty = true;
+    g_lightGen++;
     light->AddRef();
     return D3D_OK;
 }
@@ -402,6 +404,7 @@ HRESULT Viewport::DeleteLight(IDirect3DLight* p) {
     lights.erase(std::find(lights.begin(), lights.end(), light));
     light->vp = nullptr;
     lightsDirty = true;
+    g_lightGen++;
     light->Release();
     return D3D_OK;
 }

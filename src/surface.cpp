@@ -218,6 +218,7 @@ Surface::Surface(DDraw* d, const DDSURFACEDESC2& sd, Buffer* b, int ver) : dd(d)
     dd->DisplayMode(&modeW, &modeH, &modeBpp);
     dd->IntAddRef();
     dd->surfaces.push_back(this);
+    if (desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY) OverlayZOrder().insert(OverlayZOrder().begin(), this);  // in front
     if (desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) {  // called with g_lock held
         vidMemBytes = uint64_t(buf->pitch) * uint64_t(buf->fmt.BlockCompressed() ? (buf->h + 3) & ~3 : buf->h);
         dd->vidMemUsed += vidMemBytes;
@@ -226,6 +227,7 @@ Surface::Surface(DDraw* d, const DDSURFACEDESC2& sd, Buffer* b, int ver) : dd(d)
 
 Surface::~Surface() {
     // Called with g_lock held.
+    OverlayGone();
     // What AddAttachedSurface attached here holds a reference: unlink everything first,
     // then release those (which may destroy them).
     std::vector<Surface*> drop;
@@ -792,20 +794,37 @@ HRESULT Surface::GetColorKey(DWORD flags, DDCOLORKEY* key) {
     return DD_OK;
 }
 
-// Checks in ddraw.dll's order (spec section 3). dd2d9 reports colour keys for blits only
-// (DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT): overlay keys and key ranges are refused as on
-// hardware without them.
+// Checks in ddraw.dll's order (spec section 3). dd2d9 reports single colour keys (no
+// ranges): for blits, and for overlays while they are offered (videooverlay=on).
 HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key, int version) {
     if (IsLost()) return DDERR_SURFACELOST;
     if (desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER) return DDERR_INVALIDSURFACETYPE;
     if (version == 7 && (desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) return DDERR_NOTONMIPMAPSUBLEVEL;
     if (flags & ~(kCkTypes | DDCKEY_COLORSPACE)) return DDERR_INVALIDPARAMS;
+    const bool overlays = OverlaysOffered(dd);
+    // A destination overlay key: on a surface that overlays go on or are (the primary, an overlay).
+    auto destOverlayCheck = [&]() -> HRESULT {
+        if (!overlays) return DDERR_NOOVERLAYHW;
+        if (!HasOverlayData()) return DDERR_NOTAOVERLAYSURFACE;
+        return DD_OK;
+    };
     if (!key) {
         // Removes the key of the first type named, in ddraw.dll's order; none named: nothing.
-        if (flags & DDCKEY_DESTOVERLAY) return DDERR_NOOVERLAYHW;
-        if (flags & DDCKEY_DESTBLT) hasCk[kCkDestBlt] = false;
-        else if (flags & DDCKEY_SRCOVERLAY) hasCk[kCkSrcOverlay] = false;
-        else if (flags & DDCKEY_SRCBLT) hasCk[kCkSrcBlt] = false;
+        // An overlay key also leaves the overlay's own use of it (UpdateOverlay's flags).
+        if (flags & DDCKEY_DESTOVERLAY) {
+            if (HRESULT hr = destOverlayCheck(); FAILED(hr)) return hr;
+            hasCk[kCkDestOverlay] = false;
+            overlayFlags &= ~DWORD(DDOVER_KEYDEST | DDOVER_KEYDESTOVERRIDE);
+            if (OverlayShown()) overlayDest->dd->MarkDirty();
+        } else if (flags & DDCKEY_DESTBLT) {
+            hasCk[kCkDestBlt] = false;
+        } else if (flags & DDCKEY_SRCOVERLAY) {
+            hasCk[kCkSrcOverlay] = false;
+            overlayFlags &= ~DWORD(DDOVER_KEYSRC | DDOVER_KEYSRCOVERRIDE);
+            if (OverlayShown()) overlayDest->dd->MarkDirty();
+        } else if (flags & DDCKEY_SRCBLT) {
+            hasCk[kCkSrcBlt] = false;
+        }
         return DD_OK;
     }
     const DWORD type = flags & kCkTypes;
@@ -813,8 +832,10 @@ HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key, int version) {
     // Without DDCKEY_COLORSPACE the key is the low value.
     const DWORD low = key->dwColorSpaceLowValue;
     const DWORD high = (flags & DDCKEY_COLORSPACE) ? key->dwColorSpaceHighValue : low;
-    if (type & (DDCKEY_SRCOVERLAY | DDCKEY_DESTOVERLAY)) return DDERR_NOCOLORKEYHW;
+    if ((type & (DDCKEY_SRCOVERLAY | DDCKEY_DESTOVERLAY)) && !overlays) return DDERR_NOCOLORKEYHW;
     if (low != high) return DDERR_NOCOLORKEYHW;
+    if (type & DDCKEY_DESTOVERLAY)
+        if (HRESULT hr = destOverlayCheck(); FAILED(hr)) return hr;
     const int i = CkIndex(type);
     ck[i].dwColorSpaceLowValue = ck[i].dwColorSpaceHighValue = low;
     hasCk[i] = true;
@@ -944,7 +965,8 @@ HRESULT Surface::GetSurfaceDesc(DDSURFACEDESC2* d) {
     ReportedFormat().ToDDPF(&d->ddpfPixelFormat);
     if (buf->fmt.BlockCompressed()) {
         d->dwFlags |= DDSD_LINEARSIZE;
-        d->dwLinearSize = DWORD(buf->pitch) * ((buf->h + 3) & ~3);
+        // In the game's memory: ~0, as ddraw.dll reports it (Wine's test_block_formats_creation).
+        d->dwLinearSize = buf->ownsMemory ? DWORD(buf->pitch) * ((buf->h + 3) & ~3) : ~0u;
     } else {
         d->dwFlags |= DDSD_PITCH;
         d->lPitch = buf->pitch;
@@ -956,6 +978,14 @@ HRESULT Surface::GetSurfaceDesc(DDSURFACEDESC2* d) {
     if (hasCk[kCkSrcBlt]) {
         d->dwFlags |= DDSD_CKSRCBLT;
         d->ddckCKSrcBlt = ck[kCkSrcBlt];
+    }
+    if (hasCk[kCkDestOverlay]) {
+        d->dwFlags |= DDSD_CKDESTOVERLAY;
+        d->ddckCKDestOverlay = ck[kCkDestOverlay];
+    }
+    if (hasCk[kCkSrcOverlay]) {
+        d->dwFlags |= DDSD_CKSRCOVERLAY;
+        d->ddckCKSrcOverlay = ck[kCkSrcOverlay];
     }
     // The back buffer count only on a created chain's front.
     if (desc.dwFlags & DDSD_BACKBUFFERCOUNT) {
@@ -1087,8 +1117,11 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     // Lost, as in ddraw.dll, except while the game is in the background after Alt+Tab
     // only: dd2d9 still has the pixels, so the lock works (a deliberate difference).
     // Captain Claw locks its primary there, ignores the failure and writes through the
-    // null pointer.
-    const bool background = dd->DevState() == DDraw::kDevLost && dd->FocusLossOnly() && (!lost || drawableLost);
+    // null pointer. Not the back buffers, which fail as with ddraw.dll: NFS Porsche
+    // Unleashed, Alt+Tabbed, stopped with "D3D pageflip called in while locked" while its
+    // back buffer could be locked there.
+    const bool background = dd->DevState() == DDraw::kDevLost && dd->FocusLossOnly() && (!lost || drawableLost) &&
+                            (isPrimary || !InPrimaryChain());
     if (CantDraw() && !background) return DDERR_SURFACELOST;
     auto* d = static_cast<DDSURFACEDESC2*>(outDesc);
     const DWORD caps = desc.ddsCaps.dwCaps;
@@ -1296,6 +1329,13 @@ void Surface::CpuAccess(bool write, const RECT* area) {
     if (write) buf->cpuSerial = NextCpuSerial();              // a texture's GPU copy is made from its levels' buffers
 }
 
+Surface* CubeFace(Surface* root, DWORD face) {
+    if (root->desc.ddsCaps.dwCaps2 & face) return root;
+    for (Surface* c : root->children)
+        if ((c->desc.ddsCaps.dwCaps2 & face) && !(c->desc.ddsCaps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) return c;
+    return nullptr;
+}
+
 Surface* Surface::NextMipLevel() const {
     const Surface* family = root ? root : this;
     for (Surface* a : attached)
@@ -1304,7 +1344,10 @@ Surface* Surface::NextMipLevel() const {
 }
 
 void Surface::MarkDirtyIfVisible(const RECT* area) {
-    if (!isPrimary) return;
+    if (!isPrimary) {
+        if (OverlayShown() && overlayDest->isPrimary) overlayDest->dd->MarkDirty();  // laid over the primary
+        return;
+    }
     if (area) dd->MarkDirtyRect(*area);
     else dd->MarkDirty();
 }
@@ -1315,10 +1358,11 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
     {
         Guard l;
         // Checks in ddraw.dll's order (spec: re/spec/surface-flip-key-palette.md, section 1).
-        // No overlays or stereo surfaces here: DDFLIP_EVEN/ODD and DDFLIP_STEREO never apply.
+        // DDFLIP_EVEN/ODD only for overlays (and then like any flip); no stereo surfaces here.
         const DWORD kIntervals = 0x07000000;
-        if ((flags & ~(0x3Fu | kIntervals)) || (flags & (DDFLIP_EVEN | DDFLIP_ODD | DDFLIP_STEREO)) ||
-            ((flags & DDFLIP_NOVSYNC) && (flags & kIntervals)))
+        const bool overlay = (desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY) != 0;
+        if ((flags & ~(0x3Fu | kIntervals)) || ((flags & (DDFLIP_EVEN | DDFLIP_ODD)) && !overlay) ||
+            (flags & DDFLIP_STEREO) || ((flags & DDFLIP_NOVSYNC) && (flags & kIntervals)))
             return DDERR_INVALIDPARAMS;
         if (IsLost() || (target && target->IsLost(false))) return DDERR_SURFACELOST;
         // Called on the front buffer of a chain (created, or put together with AddAttachedSurface).
@@ -1350,6 +1394,7 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         // As ddraw.dll: only the front and the buffer it swapped with count as changed.
         chain[0]->BumpUniqueness();
         chain[target ? k : 1]->BumpUniqueness();
+        if (OverlayShown()) overlayDest->dd->MarkDirty();
         if (isPrimary) {
             Presenter* p = dd->GetPresenter();
             wait = g_config.vsync == kVSyncOn || (g_config.vsync == kVSyncAuto && !(flags & DDFLIP_NOVSYNC));

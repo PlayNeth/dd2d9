@@ -402,16 +402,25 @@ public:
     // For VertexBuffer7::ProcessVertices.
     D3DMATRIX world_, view_, proj_, world1_, world2_, world3_;
     DWORD blendSent_ = 0;  // VERTEXBLEND as last sent to D3D9 (see DrawCommon)
+    // The fog states as last sent to D3D9 (SendFog): FOGVERTEXMODE, FOGSTART, FOGEND.
+    bool fogSent_ = false;
+    DWORD fogSentV_[3] = {};
+    void SendFog(DWORD fvf);
     int keySent_ = -1;     // whether PushAlphaTest last sent the colour key's alpha test
     D3DVIEWPORT7 vp_;
     DWORD rs_[256];
     D3DMATERIAL7 mat_ = {};
+    float pvPower_ = 0.0f;  // the last material's specular power above 0 (ProcessVertices with power 0 keeps it)
     struct Light {
         D3DLIGHT7 l = {};
         bool set = false, enabled = false;
     };
     std::vector<Light> lights_;
     D3DCLIPSTATUS cs_ = {};
+    // The clip status drawing updates (as XP's front end): kept only once the game has asked
+    // for it (GetClipStatus), as it costs a transform of every untransformed vertex drawn.
+    bool csTracking_ = false;
+    void TrackClipStatus(DWORD fvf, const void* v, UINT stride, DWORD n);
 
 private:
     static constexpr DWORD kMaxPlanes = 32;
@@ -603,12 +612,17 @@ void Device7::PushRS(DWORD s) {
         blendSent_ = std::min<DWORD>(v, D3DVBLEND_3WEIGHTS);
         ctx_.SetRenderState(151, blendSent_);
         break;
+    case 35: case 36: case 37: case 140:  // FOGTABLEMODE, FOGSTART, FOGEND, FOGVERTEXMODE:
+        // sent per draw (DrawCommon: SendFog), what D3D9 gets depending on the vertices
+        fogSent_ = false;
+        if (s == 35) ctx_.SetRenderState(35, v);
+        break;
     case 152:  // CLIPPLANEENABLE: the planes D3D9 has
         ctx_.SetRenderState(152, v & ((1u << std::min<DWORD>(caps_.wMaxUserClipPlanes, 31)) - 1));
         break;
     case 8: case 9: case 14: case 16: case 19: case 20: case 22: case 23: case 26: case 27: case 28: case 29:
-    case 34: case 35: case 36: case 37: case 38: case 48: case 52: case 53: case 54: case 55: case 56: case 57:
-    case 58: case 59: case 60: case 136: case 137: case 139: case 140: case 141: case 142: case 143: case 145:
+    case 34: case 38: case 48: case 52: case 53: case 54: case 55: case 56: case 57:
+    case 58: case 59: case 60: case 136: case 137: case 139: case 141: case 142: case 143: case 145:
     case 146: case 147: case 148:
         ctx_.SetRenderState(s, v);
         break;
@@ -870,6 +884,7 @@ HRESULT Device7::SetViewport(D3DVIEWPORT7* vp) {
 
 void Device7::SetMat(const D3DMATERIAL7& m) {
     mat_ = m;
+    if (m.dvPower > 0) pvPower_ = m.dvPower;
     Use u(this);
     if (u.ok) ctx_.SetMaterial(&mat_);
 }
@@ -980,6 +995,48 @@ HRESULT Device7::SetClipPlane(DWORD i, D3DVALUE* p) {
     return D3D_OK;
 }
 
+// The clip status a draw of untransformed vertices leaves (D3DFE_UpdateClipStatus): each
+// vertex's clip code in the front end's 0..w volume, their union ORed into dwStatus and their
+// intersection ANDed (its bits 12 up), and, with D3DRENDERSTATE_EXTENTS, the extents grown by
+// the vertices inside. Vertex blending and user clip planes aren't taken into account (the
+// first world matrix, the six planes of the volume).
+void Device7::TrackClipStatus(DWORD fvf, const void* v, UINT stride, DWORD n) {
+    D3DMATRIX wv, wvp;
+    MatMul(&wv, world_, view_);
+    MatMul(&wvp, wv, proj_);
+    const bool extents = rs_[D3DRENDERSTATE_EXTENTS] == TRUE;
+    const D3DVIEWPORT7& vp = vp_;
+    DWORD orCodes = 0, andCodes = 0xFFF;
+    (void)fvf;
+    for (DWORD i = 0; i < n; i++) {
+        const float* p = reinterpret_cast<const float*>(static_cast<const uint8_t*>(v) + size_t(i) * stride);
+        const float cx = p[0] * wvp._11 + p[1] * wvp._21 + p[2] * wvp._31 + wvp._41;
+        const float cy = p[0] * wvp._12 + p[1] * wvp._22 + p[2] * wvp._32 + wvp._42;
+        const float cz = p[0] * wvp._13 + p[1] * wvp._23 + p[2] * wvp._33 + wvp._43;
+        const float cw = p[0] * wvp._14 + p[1] * wvp._24 + p[2] * wvp._34 + wvp._44;
+        const float fx = (cx + cw) * 0.5f, fy = (cy + cw) * 0.5f;
+        DWORD code = 0;
+        if (fx < 0) code |= D3DCLIP_LEFT;
+        if (fx > cw) code |= D3DCLIP_RIGHT;
+        if (fy > cw) code |= D3DCLIP_TOP;
+        if (fy < 0) code |= D3DCLIP_BOTTOM;
+        if (cz < 0) code |= D3DCLIP_FRONT;
+        if (cz > cw) code |= D3DCLIP_BACK;
+        orCodes |= code;
+        andCodes &= code;
+        if (!code && extents && cw != 0) {
+            const float rhw = 1.0f / cw;
+            const float sx = cx * rhw * (vp.dwWidth * 0.5f) + vp.dwX + vp.dwWidth * 0.5f;
+            const float sy = -cy * rhw * (vp.dwHeight * 0.5f) + vp.dwY + vp.dwHeight * 0.5f;
+            cs_.minx = std::min(cs_.minx, sx);
+            cs_.maxx = std::max(cs_.maxx, sx);
+            cs_.miny = std::min(cs_.miny, sy);
+            cs_.maxy = std::max(cs_.maxy, sy);
+        }
+    }
+    if (n) cs_.dwStatus = (cs_.dwStatus | (orCodes & 0xFFF)) & ((andCodes << 12) | 0xFF000FFF);
+}
+
 HRESULT Device7::SetClipStatus(D3DCLIPSTATUS* cs) {
     if (!cs) return DDERR_INVALIDPARAMS;
     if (cs->dwFlags & D3DCLIPSTATUS_EXTENTS3) return DDERR_INVALIDPARAMS;
@@ -997,6 +1054,8 @@ HRESULT Device7::SetClipStatus(D3DCLIPSTATUS* cs) {
 HRESULT Device7::GetClipStatus(D3DCLIPSTATUS* cs) {
     if (!cs) return DDERR_INVALIDPARAMS;
     Guard g;
+    if (!csTracking_) DD2D9_LOG("Direct3D: the game reads the clip status: drawing updates it from now on");
+    csTracking_ = true;
     cs->dwFlags = D3DCLIPSTATUS_EXTENTS2;
     cs->dwStatus = cs_.dwStatus;
     cs->minx = cs_.minx;
@@ -1099,6 +1158,7 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
         return D3D_OK;
     }
     fvf &= ~DWORD(0xF001);  // reserved bits (D3D9's LASTBETA flags, RESERVED0)
+    if (csTracking_ && (fvf & 0x0E) && (fvf & 0x0E) != D3DFVF_XYZRHW && stride >= 12) TrackClipStatus(fvf, v, stride, n);
     // Lit vertices without a normal: XP lights them with a zero one (ambient and emissive
     // only); D3D9 (DXVK) leaves them unlit. Given a zero normal here.
     std::vector<uint8_t> withNormal;
@@ -1128,8 +1188,43 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
             blendSent_ = want;
         }
     }
+    SendFog(fvf);
     ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE);
     return D3D_OK;
+}
+
+// The fog states D3D9 gets for a draw, as Windows' hardware path behaved (Wine's tests,
+// confirmed there):
+// - exponential vertex fog with lighting off on vertices that bring a specular colour takes
+//   the fog factor from its alpha, uncomputed (test_fog_interpolation); computed otherwise,
+//   lighting off or not (test_negative_fixedfunction_fog, visual's test_blend);
+// - FOGSTART equal to FOGEND: table fog a step at that depth, nearer unfogged and farther
+//   fogged (D3D9 divides by their difference and fogs everything: the end made a hair
+//   farther); linear vertex fog fogs everything (test_fog_special).
+void Device7::SendFog(DWORD fvf) {
+    DWORD mode = rs_[140];
+    if ((mode == D3DFOG_EXP || mode == D3DFOG_EXP2) && rs_[137] != TRUE && (fvf & D3DFVF_SPECULAR)) mode = D3DFOG_NONE;
+    float st, en;
+    memcpy(&st, &rs_[36], 4);
+    memcpy(&en, &rs_[37], 4);
+    if (st == en && std::isfinite(st)) {
+        if (rs_[35] != D3DFOG_NONE) {
+            en = st + std::max(std::fabs(st) * 1e-6f, 1e-6f);
+        } else if (mode == D3DFOG_LINEAR) {
+            st = 2e9f;  // (end - d) / (end - start) about -1 for any depth: fogged
+            en = 1e9f;
+        }
+    }
+    DWORD v[3] = {mode, 0, 0};
+    memcpy(&v[1], &st, 4);
+    memcpy(&v[2], &en, 4);
+    static const DWORD kStates[3] = {140, 36, 37};
+    for (int i = 0; i < 3; i++) {
+        if (fogSent_ && fogSentV_[i] == v[i]) continue;
+        ctx_.SetRenderState(kStates[i], v[i]);
+        fogSentV_[i] = v[i];
+    }
+    fogSent_ = true;
 }
 
 HRESULT Device7::DrawPrimitive(D3DPRIMITIVETYPE t, DWORD fvf, void* v, DWORD n, DWORD) {
@@ -1695,27 +1790,65 @@ HRESULT Device7::Load(IDirectDrawSurface7* dstI, POINT* pt, IDirectDrawSurface7*
         dst->ck[k] = src->ck[k];
     }
     // Mip levels: the source level as large as the destination's top, then level by level.
-    Surface* s = src;
-    while (s && s->W() > dst->W()) {
-        s = s->NextMipLevel();
-        sr = {sr.left / 2, sr.top / 2, std::max(sr.right / 2, sr.left / 2 + 1), std::max(sr.bottom / 2, sr.top / 2 + 1)};
-    }
-    if (!s || s->W() != dst->W() || s->H() != dst->H()) return DDERR_INVALIDPARAMS;
-    for (Surface* d = dst; d; d = d->NextMipLevel(), s = s ? s->NextMipLevel() : nullptr) {
-        if (!s) return DDERR_INVALIDPARAMS;
-        if (d->lockCount || s->lockCount) return DDERR_SURFACEBUSY;
-        const HRESULT hr = d->BltLocked(&dr, s, &sr, 0, nullptr, false);
-        if (hr == DDERR_SURFACELOST && inScene_) {
-            lostInScene_ = true;
-            return D3D_OK;
+    // At each smaller level the source rectangle rounds outward (left and top down, right
+    // and bottom up) and the destination point halves, the destination rectangle the
+    // source's size from there (Wine's test_device_load on Windows), also over the source
+    // levels skipped to reach the destination's size.
+    auto half = [](RECT r) { return RECT{r.left / 2, r.top / 2, (r.right + 1) / 2, (r.bottom + 1) / 2}; };
+    auto loadChain = [&](Surface* dstTop, Surface* srcTop) -> HRESULT {
+        RECT r = sr;
+        LONG px = dr.left, py = dr.top;
+        Surface* s = srcTop;
+        while (s && s->W() > dstTop->W()) {
+            s = s->NextMipLevel();
+            r = half(r);
+            px /= 2;
+            py /= 2;
         }
-        if (FAILED(hr)) return hr;
-        d->BumpUniqueness();
-        dr = {dr.left / 2, dr.top / 2, std::max(dr.right / 2, dr.left / 2 + 1), std::max(dr.bottom / 2, dr.top / 2 + 1)};
-        sr = {sr.left / 2, sr.top / 2, std::max(sr.right / 2, sr.left / 2 + 1), std::max(sr.bottom / 2, sr.top / 2 + 1)};
+        if (!s || s->W() != dstTop->W() || s->H() != dstTop->H()) return DDERR_INVALIDPARAMS;
+        for (Surface* d = dstTop; d; d = d->NextMipLevel(), s = s ? s->NextMipLevel() : nullptr) {
+            if (!s) return DDERR_INVALIDPARAMS;
+            if (d->lockCount || s->lockCount) return DDERR_SURFACEBUSY;
+            // Kept on both levels (the rounding can reach past a 1-pixel edge).
+            RECT a = r, b = {px, py, px + (r.right - r.left), py + (r.bottom - r.top)};
+            const LONG cutR = std::max<LONG>(0, std::max(b.right - d->W(), a.right - s->W()));
+            const LONG cutB = std::max<LONG>(0, std::max(b.bottom - d->H(), a.bottom - s->H()));
+            a.right -= cutR, b.right -= cutR, a.bottom -= cutB, b.bottom -= cutB;
+            if (a.right > a.left && a.bottom > a.top) {
+                const HRESULT hr = d->BltLocked(&b, s, &a, 0, nullptr, false);
+                if (hr == DDERR_SURFACELOST && inScene_) {
+                    lostInScene_ = true;
+                    return S_FALSE;  // (stop: D3D_OK)
+                }
+                if (FAILED(hr)) return hr;
+                d->BumpUniqueness();
+            }
+            r = half(r);
+            px /= 2;
+            py /= 2;
+        }
+        return D3D_OK;
+    };
+    // A cube map: the faces `flags` names (DDSCAPS2_CUBEMAP_* bits; none copies none), each
+    // with its mip levels.
+    if (dst->desc.ddsCaps.dwCaps2 & DDSCAPS2_CUBEMAP) {
+        static const DWORD kFaces[6] = {DDSCAPS2_CUBEMAP_POSITIVEX, DDSCAPS2_CUBEMAP_NEGATIVEX, DDSCAPS2_CUBEMAP_POSITIVEY,
+                                        DDSCAPS2_CUBEMAP_NEGATIVEY, DDSCAPS2_CUBEMAP_POSITIVEZ, DDSCAPS2_CUBEMAP_NEGATIVEZ};
+        Surface* const dRoot = dst->root ? dst->root : dst;
+        Surface* const sRoot = src->root ? src->root : src;
+        for (DWORD face : kFaces) {
+            if (!(flags & face)) continue;
+            Surface* df = CubeFace(dRoot, face);
+            Surface* sf = CubeFace(sRoot, face);
+            if (!df || !sf) return DDERR_INVALIDPARAMS;
+            const HRESULT hr = loadChain(df, sf);
+            if (hr == S_FALSE) return D3D_OK;
+            if (FAILED(hr)) return hr;
+        }
+        return D3D_OK;
     }
-    (void)flags;
-    return D3D_OK;
+    const HRESULT hr = loadChain(dst, src);
+    return hr == S_FALSE ? D3D_OK : hr;
 }
 
 // ---------------------------------------------------------------- CreateDevice (D)
@@ -1778,8 +1911,39 @@ HRESULT Direct3D7::CreateDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, I
 
 // Does the processing of V §8.5 on the CPU: transform (always), clip codes (D3DVOP_CLIP),
 // lighting (D3DVOP_LIGHT, whatever D3DRENDERSTATE_LIGHTING says), extents (D3DVOP_EXTENTS).
+// The normal matrix: the transpose of m's inverse (all of it, 4x4), its upper 3x3 used; all
+// zero when m has no inverse.
+static D3DMATRIX NormalMatrix(const D3DMATRIX& m) {
+    const float* a = &m._11;
+    float inv[16];
+    inv[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
+    inv[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
+    inv[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
+    inv[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
+    inv[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
+    inv[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
+    inv[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
+    inv[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
+    inv[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
+    inv[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
+    inv[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
+    inv[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
+    inv[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
+    inv[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
+    inv[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
+    inv[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
+    const float det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    D3DMATRIX r = {};
+    if (det == 0.0f || !std::isfinite(det)) return r;
+    const float id = 1.0f / det;
+    float* o = &r._11;
+    for (int i = 0; i < 4; i++)  // transposed: row i of the result = column i of the inverse
+        for (int j = 0; j < 4; j++) o[i * 4 + j] = inv[j * 4 + i] * id;
+    return r;
+}
+
 static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD count, const uint8_t* src, UINT srcStride,
-                       DWORD srcFvf, Device7* dev, DWORD flags) {
+                       DWORD srcFvf, Device7* dev, DWORD flags, const uint8_t* srcEnd) {
     const Layout in(srcFvf), out(dstVb->fvf_);
     // V §8.5 step 6: lit with specular or fog needs a destination specular; the destination
     // has at least the source's texture coordinates, with their size bits.
@@ -1799,29 +1963,22 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
     MatMul(&wv, dev->world_, dev->view_);
     MatMul(&wvp, wv, dev->proj_);
     MatMul(&vp4, dev->view_, dev->proj_);
-    // Weights read: min(the FVF's betas, VERTEXBLEND) (V §9; at most 3 here).
-    const DWORD posType = srcFvf & 0x0E, betas = posType >= 0x06 && posType != D3DFVF_XYZRHW ? (posType - 0x04) / 2 : 0;
-    const DWORD blend = std::min<DWORD>(std::min<DWORD>(dev->rs_[D3DRENDERSTATE_VERTEXBLEND], betas), 3);
-    // Normals through the inverse-transpose of world x view (right under non-uniform scale).
-    D3DMATRIX nm = wv;
-    {
-        const float a = wv._11, b = wv._12, c = wv._13, d = wv._21, e = wv._22, f = wv._23, g = wv._31, h = wv._32,
-                    k = wv._33;
-        const float det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
-        if (det != 0) {
-            const float id = 1.0f / det;  // the inverse's transpose = the cofactors / det
-            nm._11 = (e * k - f * h) * id;
-            nm._12 = -(d * k - f * g) * id;
-            nm._13 = (d * h - e * g) * id;
-            nm._21 = -(b * k - c * h) * id;
-            nm._22 = (a * k - c * g) * id;
-            nm._23 = -(a * h - b * g) * id;
-            nm._31 = (b * f - c * e) * id;
-            nm._32 = -(a * f - c * d) * id;
-            nm._33 = (a * e - b * d) * id;
-        }
-    }
+    // Weights read: VERTEXBLEND's count (at most 3), the floats after the position whatever
+    // the FVF says is there (Wine's test_process_vertices on Windows: an FVF without
+    // weights blends with its next values as weights); past the source's end, 0.
+    const DWORD blend = std::min<DWORD>(dev->rs_[D3DRENDERSTATE_VERTEXBLEND], 3);
+    // Normals through the transpose of the inverse of the whole 4x4 world x view, its upper
+    // 3x3 (right under non-uniform scale): XP's (Wine's test_lighting on Windows: a
+    // non-affine world turns the normal to zero, a singular one, with no inverse, too:
+    // both light black). With vertex blending, one per world matrix (below).
     const D3DMATRIX* worlds[4] = {&dev->world_, &dev->world1_, &dev->world2_, &dev->world3_};
+    D3DMATRIX nms[4];
+    for (DWORD k = 0; k <= blend; k++) {
+        D3DMATRIX m;
+        if (blend) MatMul(&m, *worlds[k], dev->view_);
+        else m = wv;
+        nms[k] = NormalMatrix(m);
+    }
     const D3DVIEWPORT7& vp = dev->vp_;
     const bool clip = (op & D3DVOP_CLIP) != 0, light = (op & D3DVOP_LIGHT) != 0;
     const bool extents = (op & D3DVOP_EXTENTS) != 0, noCopy = (flags & D3DPV_DONOTCOPYDATA) != 0;
@@ -1844,23 +2001,32 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
         const float* p = reinterpret_cast<const float*>(v + in.pos);
         Vec3 pos = {p[0], p[1], p[2]};
         float cx, cy, cz, cw;
+        float weights[3] = {0, 0, 0};
+        for (DWORD k = 0; k < blend; k++)
+            if (reinterpret_cast<const uint8_t*>(p + 3 + k + 1) <= srcEnd) weights[k] = p[3 + k];
         if (blend) {
             // Vertex blending (V §9): the weights after the position, the last matrix
-            // weighted 1 - their sum.
-            Vec3 acc = {0, 0, 0};
+            // weighted 1 - their sum; the matrices' whole (4-component) results blended,
+            // then view and projection (test_process_vertices: a world with a w column).
+            float acc[4] = {0, 0, 0, 0};
             float sum = 0;
             for (DWORD k = 0; k <= blend; k++) {
-                const float w = k < blend ? p[3 + k] : 1.0f - sum;
+                const float w = k < blend ? weights[k] : 1.0f - sum;
                 sum += k < blend ? w : 0;
-                const Vec3 q = XformPoint(pos, *worlds[k]);
-                acc = {acc.x + q.x * w, acc.y + q.y * w, acc.z + q.z * w};
+                const D3DMATRIX& M = *worlds[k];
+                acc[0] += (pos.x * M._11 + pos.y * M._21 + pos.z * M._31 + M._41) * w;
+                acc[1] += (pos.x * M._12 + pos.y * M._22 + pos.z * M._32 + M._42) * w;
+                acc[2] += (pos.x * M._13 + pos.y * M._23 + pos.z * M._33 + M._43) * w;
+                acc[3] += (pos.x * M._14 + pos.y * M._24 + pos.z * M._34 + M._44) * w;
             }
-            const Vec3 e = XformPoint(acc, vp4);  // view x projection
-            cx = e.x;
-            cy = e.y;
-            cz = e.z;
-            cw = acc.x * vp4._14 + acc.y * vp4._24 + acc.z * vp4._34 + vp4._44;
-            pos = acc;  // lighting below then uses world space through view only
+            const D3DMATRIX& V = vp4;  // view x projection
+            cx = acc[0] * V._11 + acc[1] * V._21 + acc[2] * V._31 + acc[3] * V._41;
+            cy = acc[0] * V._12 + acc[1] * V._22 + acc[2] * V._32 + acc[3] * V._42;
+            cz = acc[0] * V._13 + acc[1] * V._23 + acc[2] * V._33 + acc[3] * V._43;
+            cw = acc[0] * V._14 + acc[1] * V._24 + acc[2] * V._34 + acc[3] * V._44;
+            // Lighting below works in world space through view only (the blended point).
+            const float aw = acc[3] != 0.0f ? 1.0f / acc[3] : 1.0f;
+            pos = {acc[0] * aw, acc[1] * aw, acc[2] * aw};
         } else {
             cx = pos.x * wvp._11 + pos.y * wvp._21 + pos.z * wvp._31 + wvp._41;
             cy = pos.x * wvp._12 + pos.y * wvp._22 + pos.z * wvp._32 + wvp._42;
@@ -1924,9 +2090,29 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
             const Vec3 P = XformPoint(pos, blend ? dev->view_ : wv);
             // No normal: lit with a zero one (ambient and emissive only), as XP does.
             const float* n = in.normal >= 0 ? reinterpret_cast<const float*>(v + in.normal) : nullptr;
-            // Normalized whatever NORMALIZENORMALS says (Wine's tests on Windows: a scaled
-            // world or view still gives full specular).
-            const Vec3 N = n ? Norm(XformDir({n[0], n[1], n[2]}, nm)) : Vec3{0, 0, 0};
+            // Normalized only with NORMALIZENORMALS: a world or view that shrinks makes the
+            // normal longer and the light stronger, saturating (Wine's
+            // test_fog_process_vertices on Windows: z scaled by 0.375 gives full specular
+            // where a unit normal gives 57%). Blended: the matrices' normals weighted, the sum
+            // as it comes (test_lighting: weights 0.2 and 0.8 of normals at right angles
+            // light 0.8).
+            const bool normalize = dev->rs_[D3DRENDERSTATE_NORMALIZENORMALS] == TRUE;
+            auto xn = [&](const D3DMATRIX& nm) {
+                const Vec3 t = XformDir({n[0], n[1], n[2]}, nm);
+                return normalize ? Norm(t) : t;
+            };
+            Vec3 N = {0, 0, 0};
+            if (n && !blend) {
+                N = xn(nms[0]);
+            } else if (n) {
+                float sum = 0;
+                for (DWORD k = 0; k <= blend; k++) {
+                    const float w = k < blend ? weights[k] : 1.0f - sum;
+                    sum += k < blend ? w : 0;
+                    const Vec3 t = xn(nms[k]);
+                    N = {N.x + t.x * w, N.y + t.y * w, N.z + t.z * w};
+                }
+            }
             Color d = {ambient.r * ma.r + me.r, ambient.g * ma.g + me.g, ambient.b * ma.b + me.b, md.a};
             Color s = {0, 0, 0, 0};
             const bool local = dev->rs_[D3DRENDERSTATE_LOCALVIEWER] == TRUE;
@@ -1958,12 +2144,15 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
                 d.r += ld.r * md.r * nl * att;
                 d.g += ld.g * md.g * nl * att;
                 d.b += ld.b * md.b * nl * att;
-                if (m.dvPower > 0) {
+                // Power 0: ProcessVertices keeps the last power above 0 (Wine's
+                // test_specular_lighting on Windows; drawing takes 0 as it is).
+                const float power = m.dvPower > 0 ? m.dvPower : dev->pvPower_;
+                if (power > 0) {
                     const Vec3 eye = local ? Norm(Vec3{-P.x, -P.y, -P.z}) : Vec3{0, 0, -1};  // toward the viewer
                     const Vec3 H = Norm({Ld.x + eye.x, Ld.y + eye.y, Ld.z + eye.z});
                     const float nh = Dot(N, H);
                     if (nh > 0) {
-                        const float k = powf(nh, m.dvPower) * att;
+                        const float k = powf(nh, power) * att;
                         s.r += ls.r * ms.r * k;
                         s.g += ls.g * ms.g * k;
                         s.b += ls.b * ms.b * k;
@@ -2083,7 +2272,8 @@ HRESULT VertexBuffer7::ProcessVertices(DWORD op, DWORD dst, DWORD count, IDirect
     VertexBuffer7* s = VB(src);
     if (srcIndex >= s->count_) return D3D_OK;
     count = std::min(count, s->count_ - srcIndex);
-    return Process(this, op, dst, count, s->mem_.data() + size_t(srcIndex) * s->stride_, s->stride_, s->fvf_, dev, flags);
+    return Process(this, op, dst, count, s->mem_.data() + size_t(srcIndex) * s->stride_, s->stride_, s->fvf_, dev, flags,
+                   s->mem_.data() + s->mem_.size());
 }
 
 HRESULT VertexBuffer7::ProcessVerticesStrided(DWORD op, DWORD dst, DWORD count, D3DDRAWPRIMITIVESTRIDEDDATA* data,
@@ -2097,7 +2287,8 @@ HRESULT VertexBuffer7::ProcessVerticesStrided(DWORD op, DWORD dst, DWORD count, 
     count = std::min(count, count_ - dst);  // what fits the destination: gathered no further
     std::vector<uint8_t> v;
     Gather(srcFvf, *data, count, &v);
-    return Process(this, op, dst, count, v.data(), FvfSize(srcFvf), srcFvf, static_cast<Device7*>(device), flags);
+    return Process(this, op, dst, count, v.data(), FvfSize(srcFvf), srcFvf, static_cast<Device7*>(device), flags,
+                   v.data() + v.size());
 }
 
 // ---------------------------------------------------------------- DirectDraw's side

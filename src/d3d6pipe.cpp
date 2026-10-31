@@ -35,6 +35,10 @@ void ActiveLights(Device* d, std::vector<LightC>* out) {
         c.v2 = s.dwSize == sizeof(D3DLIGHT2);
         c.noSpec = c.v2 && (s.dwFlags & D3DLIGHT_NO_SPECULAR);
         c.color = FromCv(s.dcvColor);
+        if (d->kind == kRamp) {  // the mono model: the light's brightness only (C §2.2)
+            const float y = 0.3f * c.color.r + 0.59f * c.color.g + 0.11f * c.color.b;
+            c.color.r = c.color.g = c.color.b = y;
+        }
         c.pos = XformPoint({s.dvPosition.x, s.dvPosition.y, s.dvPosition.z}, d->view);
         c.dir = Norm(XformDir({s.dvDirection.x, s.dvDirection.y, s.dvDirection.z}, d->view));
         c.range = s.dvRange;
@@ -78,12 +82,26 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
     const Layout in(fvf & 0xFFFF);
     const D3DMATRIX wv = Mul(d->world, d->view);
     const D3DMATRIX M = Mul(Mul(wv, d->proj), d->map.mclip);
-    std::vector<LightC>& lights = t_lights;  // (storage kept between draws)
-    lights.clear();
-    if (light) ActiveLights(d, &lights);
+    // The active lights in camera space: kept while nothing they depend on changed (the
+    // device, its viewport, any light or viewport light list, the view matrix).
+    std::vector<LightC>& lights = t_lights;
+    if (light) {
+        thread_local const Device* cDev = nullptr;
+        thread_local const Viewport* cVp = nullptr;
+        thread_local unsigned cGen = ~0u;
+        thread_local D3DMATRIX cView;
+        if (cDev != d || cVp != d->cur || cGen != g_lightGen || memcmp(&cView, &d->view, sizeof(cView)) != 0) {
+            ActiveLights(d, &lights);
+            cDev = d, cVp = d->cur, cGen = g_lightGen, cView = d->view;
+        }
+    }
     const LightC* const lightsEnd = lights.data() + lights.size();
     const D3DMATERIAL& mat = d->curMat;
-    const Color amb = FromArgb(d->ls.ambient);
+    // Ramp devices light in the mono model: the lights' and the ambient light's brightness
+    // shade the material's colours, uncoloured (XP's Ramp rasterizer drew through a ramp of
+    // each material's shades).
+    Color amb = FromArgb(d->ls.ambient);
+    if (d->kind == kRamp) amb.r = amb.g = amb.b = 0.3f * amb.r + 0.59f * amb.g + 0.11f * amb.b;
     const bool spec = d->rs[29] == TRUE && mat.dvPower > 0.001f;
     const bool fog = d->rs[28] == TRUE && d->ls.fogMode != D3DFOG_NONE;
     const float fs = F(d->ls.fogStart), fe = F(d->ls.fogEnd), fd = F(d->ls.fogDensity);
@@ -573,6 +591,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
     size_t pos = ed.dwInstructionOffset;
     // Draws an index list of TL-buffer vertices.
     auto drawTL = [&](D3DPRIMITIVETYPE type, const WORD* idx, DWORD ni) {
+        if (picking) return;  // points, lines and spans aren't picked
         CountPrims(this, type, PrimCount(type, ni), 0);
         if (rs[30]) {  // ZVISIBLE: nothing drawn, "visible"
             status &= ~DWORD(D3DSTATUS_ZNOTVISIBLE);
@@ -614,6 +633,31 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
         case D3DOP_TRIANGLE: {
             recSize = sizeof(D3DTRIANGLE);
             if (!fits(recSize)) return D3D_OK;
+            if (picking) {
+                // XP's GenPickTriangle: the triangle covers the rectangle's top-left pixel; the
+                // record names the triangle's offset from the start of the instructions and
+                // its depth there. (XP also picks the parts of a triangle the clipper cut:
+                // here a triangle with a vertex outside isn't picked.)
+                const float px = float(picking->x1), py = float(picking->y1);
+                for (DWORD i = 0; i < count; i++) {
+                    const D3DTRIANGLE& t = reinterpret_cast<const D3DTRIANGLE*>(rec)[i];
+                    if (t.v1 >= tl.size() || t.v2 >= tl.size() || t.v3 >= tl.size()) continue;
+                    const PVert &a0 = tl[t.v1], &a1 = tl[t.v2], &a2 = tl[t.v3];
+                    if (a0.code || a1.code || a2.code) continue;
+                    const float area = (a1.sx - a0.sx) * (a2.sy - a0.sy) - (a2.sx - a0.sx) * (a1.sy - a0.sy);
+                    if (area == 0.0f) continue;
+                    const float w0 = ((a1.sx - px) * (a2.sy - py) - (a2.sx - px) * (a1.sy - py)) / area;
+                    const float w1 = ((a2.sx - px) * (a0.sy - py) - (a0.sx - px) * (a2.sy - py)) / area;
+                    const float w2 = 1.0f - w0 - w1;
+                    if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                    D3DPICKRECORD r = {};
+                    r.bOpcode = D3DOP_TRIANGLE;
+                    r.dwOffset = DWORD(reinterpret_cast<const uint8_t*>(&t) - (base + ed.dwInstructionOffset));
+                    r.dvZ = w0 * a0.sz + w1 * a1.sz + w2 * a2.sz;
+                    pickRecs.push_back(r);
+                }
+                break;
+            }
             idx.resize(3 * count);
             for (DWORD i = 0; i < count; i++) {
                 const D3DTRIANGLE& t = reinterpret_cast<const D3DTRIANGLE*>(rec)[i];
@@ -675,6 +719,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
         }
         case D3DOP_STATELIGHT: {
             recSize = sizeof(D3DSTATE);
+            if (picking) break;  // (XP's pick walk skips it)
             if (!fits(recSize)) return D3D_OK;
             for (DWORD i = 0; i < count; i++) {
                 const D3DSTATE& s = reinterpret_cast<const D3DSTATE*>(rec)[i];
@@ -747,6 +792,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
         }
         case D3DOP_TEXTURELOAD: {
             recSize = sizeof(D3DTEXTURELOAD);
+            if (picking) break;  // (XP's pick walk skips it)
             if (!fits(recSize)) return D3D_OK;
             for (DWORD i = 0; i < count; i++) {
                 const D3DTEXTURELOAD& t = reinterpret_cast<const D3DTEXTURELOAD*>(rec)[i];
@@ -759,6 +805,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
             break;
         }
         case D3DOP_EXIT:
+            if (picking) return D3D_OK;  // (the buffer's status is left alone)
             eb->data.dsStatus.dwFlags = 0;
             eb->data.dsStatus.dwStatus = status;
             ConvertExtent(this, &eb->data.dsStatus.drExtent);
@@ -769,6 +816,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
             const bool c = (status & b.dwMask) == b.dwValue;
             if (c != bool(b.bNegate)) {
                 if (!b.dwOffset) {  // as EXIT
+                    if (picking) return D3D_OK;
                     eb->data.dsStatus.dwFlags = 0;
                     eb->data.dsStatus.dwStatus = status;
                     ConvertExtent(this, &eb->data.dsStatus.drExtent);
@@ -781,9 +829,20 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
             recSize = sizeof(D3DBRANCH);
             break;
         }
-        case D3DOP_SPAN:
-            recSize = ins->bSize;  // skipped: drawn only by a driver (unclipped execution)
+        case D3DOP_SPAN: {
+            // Drawn only on XP's driver path (unclipped execution, or after a PROCESSVERTICES
+            // COPY), skipped when clipped (C §6). Each record (bSize bytes, a D3DSPAN first):
+            // wCount TL vertices from wFirst, one pixel each, drawn here as points.
+            recSize = ins->bSize;
+            if (recSize < sizeof(D3DSPAN) || !fits(recSize) || (flags == D3DEXECUTE_CLIPPED && !copied)) break;
+            for (DWORD i = 0; i < count; i++) {
+                const D3DSPAN& sp = *reinterpret_cast<const D3DSPAN*>(rec + i * recSize);
+                idx.resize(sp.wCount);
+                for (WORD k = 0; k < sp.wCount; k++) idx[k] = WORD(sp.wFirst + k);
+                if (sp.wCount) drawTL(D3DPT_POINTLIST, idx.data(), sp.wCount);
+            }
             break;
+        }
         case D3DOP_SETSTATUS: {
             recSize = sizeof(D3DSTATUS);
             if (!fits(recSize)) return D3D_OK;
@@ -800,7 +859,7 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
             break;
         }
         default:  // 0 or unknown: a silent stop, the status not written
-            memset(&eb->data.dsStatus, 0, sizeof(eb->data.dsStatus));
+            if (!picking) memset(&eb->data.dsStatus, 0, sizeof(eb->data.dsStatus));
             return D3D_OK;
         }
         pos = size_t(rec - base) + recSize * count;

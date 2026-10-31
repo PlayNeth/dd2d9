@@ -85,6 +85,18 @@ desktopbpp=32
 ; Costs a whole-surface copy per lock.
 lockwhole=off
 
+; Z buffers DirectDraw can read and write (Lock, Blt): on (default) where the GPU has the
+; depth format for it and antialiasing is off; off: on the GPU only, as before 1.0.3 (a
+; game that locks its Z buffer gets what DirectDraw itself last wrote there). For a driver
+; that draws wrongly with it.
+zaccess=on
+
+; Overlays (video players, some games' movies): on (default) offers overlay surfaces to
+; fullscreen (exclusive-mode) programs, laid over the screen's image when shown, as the
+; hardware of the era did (windowed programs get none and blit, as before); off reports no
+; overlay hardware at all, as before 1.1.0.
+videooverlay=on
+
 ; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too
 ; fast without vsync or busy a whole core. Paced at Flip, and at blits covering half the
 ; primary or more (games that show frames that way).
@@ -102,11 +114,12 @@ depth24=off
 ; can. Render targets are drawn in 32 bits and Z buffers in 24 then. 2D a game writes into
 ; the back buffer between its 3D draws is kept; each time that happens costs a copy.
 ; Cut-out sprites (trees) drawn within their texture are addressed clamped meanwhile, so
-; their edges don't pick up a line from the texture's other side.
+; their edges don't pick up a line from the texture's other side. A game reading or
+; copying its Z buffer through DirectDraw (rare) finds only what DirectDraw wrote there.
 antialiasing=0
 ; With antialiasing, 2D drawn through Direct3D (HUDs, menus, text: screen-aligned, drawn
-; with the depth test off) is drawn without it, pixel-sharp: off (default). on: antialiased
-; like the 3D (its edges come out soft).
+; with the depth test off, or always passing without writing depth) is drawn without it,
+; pixel-sharp: off (default). on: antialiased like the 3D (its edges come out soft).
 antialias2d=off
 
 ; Overlays (light maps, decals: passes that don't write depth, or that add or multiply

@@ -130,6 +130,7 @@ void DDraw::TearDown() {
             RestoreSavedWindow(true);
             UnhookWindow();
             if (g_exclusiveDD == this) g_exclusiveDD = nullptr;
+            DestroyDeviceWindow();  // as ddraw.dll's release
             GameImageChanged();
         }
         Guard l;
@@ -1121,6 +1122,49 @@ HRESULT DDraw::Initialize(GUID*) {
     return DD_OK;
 }
 
+// DDSCL_CREATEDEVICEWINDOW's window, as ddraw.dll registers and makes it: WM_CREATE keeps the
+// focus window (its extra bytes), WM_SETFOCUS passes the focus there, no cursor over it.
+static LRESULT CALLBACK DeviceWndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CREATE) {
+        SetWindowLongPtrA(w, 0, LONG_PTR(reinterpret_cast<CREATESTRUCTA*>(lp)->lpCreateParams));
+    } else if (msg == WM_SETFOCUS) {
+        if (HWND focus = reinterpret_cast<HWND>(GetWindowLongPtrA(w, 0)); IsWindow(focus)) SetFocus(focus);
+    } else if (msg == WM_SETCURSOR) {
+        SetCursor(nullptr);
+    }
+    return DefWindowProcA(w, msg, wp, lp);
+}
+
+static HWND CreateDeviceWindow(HWND focus) {
+    static const char kClass[] = "DirectDrawDeviceWnd";
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&DeviceWndProc), &self);
+    WNDCLASSA wc;
+    if (!GetClassInfoA(self, kClass, &wc)) {
+        wc = {};
+        wc.style = CS_DBLCLKS;
+        wc.lpfnWndProc = DeviceWndProc;
+        wc.cbWndExtra = sizeof(LONG_PTR);
+        wc.hInstance = self;
+        wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        wc.lpszClassName = kClass;
+        if (!RegisterClassA(&wc)) return nullptr;
+    }
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(focus, MONITOR_DEFAULTTOPRIMARY), &mi);
+    const RECT& r = mi.rcMonitor;
+    // ddraw.dll's style is WS_POPUP | WS_VISIBLE (see SetCooperativeLevel: kept hidden here).
+    return CreateWindowExA(0, kClass, kClass, WS_POPUP, r.left, r.top, r.right - r.left, r.bottom - r.top, focus,
+                           nullptr, self, focus);
+}
+
+void DDraw::DestroyDeviceWindow() {
+    if (deviceWnd_ && IsWindow(deviceWnd_)) DestroyWindow(deviceWnd_);
+    if (lclWnd_ == deviceWnd_) lclWnd_ = nullptr;
+    deviceWnd_ = nullptr;
+}
+
 HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     DD2D9_LOG("SetCooperativeLevel(%p, 0x%lx)%s", static_cast<void*>(hwnd), flags, version == 1 ? " (DirectDraw 1)" : "");
     DisplayGuard dg;
@@ -1138,44 +1182,49 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     // Validation as in ddraw.dll.
     if (flags & ~0x3FFFu) return DDERR_INVALIDPARAMS;
     if ((flags & DDSCL_FPUSETUP) && (flags & DDSCL_FPUPRESERVE)) return DDERR_INVALIDPARAMS;
-    if (flags & DDSCL_CREATEDEVICEWINDOW) {
-        // Not supported (no game known to use it): the focus window serves as the device window.
-        if (!(flags & DDSCL_EXCLUSIVE)) return DDERR_INVALIDPARAMS;
-        if (!(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
-        if (!hwnd_ && !(flags & DDSCL_SETFOCUSWINDOW)) return DDERR_NOFOCUSWINDOW;
-        if ((flags & DDSCL_SETFOCUSWINDOW) && !hwnd) return DDERR_NOHWND;
-        if (!hwnd) hwnd = hwnd_;
-        DD2D9_LOG("  DDSCL_CREATEDEVICEWINDOW: using the focus window %p", static_cast<void*>(hwnd));
-    }
+    // In ddraw.dll's order (re/spec/ddraw-object.md, SetCooperativeLevel 3-7).
     if (!(flags & (DDSCL_NORMAL | DDSCL_EXCLUSIVE | DDSCL_SETFOCUSWINDOW))) return DDERR_INVALIDPARAMS;
+    if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
     if (hwnd && !IsWindow(hwnd)) return DDERR_INVALIDPARAMS;
+    const bool create = (flags & DDSCL_CREATEDEVICEWINDOW) != 0;
+    if (flags & DDSCL_SETFOCUSWINDOW) {
+        // Without CREATEDEVICEWINDOW only the focus window is set (DDSCL_NOWINDOWCHANGES aside,
+        // nothing goes with it).
+        if (!create && (flags & (DDSCL_MULTITHREADED | DDSCL_FPUSETUP | DDSCL_FPUPRESERVE | DDSCL_ALLOWREBOOT |
+                                 DDSCL_ALLOWMODEX | DDSCL_SETDEVICEWINDOW | DDSCL_NORMAL | DDSCL_EXCLUSIVE |
+                                 DDSCL_FULLSCREEN)))
+            return DDERR_INVALIDPARAMS;
+        if (Exclusive()) return DDERR_HWNDALREADYSET;
+    }
     if (flags & DDSCL_SETDEVICEWINDOW) {
         // ddraw.dll's checks; the device window itself isn't kept apart from the focus
         // window here (dd2d9 presents into the focus window).
         if (flags & (DDSCL_SETFOCUSWINDOW | DDSCL_CREATEDEVICEWINDOW)) return DDERR_INVALIDPARAMS;
-        if (hwnd && !hwnd_) return DDERR_NOFOCUSWINDOW;
+        if (hwnd && !focusWnd_) return DDERR_NOFOCUSWINDOW;
     }
-    if ((flags & DDSCL_SETFOCUSWINDOW) && !(flags & DDSCL_CREATEDEVICEWINDOW)) {
-        // Only the focus window is set (DDSCL_NOWINDOWCHANGES aside, nothing goes with it).
-        if (flags & (DDSCL_MULTITHREADED | DDSCL_FPUSETUP | DDSCL_FPUPRESERVE | DDSCL_ALLOWREBOOT |
-                     DDSCL_ALLOWMODEX | DDSCL_SETDEVICEWINDOW | DDSCL_NORMAL | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN))
-            return DDERR_INVALIDPARAMS;
-        if (Exclusive()) return DDERR_HWNDALREADYSET;
+    if (create) {
+        // Exclusive mode only, on an object without a window of the game's; without a new focus
+        // window, the one set before (and no window given).
+        if (!(flags & DDSCL_EXCLUSIVE) || (lclWnd_ && lclWnd_ != deviceWnd_)) return DDERR_INVALIDPARAMS;
+        if (!lclWnd_ && !(flags & DDSCL_SETFOCUSWINDOW)) {
+            if (hwnd) return DDERR_INVALIDPARAMS;
+            if (!focusWnd_) return DDERR_NOFOCUSWINDOW;
+        }
+    }
+    if ((flags & DDSCL_EXCLUSIVE) && !create && (!hwnd || (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)))
+        return DDERR_INVALIDPARAMS;
+    if ((flags & DDSCL_SETFOCUSWINDOW) && !create) {
         if (version == 1) ddraw1Coop_ = true;
         Guard l;
+        focusWnd_ = hwnd;  // (NULL too)
         if (hwnd) hwnd_ = hwnd;
         GameImageChanged();
         return DD_OK;
     }
-    if ((flags & (DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX)) && !(flags & DDSCL_FULLSCREEN)) return DDERR_INVALIDPARAMS;
-    if ((flags & DDSCL_EXCLUSIVE) && (!hwnd || (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)))
-        return DDERR_INVALIDPARAMS;
     // A call through IDirectDraw (version 1) that gets past the checks gives the object
     // the DirectDraw 1 behavior below for good, whatever interface is used afterwards;
     // as in ddraw.dll, even if the window then can't be taken (HWNDALREADYSET).
     if (version == 1) ddraw1Coop_ = true;
-    // As ddraw.dll: exclusive mode stays on its window until the game goes back to normal.
-    if ((flags & DDSCL_EXCLUSIVE) && Exclusive() && hwnd != hwnd_) return DDERR_HWNDALREADYSET;
     // A window with a dialog frame but no border is left alone, as ddraw.dll leaves it.
     if (hwnd && !(flags & (DDSCL_SETDEVICEWINDOW | DDSCL_CREATEDEVICEWINDOW))) {
         const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
@@ -1188,6 +1237,36 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     DDraw* const prev = (flags & DDSCL_EXCLUSIVE) && g_exclusiveDD && g_exclusiveDD != this ? g_exclusiveDD : nullptr;
     if (prev && !prev->suspended_ && prev->hwnd_ && IsWindow(prev->hwnd_) && IsWindowVisible(prev->hwnd_))
         return DDERR_EXCLUSIVEMODEALREADYSET;
+    // DDSCL_CREATEDEVICEWINDOW: ddraw.dll's "DirectDrawDeviceWnd", a popup over the monitor
+    // owned by the focus window, handing it the keyboard focus. dd2d9 keeps presenting into
+    // the focus window, so the device window stays hidden (shown, its black would cover
+    // the picture). The next call with another window (NORMAL with none too) or the object's
+    // release destroys it.
+    if (create) {
+        if (flags & DDSCL_SETFOCUSWINDOW) {
+            focusWnd_ = hwnd;
+            if (deviceWnd_ && IsWindow(deviceWnd_)) SetWindowLongPtrA(deviceWnd_, 0, LONG_PTR(hwnd));
+        }
+        HWND made = nullptr;
+        if (!lclWnd_) {
+            made = CreateDeviceWindow(focusWnd_);
+            if (!made) return DDERR_INVALIDPARAMS;
+        }
+        if (made != lclWnd_ && deviceWnd_) DestroyDeviceWindow();
+        lclWnd_ = made;
+        deviceWnd_ = made;
+        DD2D9_LOG("  DDSCL_CREATEDEVICEWINDOW: device window %p, focus window %p", static_cast<void*>(made),
+                  static_cast<void*>(focusWnd_));
+        // ddraw.dll's window hook needs the focus window.
+        if (!focusWnd_) return DDERR_NOHWND;
+        hwnd = focusWnd_;  // the window dd2d9 drives
+    } else {
+        if (hwnd != lclWnd_ && deviceWnd_) DestroyDeviceWindow();
+        lclWnd_ = hwnd;
+        if (!(flags & DDSCL_SETDEVICEWINDOW)) focusWnd_ = hwnd;
+    }
+    // As ddraw.dll: exclusive mode stays on its window until the game goes back to normal.
+    if ((flags & DDSCL_EXCLUSIVE) && Exclusive() && hwnd != hwnd_) return DDERR_HWNDALREADYSET;
 
     const bool leaving = Exclusive() && !(flags & DDSCL_EXCLUSIVE);
     // Taking exclusive mode activates the window, as in ddraw.dll (asking again changes
@@ -1601,7 +1680,9 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     DDCAPS c = {};
     c.dwSize = sizeof(c);
     c.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL | DDCAPS_BLTSTRETCH | DDCAPS_COLORKEY | DDCAPS_PALETTE |
-               DDCAPS_CANBLTSYSMEM | DDCAPS_BLTDEPTHFILL | DDCAPS_CANCLIP | DDCAPS_CANCLIPSTRETCHED;
+               DDCAPS_CANBLTSYSMEM | DDCAPS_BLTDEPTHFILL | DDCAPS_CANCLIP | DDCAPS_CANCLIPSTRETCHED |
+               DDCAPS_BLTFOURCC;  // (GetFourCCCodes' formats: converted by Blt)
+    c.dwNumFourCCCodes = 7;  // as GetFourCCCodes lists them (wrappers.h)
     c.dwCaps2 = DDCAPS2_WIDESURFACES | DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_CANRENDERWINDOWED |
                 DDCAPS2_PRIMARYGAMMA | DDCAPS2_FLIPNOVSYNC | DDCAPS2_FLIPINTERVAL | DDCAPS2_CERTIFIED;
     c.dwCKeyCaps = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT;  // no key ranges (see SetColorKey)
@@ -1630,6 +1711,22 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
         c.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
         c.dwZBufferBitDepths = DDBD_16 | DDBD_24 | DDBD_32;
     }
+    if (OverlaysOffered(this)) {
+        // Overlays (overlay.cpp): emulated, any stretch, mirroring, single colour keys.
+        c.dwCaps |= DDCAPS_OVERLAY | DDCAPS_OVERLAYSTRETCH | DDCAPS_OVERLAYFOURCC;
+        c.dwCKeyCaps |= DDCKEYCAPS_DESTOVERLAY | DDCKEYCAPS_SRCOVERLAY;
+        c.dwFXCaps |= DDFXCAPS_OVERLAYSTRETCHX | DDFXCAPS_OVERLAYSTRETCHY | DDFXCAPS_OVERLAYSHRINKX |
+                      DDFXCAPS_OVERLAYSHRINKY | DDFXCAPS_OVERLAYSTRETCHXN | DDFXCAPS_OVERLAYSTRETCHYN |
+                      DDFXCAPS_OVERLAYSHRINKXN | DDFXCAPS_OVERLAYSHRINKYN | DDFXCAPS_OVERLAYMIRRORLEFTRIGHT |
+                      DDFXCAPS_OVERLAYMIRRORUPDOWN;
+        c.ddsCaps.dwCaps |= DDSCAPS_OVERLAY;
+        c.dwMaxVisibleOverlays = 16;  // (overlay.cpp's kMaxVisibleOverlays)
+        c.dwMinOverlayStretch = 1;    // thousandths (overlay.cpp's kMinStretch, kMaxStretch)
+        c.dwMaxOverlayStretch = 100000;
+        Guard l;
+        for (Surface* s : OverlayZOrder())
+            if (s->desc.ddsCaps.dwCaps & DDSCAPS_VISIBLE) c.dwCurrVisibleOverlays++;
+    }
     c.ddsOldCaps.dwCaps = c.ddsCaps.dwCaps;  // the DirectX 5 field, same value
     c.dwSVBCaps = c.dwCaps;
     c.dwSVBCKeyCaps = c.dwCKeyCaps;
@@ -1645,6 +1742,12 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
                              DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
     helCaps.ddsOldCaps.dwCaps = helCaps.ddsCaps.dwCaps;
     helCaps.dwZBufferBitDepths = DDBD_16;
+    // No overlays in the emulation layer.
+    helCaps.dwCaps &= ~DWORD(DDCAPS_OVERLAY | DDCAPS_OVERLAYSTRETCH | DDCAPS_OVERLAYFOURCC);
+    helCaps.dwCKeyCaps &= ~DWORD(DDCKEYCAPS_DESTOVERLAY | DDCKEYCAPS_SRCOVERLAY);
+    helCaps.dwFXCaps &= ~DWORD(0x1FF80008);  // DDFXCAPS_OVERLAY*
+    helCaps.dwMaxVisibleOverlays = helCaps.dwCurrVisibleOverlays = 0;
+    helCaps.dwMinOverlayStretch = helCaps.dwMaxOverlayStretch = 0;
     helCaps.dwVidMemFree = 0;  // as ddraw.dll
     // An object limited to one side reports no surface caps for the other.
     if (capsSide == kHardwareOnly) helCaps.ddsCaps.dwCaps = helCaps.ddsOldCaps.dwCaps = 0;
@@ -2097,7 +2200,8 @@ static HRESULT CheckCaps(DWORD C, DWORD C2, DWORD C3, DWORD C4, int ddVersion) {
 // CreateSurface's checks of the description, in ddraw.dll's order (FUN_73737051,
 // FUN_73737235 and its validator FUN_73736cad). `in` loses what the interface version
 // doesn't take (the pitch through IDirectDraw/2, or without client memory).
-static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD displayBpp) {
+// overlays: OverlaysOffered for the object.
+static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD displayBpp, bool overlays) {
     DWORD& F = in.dwFlags;
     const DWORD C2 = in.ddsCaps.dwCaps2, C3 = in.ddsCaps.dwCaps3, C4 = in.ddsCaps.dwCaps4;
     DWORD C = in.ddsCaps.dwCaps;
@@ -2114,12 +2218,27 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
         if (!(F & DDSD_WIDTH) || !(F & DDSD_HEIGHT)) return DDERR_INVALIDPARAMS;
         if ((reinterpret_cast<uintptr_t>(in.lpSurface) & 3) && ddVersion != 4) return DDERR_INVALIDPARAMS;
         if ((F & DDSD_PIXELFORMAT) && (in.ddpfPixelFormat.dwFlags & DDPF_FOURCC)) {
-            DD2D9_LOG("CreateSurface: FourCC surfaces in client memory aren't supported");
-            return DDERR_UNSUPPORTED;
+            // Block-compressed (DXT): by its linear size, which must hold every block (a
+            // pitch isn't taken, with or without it; Wine's test_block_formats_creation).
+            Format f;
+            if (!Format::FromDDPF(in.ddpfPixelFormat, &f) || !f.BlockCompressed()) {
+                DD2D9_LOG("CreateSurface: FourCC surfaces in client memory aren't supported but DXT");
+                return DDERR_UNSUPPORTED;
+            }
+            // IDirectDraw4 takes a pitch flag as enough, whatever the value (and with it, the
+            // linear size unchecked); IDirectDraw7 refuses it (the same test, both ways).
+            const bool v4pitch = ddVersion == 4 && (F & DDSD_PITCH);
+            if (!v4pitch) {
+                if (!(F & DDSD_LINEARSIZE) || (F & DDSD_PITCH)) return DDERR_INVALIDPARAMS;
+                const uint64_t blocks = uint64_t((in.dwWidth + 3) / 4) * ((in.dwHeight + 3) / 4);
+                if (in.dwLinearSize < blocks * (f.fourCC == MAKEFOURCC('D', 'X', 'T', '1') ? 8 : 16))
+                    return DDERR_INVALIDPARAMS;
+            }
+        } else {
+            const DWORD bpp = (F & DDSD_PIXELFORMAT) ? in.ddpfPixelFormat.dwRGBBitCount : displayBpp;
+            if (!(F & DDSD_PITCH) || in.lPitch < LONG((bpp * in.dwWidth + 7) / 8) || (in.lPitch & 3))
+                return DDERR_INVALIDPARAMS;
         }
-        const DWORD bpp = (F & DDSD_PIXELFORMAT) ? in.ddpfPixelFormat.dwRGBBitCount : displayBpp;
-        if (!(F & DDSD_PITCH) || in.lPitch < LONG((bpp * in.dwWidth + 7) / 8) || (in.lPitch & 3))
-            return DDERR_INVALIDPARAMS;
     }
     const DWORD managed = DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE;
     if (C2 & 1) return DDERR_INVALIDCAPS;  // reserved
@@ -2201,21 +2320,31 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
         }
         if (f.BlockCompressed() && ((in.dwWidth | in.dwHeight) & 3)) return DDERR_INVALIDPARAMS;
     }
-    // Color keys, as SetColorKey takes them: no overlay keys, no ranges.
+    // Color keys, as SetColorKey takes them: no ranges, overlay keys only while overlays are offered.
     static const DWORD kCkFlags[4] = {DDSD_CKDESTOVERLAY, DDSD_CKDESTBLT, DDSD_CKSRCOVERLAY, DDSD_CKSRCBLT};
     const DDCOLORKEY* keys[4] = {&in.ddckCKDestOverlay, &in.ddckCKDestBlt, &in.ddckCKSrcOverlay, &in.ddckCKSrcBlt};
     for (int i = 0; i < 4; i++) {
         if (!(F & kCkFlags[i])) continue;
-        if (kCkFlags[i] & (DDSD_CKDESTOVERLAY | DDSD_CKSRCOVERLAY)) return DDERR_NOCOLORKEYHW;
+        if ((kCkFlags[i] & (DDSD_CKDESTOVERLAY | DDSD_CKSRCOVERLAY)) && !overlays) return DDERR_NOCOLORKEYHW;
         if (keys[i]->dwColorSpaceLowValue != keys[i]->dwColorSpaceHighValue) return DDERR_NOCOLORKEYHW;
+        // A destination overlay key where SetColorKey takes one: overlays and the primary.
+        if (kCkFlags[i] == DDSD_CKDESTOVERLAY && !(C & (DDSCAPS_OVERLAY | DDSCAPS_PRIMARYSURFACE)))
+            return DDERR_NOTAOVERLAYSURFACE;
         if (z) return DDERR_INVALIDSURFACETYPE;  // SetColorKey's answer for a Z buffer
     }
     // Cube maps: through IDirectDraw7, square, a power of two, no back buffers.
     if ((C2 & DDSCAPS2_CUBEMAP) &&
         (ddVersion != 7 || in.dwWidth != in.dwHeight || !PowerOfTwo(in.dwWidth) || (F & DDSD_BACKBUFFERCOUNT)))
         return DDERR_INVALIDPARAMS;
+    // Overlays: offered in video memory (overlay.cpp), uncompressed or YUY2 / UYVY.
+    if (C & DDSCAPS_OVERLAY) {
+        if (!overlays || (C & DDSCAPS_SYSTEMMEMORY)) return DDERR_NOOVERLAYHW;
+        if (F & DDSD_PIXELFORMAT) {
+            Format f;
+            if (Format::FromDDPF(pf, &f) && f.BlockCompressed()) return DDERR_INVALIDPIXELFORMAT;
+        }
+    }
     // What this implementation doesn't have.
-    if (C & DDSCAPS_OVERLAY) return DDERR_NOOVERLAYHW;
     if (C & DDSCAPS_VIDEOPORT) return DDERR_INVALIDPARAMS;
     return DD_OK;
 }
@@ -2243,12 +2372,18 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     {
         DWORD dw, dh, bpp;
         DisplayMode(&dw, &dh, &bpp);
-        if (HRESULT hr = CheckSurfaceDesc(in, ddVersion, bpp); FAILED(hr)) return hr;
+        if (HRESULT hr = CheckSurfaceDesc(in, ddVersion, bpp, OverlaysOffered(this)); FAILED(hr)) return hr;
     }
     // ddraw.dll reads the caps even without DDSD_CAPS. None at all makes an offscreen
     // surface, whose caps still say nothing but where its memory is.
-    const DWORD caps = in.ddsCaps.dwCaps;
+    const DWORD asked = in.ddsCaps.dwCaps;
     const DWORD caps2 = in.ddsCaps.dwCaps2;
+    // DDCREATE_EMULATIONONLY: the emulation layer's surfaces, all in system memory unless
+    // video memory is asked for (Wine's test_caps, confirmed on Windows).
+    const bool emulated = capsSide == kEmulationOnly && !(asked & DDSCAPS_VIDEOMEMORY) &&
+                          !(caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE));
+    const DWORD caps = emulated ? asked | DDSCAPS_SYSTEMMEMORY : asked;
+    if ((caps & DDSCAPS_OVERLAY) && (caps & DDSCAPS_SYSTEMMEMORY)) return DDERR_NOOVERLAYHW;
     const bool flip = (caps & DDSCAPS_FLIP) != 0;
     const bool complex = (caps & DDSCAPS_COMPLEX) != 0;
     const bool cube = (caps2 & DDSCAPS2_CUBEMAP) != 0;
@@ -2291,6 +2426,8 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         }
     }
 
+    // The emulation layer's Z buffers: 16 and 32 bits only (Wine's test_caps).
+    if (emulated && fmt.zbuf && fmt.bpp != 16 && fmt.bpp != 32) return DDERR_INVALIDPIXELFORMAT;
     DDSURFACEDESC2 base = in;
     base.dwFlags &= ~(DDSD_LPSURFACE | DDSD_PITCH | DDSD_ZBUFFERBITDEPTH | DDSD_LINEARSIZE);
     // Fields the game didn't flag hold whatever its structure did: not taken over.
@@ -2326,7 +2463,11 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     const bool client = (in.dwFlags & DDSD_LPSURFACE) != 0;
     Buffer* b;
     if (client) {
-        b = Buffer::CreateExternal(in.lpSurface, w, h, in.lPitch, fmt);
+        // DXT: the pitch of dd2d9's own layout (Buffer::Create), the game's memory holding
+        // every block (CheckSurfaceDesc).
+        const LONG bw = LONG((w + 3) & ~3);
+        const LONG pitch = fmt.BlockCompressed() ? (fmt.fourCC == MAKEFOURCC('D', 'X', 'T', '1') ? bw / 2 : bw) : in.lPitch;
+        b = Buffer::CreateExternal(in.lpSurface, w, h, pitch, fmt);
     } else {
         b = Buffer::Create(w, h, fmt);
     }
@@ -2352,7 +2493,7 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     if (flip) frontDesc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
     FinishCaps(&frontDesc);
     auto* front = new Surface(this, frontDesc, b, version);
-    front->sysmemRequested = (caps & DDSCAPS_SYSTEMMEMORY) != 0;
+    front->sysmemRequested = (asked & DDSCAPS_SYSTEMMEMORY) != 0;
     front->ownFormat = !(caps & DDSCAPS_PRIMARYSURFACE) && (in.dwFlags & (DDSD_PIXELFORMAT | DDSD_ZBUFFERBITDEPTH));
     if (caps & DDSCAPS_OWNDC) front->uniqueness = 0;
     const int frontSlot = Surface::SlotFor(version);

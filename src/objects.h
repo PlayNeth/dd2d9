@@ -186,6 +186,8 @@ public:
     // IDirectDrawSurface or IDirectDrawSurface2 (DDBLT_KEYDEST then takes the source's key).
     HRESULT Blt(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, int version, bool srcOldIface);
     HRESULT BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD trans, int version);
+    HRESULT BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
+                      bool destKeyFromSource);
     HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
                       bool destKeyFromSource = false);
     HRESULT Flip(Surface* target, DWORD flags);
@@ -310,6 +312,27 @@ public:
     void* d3dLegacy = nullptr;   // Direct3D 3-6's textures and device made through QueryInterface (d3d6int.h)
     // The CPU copy is about to be read (written): Direct3D's drawing read back first.
     void CpuAccess(bool write, const RECT* area = nullptr);  // area: what a write covers (null: all)
+
+    // Overlays (DDSCAPS_OVERLAY, overlay.cpp): emulated, the presenter lays the visible ones
+    // over the primary. What UpdateOverlay set, on every member of the overlay's flip chain
+    // (g_lock); DDSCAPS_VISIBLE in desc says it is shown.
+    Surface* overlayDest = nullptr;  // the surface overlaid, referenced (kRefInternal) as ddraw.dll does
+    RECT overlaySrc = {}, overlayDst = {};
+    DWORD overlayFlags = 0;          // DDOVER_* (keys, DDOVER_DDFX)
+    DDOVERLAYFX overlayFx = {};      // with DDOVER_DDFX: the mirroring; the override keys
+    bool OverlayShown() const {
+        return (desc.ddsCaps.dwCaps & (DDSCAPS_OVERLAY | DDSCAPS_VISIBLE)) == (DDSCAPS_OVERLAY | DDSCAPS_VISIBLE) &&
+               overlayDest;
+    }
+    // ddraw.dll's DDRAWISURF_HASOVERLAYDATA: overlays, and the primary while overlays are
+    // offered (where SetColorKey takes a DDCKEY_DESTOVERLAY key).
+    bool HasOverlayData() const;
+    HRESULT UpdateOverlay(RECT* src, Surface* dest, RECT* dst, DWORD flags, DDOVERLAYFX* fx);
+    HRESULT GetOverlayPosition(LONG* x, LONG* y);
+    HRESULT SetOverlayPosition(LONG x, LONG y);
+    HRESULT UpdateOverlayZOrder(DWORD flags, Surface* ref);
+    HRESULT EnumOverlayZOrders(DWORD flags, int version, void* ctx, void* callback);
+    void OverlayGone();  // the destructor: out of the z-order, the destination released
 
 private:
     struct PrivateData {
@@ -596,6 +619,14 @@ private:
     LONG intRef_ = 1;  // released when the last external reference goes away
     void* wraps_[4] = {};
     HWND hwnd_ = nullptr;
+    // ddraw.dll's own two windows, as its rules about them see them (hwnd_ above is the one
+    // dd2d9 drives: the focus window, also when there is a device window): the object's window
+    // (lcl->hWnd: NULL after SetCooperativeLevel(NULL, NORMAL)) and the focus window, and the
+    // device window DDSCL_CREATEDEVICEWINDOW made (g_displayLock).
+    HWND lclWnd_ = nullptr;
+    HWND focusWnd_ = nullptr;
+    HWND deviceWnd_ = nullptr;
+    void DestroyDeviceWindow();
     DWORD coop_ = 0;
     bool modeSet_ = false;
     DWORD modeW_ = 0, modeH_ = 0, modeBpp_ = 0, modeRefresh_ = 0;
@@ -628,5 +659,27 @@ private:
     volatile bool focusLossOnly_ = false;
     const Buffer* gdiBuf_ = nullptr;  // the primary's first memory (compared only)
 };
+
+// Overlays (overlay.cpp). Offered (DDCAPS_OVERLAY reported, overlay surfaces made) with
+// videooverlay=on to a DirectDraw object in exclusive mode only. A windowed program's screen
+// is the desktop, where it paints the destination key with GDI, which dd2d9's primary never
+// sees (the overlay would stay hidden): without overlays it blits instead, as before 1.1.0.
+bool OverlaysOffered(const DDraw* dd);
+// Every overlay surface of the process, front to back, as ddraw.dll keeps the device's
+// z-order list (g_lock). A new overlay goes in front.
+std::vector<Surface*>& OverlayZOrder();
+// What the presenter lays over the primary: the overlays shown on it, back to front,
+// taken under g_lock (buffers referenced), drawn without it into the frame converted from
+// the primary (`frame`: X8R8G8B8, the primary's area `area`, `pitch` pixels a row);
+// `primaryBits` is the primary's buffer, whose raw pixels destination keys compare.
+struct OverlayLayer;
+void TakeOverlays(const Surface* primary, std::vector<OverlayLayer*>* out);
+void DrawOverlays(const std::vector<OverlayLayer*>& layers, const Buffer* primaryBits, const RECT& area,
+                  uint32_t* frame, size_t pitch);
+void DropOverlays(std::vector<OverlayLayer*>* layers);
+
+// A cube map's face (DDSCAPS2_CUBEMAP_POSITIVEX ... NEGATIVEZ) under its root: the root, or the
+// member with that face's caps that isn't a mip level; null if there is none.
+Surface* CubeFace(Surface* root, DWORD face);
 
 }  // namespace dd2d9

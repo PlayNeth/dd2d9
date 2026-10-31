@@ -487,6 +487,7 @@ void D3D::Teardown() {
     for (VBuf* vb : vbufs) vb->d3d_ = nullptr;
     viewports.clear();
     lights.clear();
+    g_lightGen++;
     devices.clear();
     materials.clear();
     vbufs.clear();
@@ -516,7 +517,7 @@ ULONG Light::Release() {
         Guard l;
         if (vp) {  // only after a teardown cut it loose
             Unlink(vp->lights, this);
-            vp->lightsDirty = true;
+            vp->lightsDirty = true, g_lightGen++;
         }
         if (d3d_) Unlink(d3d_->lights, this);
         delete this;
@@ -540,7 +541,7 @@ HRESULT Light::SetLight(D3DLIGHT* in) {
     }
     Guard g;
     memcpy(&data, in, in->dwSize);
-    if (vp) vp->lightsDirty = true;
+    if (vp) vp->lightsDirty = true, g_lightGen++;
     return D3D_OK;
 }
 

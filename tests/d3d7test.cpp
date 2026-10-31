@@ -8,6 +8,7 @@
 #include <ddraw.h>
 #include <d3d.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -513,11 +514,205 @@ static int Run(int w, int h, int bpp) {
                 for (int x = 102; x < 298; x += 2)
                     if ((pixel(x, y) & 0xFFFF) != 0xFFFF) red2++;
             CHECK(true, "two lights added on a floor cut differently (Z buffering): %d of 4802 sampled pixels lost to z-fighting", red2);
+            // The Z buffer read and written through DirectDraw in small locks (a lens flare's
+            // occlusion test; dd2d9 reads back only the rectangle then) and in a whole one,
+            // and drawing against what was written. Where DirectDraw can't reach the GPU's Z
+            // buffer (antialiasing on, zaccess=off) the CPU copy is what DirectDraw itself wrote: noted only.
+            {
+                dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_TRUE);
+                dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                Vertex nearQ[4] = {{300, 100, 0.25f, 1, 0xFFFFFFFF}, {340, 100, 0.25f, 1, 0xFFFFFFFF},
+                                   {300, 140, 0.25f, 1, 0xFFFFFFFF}, {340, 140, 0.25f, 1, 0xFFFFFFFF}};
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, nearQ, 4, 0);
+                dev->EndScene();
+                auto zat = [&](RECT* r, int x, int y, DWORD flags) -> int {
+                    DDSURFACEDESC2 l = {};
+                    l.dwSize = sizeof(l);
+                    if (FAILED(zbuf->Lock(r, &l, DDLOCK_WAIT | flags, nullptr))) return -1;
+                    const int ox = r ? r->left : 0, oy = r ? r->top : 0;
+                    const int v = reinterpret_cast<const WORD*>(static_cast<const BYTE*>(l.lpSurface) + (y - oy) * l.lPitch)[x - ox];
+                    zbuf->Unlock(r);
+                    return v;
+                };
+                RECT inQuad = {316, 116, 324, 124}, corner = {500, 300, 508, 308};
+                const int zq = zat(&inQuad, 320, 120, DDLOCK_READONLY), zc = zat(&corner, 504, 304, DDLOCK_READONLY);
+                const bool readable = zc == 0xFFFF;
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (SUCCEEDED(zbuf->Lock(&corner, &l, DDLOCK_WAIT, nullptr))) {
+                    for (int y = 0; y < 8; y++) memset(static_cast<BYTE*>(l.lpSurface) + y * l.lPitch, 0, 16);
+                    zbuf->Unlock(&corner);
+                }
+                dev->BeginScene();
+                Vertex farQ[4] = {{480, 280, 0.5f, 1, 0xFFFF0000}, {540, 280, 0.5f, 1, 0xFFFF0000},
+                                  {480, 340, 0.5f, 1, 0xFFFF0000}, {540, 340, 0.5f, 1, 0xFFFF0000}};
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, farQ, 4, 0);
+                dev->EndScene();
+                const DWORD blocked = pixel(504, 304), passed = pixel(520, 320);
+                const int wq = zat(nullptr, 320, 120, DDLOCK_READONLY), wf = zat(nullptr, 520, 320, DDLOCK_READONLY),
+                          wz = zat(nullptr, 504, 304, DDLOCK_READONLY);
+                const bool ok = std::abs(zq - 16384) <= 2 && readable && blocked == 0 && passed == 0xFF0000 &&
+                                std::abs(wq - 16384) <= 2 && std::abs(wf - 32768) <= 2 && wz == 0;
+                CHECK(ok || !readable, "Z buffer through DirectDraw%s: 8x8 locks read %d and %d, written 0 blocks 0x%06lx (beside 0x%06lx), whole lock reads %d, %d, %d",
+                      readable ? "" : " (not readable here: antialiasing or zaccess=off)", zq, zc, blocked, passed, wq, wf, wz);
+            }
+            // A 2D label drawn with the depth test passing always but writing depth, then a
+            // translucent panel behind it (NFS Porsche Unleashed's menu): the label's depth keeps
+            // the panel off it. antialias2d=off draws such 2D without antialiasing, so it must
+            // still write the depth (the labels came out dim under the panel).
+            {
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                dev->SetRenderState(D3DRENDERSTATE_ZENABLE, TRUE);
+                dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+                dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_ALWAYS);
+                dev->BeginScene();
+                Vertex label[4] = {{540, 100, 0.1f, 1, 0xFFFFFFFF}, {580, 100, 0.1f, 1, 0xFFFFFFFF},
+                                   {540, 140, 0.1f, 1, 0xFFFFFFFF}, {580, 140, 0.1f, 1, 0xFFFFFFFF}};
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, label, 4, 0);
+                dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
+                dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
+                dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
+                dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
+                // (Farther in w too: wbuffer=force takes transformed vertices' depth from it.)
+                Vertex panel[4] = {{520, 90, 0.5f, 0.5f, 0x80FF0000}, {600, 90, 0.5f, 0.5f, 0x80FF0000},
+                                   {520, 150, 0.5f, 0.5f, 0x80FF0000}, {600, 150, 0.5f, 0.5f, 0x80FF0000}};
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, panel, 4, 0);
+                dev->EndScene();
+                dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, FALSE);
+                dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_ONE);
+                dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ZERO);
+                const DWORD onLabel = pixel(560, 120), beside = pixel(530, 120);
+                CHECK(onLabel == 0xFFFFFF && (beside >> 16) >= 0x70 && (beside & 0xFFFF) == 0,
+                      "2D label writing depth, translucent panel behind: label 0x%06lx (white), panel 0x%06lx", onLabel, beside);
+            }
             dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_FALSE);
             back->DeleteAttachedSurface(0, zbuf);
             dev->SetRenderTarget(back, 0);
         }
         if (zbuf) zbuf->Release();
+
+        // The clip status a draw leaves (GetClipStatus once first: dd2d9 tracks it from then
+        // on): a triangle with one corner past the left edge, the others inside.
+        {
+            D3DMATRIX id = {};
+            id._11 = id._22 = id._33 = id._44 = 1.0f;
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &id);
+            dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
+            dev->SetRenderState(D3DRENDERSTATE_EXTENTS, TRUE);
+            D3DCLIPSTATUS cs = {};
+            dev->GetClipStatus(&cs);
+            cs.dwFlags = D3DCLIPSTATUS_STATUS | D3DCLIPSTATUS_EXTENTS2;
+            cs.dwStatus = D3DSTATUS_DEFAULT;  // (intersection bits all set, union none)
+            cs.minx = cs.miny = 1e9f;
+            cs.maxx = cs.maxy = -1e9f;
+            dev->SetClipStatus(&cs);
+            struct UV { float x, y, z; DWORD c; };
+            UV tri[3] = {{-2.0f, 0.0f, 0.5f, 0xFFFFFFFF}, {0.5f, 0.5f, 0.5f, 0xFFFFFFFF}, {0.5f, -0.5f, 0.5f, 0xFFFFFFFF}};
+            dev->BeginScene();
+            dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZ | D3DFVF_DIFFUSE, tri, 3, 0);
+            dev->EndScene();
+            dev->SetRenderState(D3DRENDERSTATE_EXTENTS, FALSE);
+            D3DCLIPSTATUS got = {};
+            dev->GetClipStatus(&got);
+            const float hw = w * 0.5f, hh = h * 0.5f;  // (0.5, ±0.5) on the screen
+            const bool ext = std::fabs(got.minx - (hw + 0.5f * hw)) < 1 && std::fabs(got.maxx - got.minx) < 1 &&
+                             std::fabs(got.miny - (hh - 0.5f * hh)) < 1 && std::fabs(got.maxy - (hh + 0.5f * hh)) < 1;
+            CHECK((got.dwStatus & 0xFFF) == D3DCLIP_LEFT && !((got.dwStatus >> 12) & 0xFFF) && ext,
+                  "clip status of a draw: 0x%08lx (union LEFT, no intersection), extents %.1f..%.1f x %.1f..%.1f",
+                  got.dwStatus, got.minx, got.maxx, got.miny, got.maxy);
+        }
+
+        // A cube map: six faces in six colours, sampled with 3-component coordinates pointing
+        // at +X (red) and -Z (magenta). Where the caps offer cube maps.
+        {
+            D3DDEVICEDESC7 dc = {};
+            dev->GetCaps(&dc);
+            if (dc.dpcTriCaps.dwTextureCaps & D3DPTEXTURECAPS_CUBEMAP) {
+                DDSURFACEDESC2 cd = {};
+                cd.dwSize = sizeof(cd);
+                cd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+                cd.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_COMPLEX;
+                cd.ddsCaps.dwCaps2 = DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_ALLFACES | DDSCAPS2_TEXTUREMANAGE;
+                cd.dwWidth = cd.dwHeight = 8;
+                cd.ddpfPixelFormat.dwSize = sizeof(cd.ddpfPixelFormat);
+                cd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+                cd.ddpfPixelFormat.dwRGBBitCount = 32;
+                cd.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+                cd.ddpfPixelFormat.dwGBitMask = 0xFF00;
+                cd.ddpfPixelFormat.dwBBitMask = 0xFF;
+                IDirectDrawSurface7* cube = nullptr;
+                hr = dd->CreateSurface(&cd, &cube, nullptr);
+                static const DWORD kCol[6] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0x00FFFF, 0xFF00FF};
+                bool filled = SUCCEEDED(hr) && cube;
+                for (int f = 0; filled && f < 6; f++) {
+                    IDirectDrawSurface7* face = cube;
+                    if (f) {
+                        DDSCAPS2 fc = {0, DWORD(DDSCAPS2_CUBEMAP | (DDSCAPS2_CUBEMAP_POSITIVEX << f)), 0, {0}};
+                        filled = SUCCEEDED(cube->GetAttachedSurface(&fc, &face));
+                        if (!filled) break;
+                    }
+                    DDBLTFX ffx = {};
+                    ffx.dwSize = sizeof(ffx);
+                    ffx.dwFillColor = kCol[f];
+                    face->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &ffx);
+                    if (f) face->Release();
+                }
+                DWORD px = 0, nz = 0;
+                if (filled) {
+                    dev->SetTexture(0, cube);
+                    dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+                    dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+                    dev->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+                    dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_FALSE);
+                    struct TV { float x, y, z, rhw; float u, v, w; };
+                    const DWORD fvf = D3DFVF_XYZRHW | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0);
+                    dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                    dev->BeginScene();
+                    TV a[4] = {{20, 200, 0.5f, 1, 1, 0, 0}, {60, 200, 0.5f, 1, 1, 0, 0}, {20, 240, 0.5f, 1, 1, 0, 0},
+                               {60, 240, 0.5f, 1, 1, 0, 0}};
+                    dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, fvf, a, 4, 0);
+                    TV b[4] = {{80, 200, 0.5f, 1, 0, 0, -1}, {120, 200, 0.5f, 1, 0, 0, -1}, {80, 240, 0.5f, 1, 0, 0, -1},
+                               {120, 240, 0.5f, 1, 0, 0, -1}};
+                    dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, fvf, b, 4, 0);
+                    dev->EndScene();
+                    dev->SetTexture(0, nullptr);
+                    dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+                    dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+                    px = pixel(40, 220);
+                    nz = pixel(100, 220);
+                }
+                CHECK(filled && px == 0xFF0000 && nz == 0xFF00FF,
+                      "cube map sampled: +X 0x%06lx (red), -Z 0x%06lx (magenta) (0x%08lx)", px, nz, hr);
+                if (cube) cube->Release();
+            }
+        }
+
+        // 2D over 3D every frame (NFS Porsche Unleashed's loading screen): drawn, flipped, the
+        // back buffer locked. The lock finds the frame drawn into that buffer, and a clear
+        // between the Flip and the lock.
+        {
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_FALSE);
+            static const DWORD cols[6] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0x00FFFF, 0xFF00FF};
+            int wrong = 0;
+            char seen[96] = "";
+            for (int f = 0; f < 6; f++) {
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000 | cols[f], 1.0f, 0);
+                front->Flip(nullptr, DDFLIP_WAIT);
+                DWORD want = f ? cols[f - 1] : 0xFFFFFFFF;  // (the first: whatever was there)
+                if (f == 4) {
+                    dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                    want = 0;
+                }
+                const DWORD p = pixel(50, 50);
+                sprintf(seen + strlen(seen), "%06lx ", p);
+                if (f && p != want) wrong++;
+            }
+            CHECK(wrong == 0, "back buffer locked after every flip: %d of 5 frames wrong (%s)", wrong, seen);
+        }
 
         // ProcessVertices(TRANSFORM | CLIP) into a transformed buffer, then DrawPrimitiveVB:
         // the vertices outside the frustum are kept in clip space (XP's format), and the draw
