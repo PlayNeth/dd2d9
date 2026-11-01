@@ -1001,7 +1001,10 @@ void DDraw::ApplyWindow() {
     // The game's mode shown scaled or in a window: its cursor functions are pointed at
     // dd2d9's (input.cpp), which show it the mode as its screen. A real mode switch
     // leaves its imports alone. Again for each mode: modules loaded since are covered.
-    if (modeSet_ && display != kDisplaySwitch) InstallMouseHooks();
+    if (modeSet_ && display != kDisplaySwitch) {
+        InstallMouseHooks();
+        InstallVideoHooks();
+    }
     if (!windowChanges) {
         applying_ = false;
         return;
@@ -2074,6 +2077,14 @@ void DDraw::KeepHardwarePalette(const PALETTEENTRY* entries) {
     memcpy(defaultPalette, entries, sizeof(defaultPalette));
     memcpy(g_hwPalette, entries, sizeof(g_hwPalette));
     g_hwPaletteKept = true;
+}
+
+bool ShownImage(RECT* image, SIZE* mode, HWND* window) {
+    Guard l;
+    const DDraw* d = g_exclusiveDD;
+    if (!d || !d->ImageOnScreen(image, mode)) return false;
+    *window = d->Window();
+    return true;
 }
 
 bool PresentsOnWindow(HWND hwnd) {

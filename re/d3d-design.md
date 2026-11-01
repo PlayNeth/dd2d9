@@ -2,7 +2,8 @@
 
 Status (0.9.1): Direct3D 7 (`src/d3d7.cpp`) and 3-6 (`src/d3d6*.cpp`, a CPU front end as XP's)
 done on `src/gpures.cpp`; frames presented from the GPU copy (gamma through a pixel shader);
-render targets used as textures copied on the GPU; D7VK support removed. Cube maps still to do.
+render targets used as textures copied on the GPU; D7VK support removed. Cube maps since 1.1.0
+(D3D9 cube textures, see the changelog).
 
 Goal: Direct3D 3/5/6/7 (IDirect3D..IDirect3D7, devices, viewports, materials, lights, textures,
 vertex buffers, execute buffers) implemented in dd2d9 on Direct3D 9, matched to XP SP3's

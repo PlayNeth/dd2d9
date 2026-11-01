@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.2.0"
+#define DD2D9_VERSION "1.2.1"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -203,6 +203,11 @@ void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interfac
 // between the real screen and the game's display mode while it is shown scaled or in a
 // window. Installed in every module loaded so far (each time exclusive mode starts).
 void InstallMouseHooks();
+// Videos that Windows' player (MCI) draws into the game's window, placed where the image is
+// (video.cpp): installed with the mouse's, in a display mode of dd2d9's own (mouse=scale).
+void InstallVideoHooks();
+// Whether such a video draws into `hwnd` now (an MCI device "window ... handle" of it).
+bool VideoOnWindow(HWND hwnd);
 
 // ---------------------------------------------------------------- compatibility (compat.cpp)
 // ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
@@ -210,6 +215,9 @@ void InstallMouseHooks();
 void InstallCompatHooks(bool inLoaderLock);
 // Whether a DirectDraw object's primary is shown in `hwnd` (ddraw.cpp). Any thread.
 bool PresentsOnWindow(HWND hwnd);
+// Where the exclusive object's display mode is shown on the real screen (screen
+// coordinates), its size and the window, whatever mouse= says; false after a real mode switch.
+bool ShownImage(RECT* image, SIZE* mode, HWND* window);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.
 void LimitFrame();

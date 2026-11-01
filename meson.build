@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.2.0',
+  version : '1.2.1',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -19,7 +19,7 @@ static_link = ['-static', '-static-libgcc', '-static-libstdc++']
 ddraw = shared_library('ddraw',
   'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp', 'src/gpu.cpp',
     'src/gpures.cpp', 'src/convert.cpp', 'src/dxt.cpp', 'src/d3d7.cpp', 'src/d3d6obj.cpp', 'src/d3d6vp.cpp',
-    'src/d3d6dev.cpp', 'src/d3d6pipe.cpp', 'src/input.cpp', 'src/hooks.cpp', 'src/compat.cpp', 'src/overlay.cpp',
+    'src/d3d6dev.cpp', 'src/d3d6pipe.cpp', 'src/input.cpp', 'src/hooks.cpp', 'src/compat.cpp', 'src/video.cpp', 'src/overlay.cpp',
   name_prefix : '',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,
@@ -30,7 +30,7 @@ ddraw = shared_library('ddraw',
 # with whichever ddraw.dll sits next to it.
 executable('ddtest', 'tests/ddtest.cpp',
   dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
-                  cpp.find_library('user32')],
+                  cpp.find_library('user32'), cpp.find_library('winmm')],
   link_args : static_link + ['-mwindows'],
   install : false)
 

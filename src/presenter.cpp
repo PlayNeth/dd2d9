@@ -810,6 +810,15 @@ void Presenter::Loop() {
             lockTime = Seconds() - t0;
         }
         if (!primaryExists) continue;
+        // A video Windows' player draws into the window (video.cpp): an unchanged frame isn't
+        // presented again over it (the refresh four times a second would blank it).
+        if (IsRectEmpty(&area) && !snap.buf && overlays.empty() && VideoOnWindow(hwnd)) {
+            AcquireSRWLockExclusive(&seqLock_);
+            presentedSeq_ = seq;
+            ReleaseSRWLockExclusive(&seqLock_);
+            WakeAllConditionVariable(&seqCv_);
+            continue;
+        }
         // The CPU frame converted here, before the shared device is taken: the game's
         // Direct3D calls wait for that lock, and conversion is the slow part (the lock then
         // covers a row copy into the staging surface only). frame_ holds the last converted

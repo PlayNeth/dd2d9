@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.2.1
+- **Videos that Windows' player draws into the game's window are scaled with the game.**
+  Games that play their movies through MCI (`mciSendString`: "window ... handle", "put ...
+  destination at x y w h") place the picture in their window's coordinates as they see
+  them, their mode's; in a mode shown scaled (`display=borderless` or `window`,
+  `mouse=scale`) the player drew it at those pixels of the real window: Street Fighter
+  Zero's opening movie played at its size in the corner of the screen. The game's imports
+  of `mciSendStringA/W` now put the destination where the image is, scaled and moved as
+  the image is; a video shown in that window without a destination gets its natural size
+  there, scaled too; and while one plays, an unchanged frame isn't presented again over
+  it. (`mciSendCommand`'s `MCI_PUT` isn't translated.) New ddtest checks (a small AVI
+  played into the window).
+- The Direct3D design notes said cube maps were still to do; they have been in since 1.1.0.
+- Tested: ddtest 319/319, d3d7test 40/40, Wine's ddraw tests with no regressions; Street
+  Fighter Zero's movie confirmed in the game by the user who reported it.
+
 ## 1.2.0
 The optional items left after 1.1.0:
 - **Overlays in windowed programs.** 1.1.0 offered overlays to fullscreen programs only: a

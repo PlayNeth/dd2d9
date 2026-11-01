@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ddraw.h>
+#include <mmsystem.h>
 #include <d3d.h>
 
 #include <algorithm>
@@ -1592,6 +1593,40 @@ __attribute__((noinline)) static int ScreenMetric(int i) { return GetSystemMetri
 
 // The mouse with the display mode shown scaled (run with display=borderless): the game
 // sees its own mode's coordinates, its window as its screen.
+// A one-frame, 32x24, 24-bit uncompressed AVI (for the MCI video checks).
+static bool WriteTinyAvi(const char* path) {
+    const DWORD w = 32, h = 24, frame = w * 3 * h;
+    std::vector<uint8_t> f;
+    auto u32 = [&](DWORD v) { for (int i = 0; i < 4; i++) f.push_back(uint8_t(v >> (8 * i))); };
+    auto u16 = [&](WORD v) { f.push_back(uint8_t(v)); f.push_back(uint8_t(v >> 8)); };
+    auto tag = [&](const char* t) { f.insert(f.end(), t, t + 4); };
+    auto patch = [&](size_t at, DWORD v) { for (int i = 0; i < 4; i++) f[at + i] = uint8_t(v >> (8 * i)); };
+    tag("RIFF"); const size_t riff = f.size(); u32(0); tag("AVI ");
+    tag("LIST"); const size_t hdrl = f.size(); u32(0); tag("hdrl");
+    tag("avih"); u32(56);
+    u32(100000); u32(0); u32(0); u32(0x10); u32(1); u32(0); u32(1); u32(frame); u32(w); u32(h); u32(0); u32(0); u32(0); u32(0);
+    tag("LIST"); const size_t strl = f.size(); u32(0); tag("strl");
+    tag("strh"); u32(56);
+    tag("vids"); u32(0); u32(0); u16(0); u16(0); u32(0); u32(1); u32(10); u32(0); u32(1); u32(frame); u32(DWORD(-1)); u32(0);
+    u16(0); u16(0); u16(WORD(w)); u16(WORD(h));
+    tag("strf"); u32(40);
+    u32(40); u32(w); u32(h); u16(1); u16(24); u32(0); u32(frame); u32(0); u32(0); u32(0); u32(0);
+    patch(strl, DWORD(f.size() - strl - 4));
+    patch(hdrl, DWORD(f.size() - hdrl - 4));
+    tag("LIST"); const size_t movi = f.size(); u32(0); tag("movi");
+    const DWORD chunkAt = DWORD(f.size() - movi - 4);
+    tag("00db"); u32(frame);
+    for (DWORD i = 0; i < frame; i++) f.push_back(uint8_t(i * 7));
+    patch(movi, DWORD(f.size() - movi - 4));
+    tag("idx1"); u32(16); tag("00db"); u32(0x10); u32(chunkAt); u32(frame);
+    patch(riff, DWORD(f.size() - 8));
+    FILE* out = fopen(path, "wb");
+    if (!out) return false;
+    const bool ok = fwrite(f.data(), 1, f.size(), out) == f.size();
+    fclose(out);
+    return ok;
+}
+
 static int RunMouse() {
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);  // the real screen, before
     HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
@@ -1636,6 +1671,41 @@ static int RunMouse() {
     SendMessageA(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(sw / 2, sh / 2));
     CHECK(LOWORD(g_lastMouseMove) == 320 && HIWORD(g_lastMouseMove) == 240, "WM_MOUSEMOVE in the mode's coordinates (%d,%d)",
           LOWORD(g_lastMouseMove), HIWORD(g_lastMouseMove));
+    if (WriteTinyAvi("dd2d9test.avi")) {
+        // A video Windows' player draws into the window (Street Fighter Zero's movies): the
+        // destination the game gives in its mode's coordinates is put where the image is, and
+        // one shown without a destination gets its natural size there, scaled too.
+        const double scale = std::min(double(sw) / 640, double(sh) / 480);
+        const long ix = long((sw - 640 * scale) / 2), iy = long((sh - 480 * scale) / 2);
+        char cmd[256], out[128] = {};
+        long r[4] = {};
+        snprintf(cmd, sizeof(cmd), "window v handle %lu", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(hwnd)));
+        MCIERROR e = mciSendStringA("open dd2d9test.avi type avivideo alias v", nullptr, 0, nullptr);
+        if (e == 0) {
+            mciSendStringA(cmd, nullptr, 0, nullptr);
+            mciSendStringA("put v destination at 160 120 320 240", nullptr, 0, nullptr);
+            mciSendStringA("where v destination", out, sizeof(out), nullptr);
+            sscanf(out, "%ld %ld %ld %ld", &r[0], &r[1], &r[2], &r[3]);
+            const long ex = ix + long(160 * scale), ey = iy + long(120 * scale), ew = long(320 * scale), eh = long(240 * scale);
+            CHECK(labs(r[0] - ex) <= 1 && labs(r[1] - ey) <= 1 && labs(r[2] - ew) <= 1 && labs(r[3] - eh) <= 1,
+                  "MCI video: destination where the image is (%s; want %ld %ld %ld %ld)", out, ex, ey, ew, eh);
+            mciSendStringA("close v", nullptr, 0, nullptr);
+            mciSendStringA("open dd2d9test.avi type avivideo alias w", nullptr, 0, nullptr);
+            snprintf(cmd, sizeof(cmd), "window w handle %lu", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(hwnd)));
+            mciSendStringA(cmd, nullptr, 0, nullptr);
+            mciSendStringA("play w wait", nullptr, 0, nullptr);
+            out[0] = 0;
+            mciSendStringA("where w destination", out, sizeof(out), nullptr);
+            sscanf(out, "%ld %ld %ld %ld", &r[0], &r[1], &r[2], &r[3]);
+            CHECK(labs(r[0] - ix) <= 1 && labs(r[1] - iy) <= 1 && labs(r[2] - long(32 * scale)) <= 1 &&
+                      labs(r[3] - long(24 * scale)) <= 1,
+                  "MCI video without a destination: its natural size, scaled, where the image is (%s)", out);
+            mciSendStringA("close w", nullptr, 0, nullptr);
+        } else {
+            printf("SKIP MCI video: no AVI player (%lu)\n", static_cast<unsigned long>(e));
+        }
+        DeleteFileA("dd2d9test.avi");
+    }
     {
         // The game sizing its window to the mode at 0,0 (Xuan-Yuan Sword 3 EX back from
         // Alt+Tab), before dd2d9 covers the screen again: the cursor is still kept on the
