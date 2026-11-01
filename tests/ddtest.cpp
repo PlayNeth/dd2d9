@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <ddraw.h>
 #include <mmsystem.h>
+#include <vfw.h>
 #include <d3d.h>
 
 #include <algorithm>
@@ -1701,6 +1702,35 @@ static int RunMouse() {
                       labs(r[3] - long(24 * scale)) <= 1,
                   "MCI video without a destination: its natural size, scaled, where the image is (%s)", out);
             mciSendStringA("close w", nullptr, 0, nullptr);
+            // The player's window control (Rockman X4): a child window the game moves and sizes,
+            // and the picture it places in it, in the mode's coordinates: both scaled.
+            if (HWND mw = MCIWndCreateA(hwnd, GetModuleHandleA(nullptr),
+                                        WS_CHILD | WS_VISIBLE | MCIWNDF_NOPLAYBAR | MCIWNDF_NOMENU |
+                                            MCIWNDF_NOAUTOSIZEWINDOW | MCIWNDF_NOAUTOSIZEMOVIE,
+                                        "dd2d9test.avi")) {
+                MoveWindow(mw, 160, 120, 320, 240, FALSE);
+                RECT wr = {};
+                GetWindowRect(mw, &wr);  // (a child's: not translated)
+                // Into the game window's real client coordinates (its ClientToScreen is translated).
+                using PointFn = BOOL(WINAPI*)(HWND, POINT*);
+                const auto realClientToScreen = reinterpret_cast<PointFn>(
+                    reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "ClientToScreen")));
+                POINT o = {0, 0};
+                realClientToScreen(hwnd, &o);
+                OffsetRect(&wr, -o.x, -o.y);
+                const long ex = ix + long(160 * scale), ey = iy + long(120 * scale);
+                CHECK(labs(wr.left - ex) <= 1 && labs(wr.top - ey) <= 1 && labs(wr.right - wr.left - long(320 * scale)) <= 1 &&
+                          labs(wr.bottom - wr.top - long(240 * scale)) <= 1,
+                      "MCIWnd window: moved and sized where the image is (%ld,%ld-%ld,%ld)", wr.left, wr.top, wr.right,
+                      wr.bottom);
+                RECT d = {0, 30, 320, 210}, got = {};
+                SendMessageA(mw, MCIWNDM_PUT_DEST, 0, reinterpret_cast<LPARAM>(&d));
+                SendMessageA(mw, MCIWNDM_GET_DEST, 0, reinterpret_cast<LPARAM>(&got));
+                CHECK(labs(got.top - long(30 * scale)) <= 1 && labs(got.right - long(320 * scale)) <= 1 &&
+                          labs(got.bottom - long(210 * scale)) <= 1,
+                      "MCIWnd picture placed in the window scaled (%ld,%ld-%ld,%ld)", got.left, got.top, got.right, got.bottom);
+                MCIWndDestroy(mw);
+            }
         } else {
             printf("SKIP MCI video: no AVI player (%lu)\n", static_cast<unsigned long>(e));
         }

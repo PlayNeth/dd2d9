@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.2.2
+- **Movies in the video player's window control (MCIWnd) are scaled with the game too.**
+  Rockman X4 plays its movies in an MCIWnd window (msvfw32's `MCIWndCreate`), a child of
+  its own window that it moves and sizes (`MoveWindow`, `SetWindowPos`) and places the
+  picture in (`MCIWNDM_PUT_DEST`) in its mode's coordinates: the movie played at its size
+  in the corner of the screen, as Street Fighter Zero's did before 1.2.1. Those calls are
+  now translated for an MCIWnd window in the window the game is shown in, scaled as the
+  image is, and the game's unchanged frame isn't presented over one while it shows. New
+  ddtest checks.
+- **`display=borderless` covers the primary monitor**, as `display=switch` (and
+  `ddraw.dll`'s fullscreen) does, instead of the one Windows had put the game's window on:
+  Rockman X4 came up on either monitor from one start to the next. `display=window` stays
+  where the window is.
+- Tested: ddtest 321/321, d3d7test 40/40, Wine's ddraw tests with no regressions; Rockman
+  X4's movies and monitor confirmed in the game by the user who reported them.
+
 ## 1.2.1
 - **Videos that Windows' player draws into the game's window are scaled with the game.**
   Games that play their movies through MCI (`mciSendString`: "window ... handle", "put ...

@@ -806,13 +806,14 @@ void DDraw::OnDisplayChange() {
     if (GetForegroundWindow() == hwnd_) ConfineCursor(true);
 }
 
-// The monitor the game's screen is on: with the display really switched, the primary one,
-// whose mode ChangeDisplaySettings changes (ddraw.dll's default device is the primary
-// display: its fullscreen window goes there, wherever it was); a mode of dd2d9's own is shown
-// on the window's monitor. (A game on the second monitor had the first one switched and its
-// picture on the second.)
+// The monitor the game's screen is on: the primary one, as with ddraw.dll, whose default
+// device is the primary display (its fullscreen window goes there, wherever it was), for a
+// real switch (whose mode ChangeDisplaySettings changes) and for display=borderless alike;
+// the window's own for display=window. (A game on the second monitor had the first one
+// switched and its picture on the second; Rockman X4's borderless screen came up on either
+// monitor, wherever Windows had put its window.)
 HMONITOR DDraw::GameMonitor(HWND h) const {
-    if ((modeSet_ ? activeDisplay_ : g_config.display) == kDisplaySwitch) {
+    if ((modeSet_ ? activeDisplay_ : g_config.display) != kDisplayWindow) {
         const POINT origin = {0, 0};
         return MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
     }

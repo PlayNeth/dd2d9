@@ -7,9 +7,13 @@
 // dd2d9 points the game's imports of mciSendStringA/W at its own, which put the picture
 // where the game's image is: the rectangle scaled and moved as the image is. A device the
 // game shows in that window without a destination gets its natural size there, scaled too.
-// Only the command strings are translated (mciSendCommand's MCI_PUT isn't), only for the
-// window dd2d9 shows the game in, and only with mouse=scale (with mouse=raw the game sees its
-// window's real size, and places the picture in real coordinates itself).
+// The player's own window control (MCIWnd, msvfw32's MCIWndCreate) likewise: a child window
+// of the game's, which the game moves and sizes in its mode's coordinates (MoveWindow,
+// SetWindowPos) and in which it places the picture (MCIWNDM_PUT_DEST): both scaled too
+// (Rockman X4's movies, at their size in the corner). Only the command strings and those
+// calls are translated (mciSendCommand's MCI_PUT isn't), only for the window dd2d9 shows the
+// game in, and only with mouse=scale (with mouse=raw the game sees its window's real size, and
+// places the picture in real coordinates itself).
 #include "hooks.h"
 
 #include <mmsystem.h>
@@ -210,7 +214,89 @@ MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback
     return g_sendStringW(w.c_str(), ret, len, callback);
 }
 
+// ---------------------------------------------------------------- MCIWnd
+using MoveWindowFn = BOOL(WINAPI*)(HWND, int, int, int, int, BOOL);
+using SetWindowPosFn = BOOL(WINAPI*)(HWND, HWND, int, int, int, int, UINT);
+using SendMessageFn = LRESULT(WINAPI*)(HWND, UINT, WPARAM, LPARAM);
+MoveWindowFn g_moveWindow;
+SetWindowPosFn g_setWindowPos;
+SendMessageFn g_sendMessageA, g_sendMessageW;
+constexpr UINT kPutDest = WM_USER + 143;  // MCIWNDM_PUT_DEST
+
+// An MCIWnd window inside the window the game's mode is shown in (its parent): that window.
+HWND MciWndParent(HWND h) {
+    if (!h || !(GetWindowLongW(h, GWL_STYLE) & WS_CHILD)) return nullptr;
+    char cls[16] = {};
+    if (!GetClassNameA(h, cls, sizeof(cls)) || lstrcmpiA(cls, "MCIWndClass") != 0) return nullptr;
+    return GetParent(h);
+}
+
+// Where the image is in `parent`'s client area, and the scale from the game's coordinates.
+bool Scale(HWND parent, double* sx, double* sy) {
+    RECT image;
+    SIZE mode;
+    HWND shown;
+    if (!ShownImage(&image, &mode, &shown) || shown != parent || mode.cx <= 0 || mode.cy <= 0) return false;
+    *sx = double(image.right - image.left) / mode.cx;
+    *sy = double(image.bottom - image.top) / mode.cy;
+    return true;
+}
+
+BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
+    if (const HWND parent = MciWndParent(h)) {
+        long r[4] = {x, y, w, ht};
+        if (ToReal(parent, r)) {
+            DD2D9_LOG("video window %p: %d,%d %dx%d in the game's coordinates, %ld,%ld %ldx%ld on the screen",
+                      static_cast<void*>(h), x, y, w, ht, r[0], r[1], r[2], r[3]);
+            return g_moveWindow(h, int(r[0]), int(r[1]), int(r[2]), int(r[3]), repaint);
+        }
+    }
+    return g_moveWindow(h, x, y, w, ht, repaint);
+}
+
+BOOL WINAPI HookSetWindowPos(HWND h, HWND after, int x, int y, int w, int ht, UINT flags) {
+    if ((flags & (SWP_NOMOVE | SWP_NOSIZE)) != (SWP_NOMOVE | SWP_NOSIZE)) {
+        if (const HWND parent = MciWndParent(h)) {
+            long r[4] = {x, y, w, ht};
+            if (ToReal(parent, r)) {
+                // A size alone scales; a position alone moves with the image (its own size kept).
+                if (!(flags & SWP_NOMOVE)) x = int(r[0]), y = int(r[1]);
+                if (!(flags & SWP_NOSIZE)) w = int(r[2]), ht = int(r[3]);
+            }
+        }
+    }
+    return g_setWindowPos(h, after, x, y, w, ht, flags);
+}
+
+// MCIWNDM_PUT_DEST: the picture's rectangle in the MCIWnd window's client area, scaled as the
+// window was (no offset: the window itself moved with the image).
+LRESULT SendPutDest(SendMessageFn send, HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == kPutDest && lp) {
+        double sx, sy;
+        if (const HWND parent = MciWndParent(h); parent && Scale(parent, &sx, &sy)) {
+            const RECT& g = *reinterpret_cast<const RECT*>(lp);
+            RECT r = {LONG(g.left * sx), LONG(g.top * sy), LONG(g.right * sx), LONG(g.bottom * sy)};
+            DD2D9_LOG("video window %p: picture %ld,%ld-%ld,%ld, %ld,%ld-%ld,%ld on the screen", static_cast<void*>(h), g.left,
+                      g.top, g.right, g.bottom, r.left, r.top, r.right, r.bottom);
+            return send(h, msg, wp, reinterpret_cast<LPARAM>(&r));
+        }
+    }
+    return send(h, msg, wp, lp);
+}
+
+LRESULT WINAPI HookSendMessageA(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    return msg == kPutDest ? SendPutDest(g_sendMessageA, h, msg, wp, lp) : g_sendMessageA(h, msg, wp, lp);
+}
+
+LRESULT WINAPI HookSendMessageW(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    return msg == kPutDest ? SendPutDest(g_sendMessageW, h, msg, wp, lp) : g_sendMessageW(h, msg, wp, lp);
+}
+
 ImportHook kHooks[] = {
+    {"user32", "MoveWindow", reinterpret_cast<void*>(HookMoveWindow), reinterpret_cast<void**>(&g_moveWindow)},
+    {"user32", "SetWindowPos", reinterpret_cast<void*>(HookSetWindowPos), reinterpret_cast<void**>(&g_setWindowPos)},
+    {"user32", "SendMessageA", reinterpret_cast<void*>(HookSendMessageA), reinterpret_cast<void**>(&g_sendMessageA)},
+    {"user32", "SendMessageW", reinterpret_cast<void*>(HookSendMessageW), reinterpret_cast<void**>(&g_sendMessageW)},
     {"winmm", "mciSendStringA", reinterpret_cast<void*>(HookSendStringA), reinterpret_cast<void**>(&g_sendStringA)},
     {"winmm", "mciSendStringW", reinterpret_cast<void*>(HookSendStringW), reinterpret_cast<void**>(&g_sendStringW)},
 };
@@ -218,7 +304,11 @@ ImportHook kHooks[] = {
 }  // namespace
 
 bool VideoOnWindow(HWND hwnd) {
-    if (!g_devicesShown || !hwnd) return false;
+    if (!hwnd) return false;
+    // An MCIWnd window showing in it.
+    for (HWND c = FindWindowExA(hwnd, nullptr, "MCIWndClass", nullptr); c; c = FindWindowExA(hwnd, c, "MCIWndClass", nullptr))
+        if (IsWindowVisible(c)) return true;
+    if (!g_devicesShown) return false;
     InitOnce();
     EnterCriticalSection(&g_videoLock);
     bool on = false;
