@@ -68,6 +68,22 @@ static IDirectDrawSurface7* Offscreen(IDirectDraw7* dd, int w, int h, int bpp) {
     return s;
 }
 
+// A FourCC offscreen surface (system memory), its memory zeroed by DirectDraw.
+static IDirectDrawSurface7* FourCC(IDirectDraw7* dd, int w, int h, DWORD fourCC) {
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    d.dwWidth = DWORD(w);
+    d.dwHeight = DWORD(h);
+    d.ddpfPixelFormat.dwSize = sizeof(d.ddpfPixelFormat);
+    d.ddpfPixelFormat.dwFlags = DDPF_FOURCC;
+    d.ddpfPixelFormat.dwFourCC = fourCC;
+    IDirectDrawSurface7* s = nullptr;
+    if (FAILED(dd->CreateSurface(&d, &s, nullptr))) return nullptr;
+    return s;
+}
+
 // Fills a surface with a pattern; in sprites, the key color (0) covers about half the pixels.
 static void Paint(IDirectDrawSurface7* s, bool sprite) {
     DDSURFACEDESC2 d = {};
@@ -175,6 +191,40 @@ static int RunBlit() {
             spritePos(i, 32, &r, &x, &y);
             dst->BltFast(DWORD(x), DWORD(y), sheet, &r, DDBLTFAST_NOCOLORKEY | DDBLTFAST_WAIT);
         });
+        Measure("stretch 320x240 -> 640x480 (Blt)", bpp, W * H, [&](int) {
+            RECT r = {0, 0, W / 2, H / 2};
+            dst->Blt(nullptr, bg, &r, DDBLT_WAIT, nullptr);
+        });
+        Measure("scroll 640x479 up a row (Blt)", bpp, W * (H - 1), [&](int) {
+            RECT s = {0, 1, W, H}, d = {0, 0, W, H - 1};
+            dst->Blt(&d, dst, &s, DDBLT_WAIT, nullptr);
+        });
+        if (bpp != 8) {
+            IDirectDrawSurface7* other = Offscreen(dd, W, H, bpp == 16 ? 32 : 16);
+            if (other) {
+                Paint(other, false);
+                Measure(bpp == 16 ? "convert 640x480 from 32-bit (Blt)" : "convert 640x480 from 16-bit (Blt)", bpp, W * H,
+                        [&](int) { dst->Blt(nullptr, other, nullptr, DDBLT_WAIT, nullptr); });
+                other->Release();
+            }
+        }
+        // Video: a YUY2 frame decoded and stretched to the screen's size, as a player does.
+        if (IDirectDrawSurface7* yuy2 = FourCC(dd, 320, 240, MAKEFOURCC('Y', 'U', 'Y', '2'))) {
+            Measure("YUY2 320x240 -> 640x480 (Blt)", bpp, W * H,
+                    [&](int) { dst->Blt(nullptr, yuy2, nullptr, DDBLT_WAIT, nullptr); });
+            yuy2->Release();
+        }
+        // A sprite out of a big DXT1 atlas.
+        if (IDirectDrawSurface7* atlas = FourCC(dd, 1024, 1024, MAKEFOURCC('D', 'X', 'T', '1'))) {
+            Measure("sprite 32x32 from a 1024x1024 DXT1 (Blt)", bpp, 32 * 32, [&](int i) {
+                RECT r;
+                LONG x, y;
+                spritePos(i, 32, &r, &x, &y);
+                RECT d = {x, y, x + 32, y + 32};
+                dst->Blt(&d, atlas, &r, DDBLT_WAIT, nullptr);
+            });
+            atlas->Release();
+        }
         Measure("fill 640x480", bpp, W * H, [&](int i) {
             DDBLTFX fx = {};
             fx.dwSize = sizeof(fx);

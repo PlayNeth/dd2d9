@@ -164,7 +164,80 @@ static int Run(int w, int h, int bpp) {
             const DWORD l = pixel(16, 64), r = pixel(112, 64);
             CHECK(l == col && r == 0xFF0000, "render to texture, pass %d: left 0x%06lx, right 0x%06lx", pass + 1, l, r);
         }
+        // Drawn into, then used colour-keyed (its red the key): the red half transparent. And a
+        // mipmapped one drawn into at its top level. (Both copied on the GPU.)
+        auto drawInto = [&](IDirectDrawSurface7* target) {
+            dev->SetRenderTarget(target, 0);
+            D3DVIEWPORT7 tv = {0, 0, 64, 64, 0.0f, 1.0f};
+            dev->SetViewport(&tv);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFFFF0000, 1.0f, 0);
+            dev->BeginScene();
+            Vertex q[4] = {{0, 0, 0.5f, 1, 0xFF00FF00}, {32, 0, 0.5f, 1, 0xFF00FF00}, {0, 64, 0.5f, 1, 0xFF00FF00},
+                           {32, 64, 0.5f, 1, 0xFF00FF00}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, q, 4, 0);
+            dev->EndScene();
+            dev->SetRenderTarget(back, 0);
+            D3DVIEWPORT7 bv = {0, 0, DWORD(w), DWORD(h), 0.0f, 1.0f};
+            dev->SetViewport(&bv);
+        };
+        auto drawWith = [&](IDirectDrawSurface7* texture) {
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->SetTexture(0, texture);
+            dev->BeginScene();
+            TV quad[4] = {{0, 0, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {128, 0, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                          {0, 128, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {128, 128, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, quad, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+        };
+        if (tex) {
+            DDPIXELFORMAT pf = {};
+            pf.dwSize = sizeof(pf);
+            tex->GetPixelFormat(&pf);
+            DDCOLORKEY red = {pf.dwRBitMask, pf.dwRBitMask};
+            tex->SetColorKey(DDCKEY_SRCBLT, &red);
+            drawInto(tex);
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, TRUE);
+            drawWith(tex);
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+            tex->SetColorKey(DDCKEY_SRCBLT, nullptr);
+            const DWORD l = pixel(16, 64), r = pixel(112, 64);
+            CHECK(l == 0x00FF00 && r == 0, "colour-keyed render-target texture: left 0x%06lx, right 0x%06lx (keyed out)", l, r);
+        }
         if (tex) tex->Release();
+        // A render target drawn into, blitted to the back buffer (copied on the GPU): as is, and
+        // stretched 2x.
+        {
+            IDirectDrawSurface7* rt = nullptr;
+            if (SUCCEEDED(dd->CreateSurface(&t, &rt, nullptr))) {
+                drawInto(rt);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                RECT at = {100, 10, 164, 74}, big = {200, 10, 328, 138};
+                const HRESULT h1 = back->Blt(&at, rt, nullptr, DDBLT_WAIT, nullptr);
+                const HRESULT h2 = back->Blt(&big, rt, nullptr, DDBLT_WAIT, nullptr);
+                const DWORD a = pixel(110, 40), b = pixel(160, 40), c = pixel(220, 70), e = pixel(320, 70), o = pixel(90, 40);
+                CHECK(SUCCEEDED(h1) && SUCCEEDED(h2) && a == 0x00FF00 && b == 0xFF0000 && c == 0x00FF00 && e == 0xFF0000 && o == 0,
+                      "render target blitted to the back buffer: %06lx %06lx, stretched %06lx %06lx, outside %06lx", a, b, c, e, o);
+                rt->Release();
+            }
+        }
+        {
+            DDSURFACEDESC2 m = t;
+            m.dwFlags |= DDSD_MIPMAPCOUNT;
+            m.dwMipMapCount = 2;
+            m.ddsCaps.dwCaps |= DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
+            IDirectDrawSurface7* mip = nullptr;
+            hr = dd->CreateSurface(&m, &mip, nullptr);
+            if (mip) {
+                drawInto(mip);
+                drawWith(mip);
+                const DWORD l = pixel(16, 64), r = pixel(112, 64);
+                CHECK(l == 0x00FF00 && r == 0xFF0000, "mipmapped render-target texture: left 0x%06lx, right 0x%06lx", l, r);
+                mip->Release();
+            } else {
+                CHECK(false, "mipmapped render-target texture -> 0x%08lx", hr);
+            }
+        }
 
         // A 64x64 texture of one-pixel black and white squares drawn 8x8, point-filtered and
         // with no mip filter: black or white without mipmaps; grey with mipmaps=on (the GPU's
@@ -624,6 +697,75 @@ static int Run(int w, int h, int bpp) {
             CHECK((got.dwStatus & 0xFFF) == D3DCLIP_LEFT && !((got.dwStatus >> 12) & 0xFFF) && ext,
                   "clip status of a draw: 0x%08lx (union LEFT, no intersection), extents %.1f..%.1f x %.1f..%.1f",
                   got.dwStatus, got.minx, got.maxx, got.miny, got.maxy);
+            // Vertex blending and a user clip plane: one weight of 0, so the second world matrix
+            // (10 to the left) places every vertex, all past the left edge and behind the plane
+            // x >= 0 (in world space): union and intersection both LEFT | GEN0.
+            D3DMATRIX left = id;
+            left._41 = -10.0f;
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD1, &left);
+            dev->SetRenderState(D3DRENDERSTATE_VERTEXBLEND, D3DVBLEND_1WEIGHT);
+            D3DVALUE plane[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+            dev->SetClipPlane(0, plane);
+            dev->SetRenderState(D3DRENDERSTATE_CLIPPLANEENABLE, 1);
+            cs.dwStatus = D3DSTATUS_DEFAULT;
+            dev->SetClipStatus(&cs);
+            struct BV { float x, y, z, b; DWORD c; };
+            BV btri[3] = {{0.1f, 0.0f, 0.5f, 0.0f, 0xFFFFFFFF}, {0.5f, 0.5f, 0.5f, 0.0f, 0xFFFFFFFF},
+                          {0.5f, -0.5f, 0.5f, 0.0f, 0xFFFFFFFF}};
+            dev->BeginScene();
+            dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_XYZB1 | D3DFVF_DIFFUSE, btri, 3, 0);
+            dev->EndScene();
+            dev->SetRenderState(D3DRENDERSTATE_CLIPPLANEENABLE, 0);
+            dev->SetRenderState(D3DRENDERSTATE_VERTEXBLEND, D3DVBLEND_DISABLE);
+            got = {};
+            dev->GetClipStatus(&got);
+            const DWORD both = D3DCLIP_LEFT | D3DCLIP_GEN0;
+            CHECK((got.dwStatus & 0xFFF) == both && ((got.dwStatus >> 12) & 0xFFF) == both,
+                  "clip status with vertex blending and a clip plane: 0x%08lx (LEFT | GEN0 in both)", got.dwStatus);
+        }
+
+        // Bump maps (environment-mapped bump mapping): listed with the bump-mapping operations,
+        // made as textures, their format kept.
+        {
+            D3DDEVICEDESC7 dc = {};
+            dev->GetCaps(&dc);
+            struct Found { bool u8v8 = false; } found;
+            struct Cb {
+                static HRESULT WINAPI Fn(DDPIXELFORMAT* f, void* c) {
+                    if ((f->dwFlags & DDPF_BUMPDUDV) && f->dwBumpBitCount == 16 && f->dwBumpDuBitMask == 0xFF &&
+                        f->dwBumpDvBitMask == 0xFF00)
+                        static_cast<Found*>(c)->u8v8 = true;
+                    return D3DENUMRET_OK;
+                }
+            };
+            dev->EnumTextureFormats(Cb::Fn, &found);
+            const bool ops = (dc.dwTextureOpCaps & D3DTEXOPCAPS_BUMPENVMAP) != 0;
+            bool made = false;
+            if (found.u8v8) {
+                DDSURFACEDESC2 b = {};
+                b.dwSize = sizeof(b);
+                b.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+                b.dwWidth = b.dwHeight = 16;
+                b.ddsCaps.dwCaps = DDSCAPS_TEXTURE;
+                b.ddsCaps.dwCaps2 = DDSCAPS2_TEXTUREMANAGE;
+                b.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+                b.ddpfPixelFormat.dwFlags = DDPF_BUMPDUDV;
+                b.ddpfPixelFormat.dwBumpBitCount = 16;
+                b.ddpfPixelFormat.dwBumpDuBitMask = 0xFF;
+                b.ddpfPixelFormat.dwBumpDvBitMask = 0xFF00;
+                IDirectDrawSurface7* bm = nullptr;
+                if (SUCCEEDED(dd->CreateSurface(&b, &bm, nullptr))) {
+                    DDPIXELFORMAT pf = {};
+                    pf.dwSize = sizeof(pf);
+                    bm->GetPixelFormat(&pf);
+                    made = (pf.dwFlags & DDPF_BUMPDUDV) && pf.dwBumpBitCount == 16 && pf.dwBumpDvBitMask == 0xFF00;
+                    dev->SetTexture(1, bm);  // (uploaded at the next draw: nothing drawn here)
+                    dev->SetTexture(1, nullptr);
+                    bm->Release();
+                }
+            }
+            CHECK(found.u8v8 == ops && (!found.u8v8 || made), "bump maps: listed %d (bump-mapping caps %d), made %d", found.u8v8,
+                  ops, made);
         }
 
         // A cube map: six faces in six colours, sampled with 3-component coordinates pointing

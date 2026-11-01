@@ -5,6 +5,8 @@
 
 #include "objects.h"
 
+#include <emmintrin.h>
+
 #include <algorithm>
 #include <cstring>
 
@@ -172,22 +174,19 @@ bool DxtFormat(DWORD fourCC) {
     return fourCC == kDxt1 || fourCC == kDxt2 || fourCC == kDxt3 || fourCC == kDxt4 || fourCC == kDxt5;
 }
 
-static void DecodeDxt(const Buffer* b, uint8_t* argb, LONG pitch) {
+// Rows y0..y1 (multiples of 4, or y1 the height).
+static void DecodeDxt(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1) {
     const DWORD fc = b->fmt.fourCC;
-    const int bs = BlockBytes(fc), bw = (b->w + 3) / 4, bh = (b->h + 3) / 4;
-    for (int by = 0; by < bh; by++) {
+    const int bs = BlockBytes(fc), bw = (b->w + 3) / 4;
+    for (int by = y0 / 4; by * 4 < y1; by++) {
         const uint8_t* row = b->bits + size_t(by) * 4 * size_t(b->pitch);
+        const int rows = std::min(4, y1 - by * 4);
         for (int bx = 0; bx < bw; bx++) {
             uint32_t px[16];
             DecodeBlock(row + size_t(bx) * bs, fc, px);
-            for (int y = 0; y < 4; y++) {
-                const int yy = by * 4 + y;
-                if (yy >= b->h) break;
-                for (int x = 0; x < 4; x++) {
-                    const int xx = bx * 4 + x;
-                    if (xx < b->w) reinterpret_cast<uint32_t*>(argb + size_t(yy) * pitch)[xx] = px[y * 4 + x];
-                }
-            }
+            const int cols = std::min(4, b->w - bx * 4);
+            for (int y = 0; y < rows; y++)
+                memcpy(argb + size_t(by * 4 + y) * pitch + size_t(bx) * 16, px + y * 4, size_t(cols) * 4);
         }
     }
 }
@@ -224,6 +223,35 @@ inline uint32_t YuvToArgb(int y, int u, int v) {
     return 0xFF000000u | (uint32_t(Clamp8(r)) << 16) | (uint32_t(Clamp8(g)) << 8) | Clamp8(b);
 }
 
+// Eight pixels at once, exactly as YuvToArgb: y, u, v (16-bit lanes, 0-255) into eight
+// A8R8G8B8 at `out`. The sums in 32 bits through pmaddwd (pairs of 16-bit products), shifted,
+// then saturated to 0-255 as Clamp8 does.
+struct Sum4x2 {  // eight 32-bit sums: pixels 0-3, 4-7
+    __m128i lo, hi;
+};
+// a * k.low16 + b * k.high16 for each of the eight pixels (16-bit lanes in, 32-bit sums out).
+inline Sum4x2 MulAdd(__m128i a, __m128i b, __m128i k) {
+    return {_mm_madd_epi16(_mm_unpacklo_epi16(a, b), k), _mm_madd_epi16(_mm_unpackhi_epi16(a, b), k)};
+}
+inline Sum4x2 Add(Sum4x2 a, __m128i v) { return {_mm_add_epi32(a.lo, v), _mm_add_epi32(a.hi, v)}; }
+inline Sum4x2 Add(Sum4x2 a, Sum4x2 b) { return {_mm_add_epi32(a.lo, b.lo), _mm_add_epi32(a.hi, b.hi)}; }
+inline __m128i Shift8(Sum4x2 s) { return _mm_packs_epi32(_mm_srai_epi32(s.lo, 8), _mm_srai_epi32(s.hi, 8)); }
+inline __m128i K(int lowFactor, int highFactor) {
+    return _mm_set1_epi32(int((uint32_t(uint16_t(highFactor)) << 16) | uint16_t(lowFactor)));
+}
+
+inline void YuvToArgb8(__m128i y, __m128i u, __m128i v, uint8_t* out) {
+    const __m128i c = _mm_sub_epi16(y, _mm_set1_epi16(16)), d = _mm_sub_epi16(u, _mm_set1_epi16(128)),
+                  e = _mm_sub_epi16(v, _mm_set1_epi16(128)), one = _mm_set1_epi16(1), round = _mm_set1_epi32(128);
+    const __m128i r = Shift8(Add(MulAdd(c, e, K(298, 409)), round));
+    const __m128i g = Shift8(Add(MulAdd(c, d, K(298, -100)), MulAdd(e, one, K(-208, 128))));  // (the 128 rounding there)
+    const __m128i b = Shift8(Add(MulAdd(c, d, K(298, 516)), round));
+    const __m128i b8 = _mm_packus_epi16(b, b), g8 = _mm_packus_epi16(g, g), r8 = _mm_packus_epi16(r, r);
+    const __m128i bg = _mm_unpacklo_epi8(b8, g8), ra = _mm_unpacklo_epi8(r8, _mm_set1_epi8(char(0xFF)));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_unpacklo_epi16(bg, ra));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 16), _mm_unpackhi_epi16(bg, ra));
+}
+
 // A pixel pair's byte offsets of Y0, U, Y1, V.
 struct YuvLayout {
     int y0, u, y1, v;
@@ -234,15 +262,28 @@ inline YuvLayout Layout(DWORD fourCC) {
 
 }  // namespace
 
-static void DecodeYuv(const Buffer* b, uint8_t* argb, LONG pitch) {
+static void DecodeYuv(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1) {
     const YuvLayout l = Layout(b->fmt.fourCC);
     // A last pixel alone (odd width) whose pair's second half lies past a game's row: grey
     // chroma for it.
     const bool lastAlone = (b->w & 1) && b->pitch < LONG(b->w + 1) * 2;
-    for (int y = 0; y < b->h; y++) {
+    const bool uyvy = b->fmt.fourCC == MAKEFOURCC('U', 'Y', 'V', 'Y');
+    const __m128i lowBytes = _mm_set1_epi16(0x00FF);
+    for (int y = y0; y < y1; y++) {
         const uint8_t* row = b->bits + size_t(y) * b->pitch;
         uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
-        for (int x = 0; x < b->w; x += 2) {
+        // Eight pixels (four pairs, 16 bytes) at a time: Y in the even bytes (YUY2) or odd
+        // (UYVY), the chroma pairs in the others, each pair's U and V spread over its pixels.
+        int x = 0;
+        for (; x + 8 <= b->w; x += 8) {
+            const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(row + size_t(x) * 2));
+            const __m128i ys = uyvy ? _mm_srli_epi16(v, 8) : _mm_and_si128(v, lowBytes);
+            const __m128i uv = uyvy ? _mm_and_si128(v, lowBytes) : _mm_srli_epi16(v, 8);  // U0 V0 U1 V1 ...
+            const __m128i us = _mm_shufflehi_epi16(_mm_shufflelo_epi16(uv, _MM_SHUFFLE(2, 2, 0, 0)), _MM_SHUFFLE(2, 2, 0, 0));
+            const __m128i vs = _mm_shufflehi_epi16(_mm_shufflelo_epi16(uv, _MM_SHUFFLE(3, 3, 1, 1)), _MM_SHUFFLE(3, 3, 1, 1));
+            YuvToArgb8(ys, us, vs, reinterpret_cast<uint8_t*>(out + x));
+        }
+        for (; x < b->w; x += 2) {
             const uint8_t* p = row + size_t(x) * 2;
             if (x + 1 >= b->w && lastAlone) {
                 out[x] = YuvToArgb(p[l.y0], 128, 128);  // (its Y lies in the first two bytes either way)
@@ -289,7 +330,87 @@ static void EncodeYuv(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r)
     }
 }
 
+// YV12 / I420: the luma plane, then the chroma planes (half the pitch, half the rows rounded
+// up): V first in YV12, U first in I420 (IYUV).
+struct Planes {
+    uint8_t *y, *u, *v;
+    LONG cp;  // the chroma planes' pitch
+};
+static Planes PlanesOf(const Buffer* b) {
+    Planes p;
+    p.cp = b->pitch / 2;
+    p.y = b->bits;
+    uint8_t* first = b->bits + size_t(b->pitch) * b->h;
+    uint8_t* second = first + size_t(p.cp) * ((b->h + 1) / 2);
+    const bool yv12 = b->fmt.fourCC == MAKEFOURCC('Y', 'V', '1', '2');
+    p.v = yv12 ? first : second;
+    p.u = yv12 ? second : first;
+    return p;
+}
+
+static void DecodePlanar(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1) {
+    const Planes p = PlanesOf(b);
+    for (int y = y0; y < y1; y++) {
+        const uint8_t* yr = p.y + size_t(y) * b->pitch;
+        const uint8_t* ur = p.u + size_t(y / 2) * p.cp;
+        const uint8_t* vr = p.v + size_t(y / 2) * p.cp;
+        uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
+        // Eight pixels (four chroma samples, each over two of them) at a time.
+        int x = 0;
+        const __m128i zero = _mm_setzero_si128();
+        for (; x + 8 <= b->w; x += 8) {
+            const __m128i ys = _mm_unpacklo_epi8(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(yr + x)), zero);
+            uint32_t u4, v4;
+            memcpy(&u4, ur + x / 2, 4);
+            memcpy(&v4, vr + x / 2, 4);
+            const __m128i u = _mm_unpacklo_epi8(_mm_cvtsi32_si128(int(u4)), zero), v = _mm_unpacklo_epi8(_mm_cvtsi32_si128(int(v4)), zero);
+            YuvToArgb8(ys, _mm_unpacklo_epi16(u, u), _mm_unpacklo_epi16(v, v), reinterpret_cast<uint8_t*>(out + x));
+        }
+        for (; x < b->w; x++) out[x] = YuvToArgb(yr[x], ur[x / 2], vr[x / 2]);
+    }
+}
+
+// The 2x2 blocks `r` touches: luma per pixel, chroma the block's average (its pixels inside
+// the surface).
+static void EncodePlanar(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r) {
+    const Planes p = PlanesOf(b);
+    const int x0 = std::max<LONG>(r.left, 0) & ~1, x1 = std::min<LONG>(r.right, b->w);
+    const int y0 = std::max<LONG>(r.top, 0) & ~1, y1 = std::min<LONG>(r.bottom, b->h);
+    auto px = [&](int x, int y) { return reinterpret_cast<const uint32_t*>(argb + size_t(y) * pitch)[x]; };
+    for (int y = y0; y < y1; y += 2) {
+        for (int x = x0; x < x1; x += 2) {
+            int us = 0, vs = 0, n = 0;
+            for (int dy = 0; dy < 2 && y + dy < b->h; dy++)
+                for (int dx = 0; dx < 2 && x + dx < b->w; dx++) {
+                    const uint32_t c = px(x + dx, y + dy);
+                    const int R = int((c >> 16) & 255), G = int((c >> 8) & 255), B = int(c & 255);
+                    p.y[size_t(y + dy) * b->pitch + x + dx] = Clamp8(((66 * R + 129 * G + 25 * B + 128) >> 8) + 16);
+                    us += ((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128;
+                    vs += ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
+                    n++;
+                }
+            p.u[size_t(y / 2) * p.cp + x / 2] = Clamp8((us + n / 2) / n);
+            p.v[size_t(y / 2) * p.cp + x / 2] = Clamp8((vs + n / 2) / n);
+        }
+    }
+}
+
+void CopyPlanar(Buffer* dst, const RECT& d, const Buffer* src, const RECT& s) {
+    const Planes dp = PlanesOf(dst), sp = PlanesOf(src);
+    const LONG w = d.right - d.left, h = d.bottom - d.top;
+    for (LONG y = 0; y < h; y++)
+        memmove(dp.y + size_t(d.top + y) * dst->pitch + d.left, sp.y + size_t(s.top + y) * src->pitch + s.left, size_t(w));
+    const LONG cw = (w + 1) / 2, ch = (h + 1) / 2;
+    for (LONG y = 0; y < ch; y++) {
+        memmove(dp.u + size_t(d.top / 2 + y) * dp.cp + d.left / 2, sp.u + size_t(s.top / 2 + y) * sp.cp + s.left / 2, size_t(cw));
+        memmove(dp.v + size_t(d.top / 2 + y) * dp.cp + d.left / 2, sp.v + size_t(s.top / 2 + y) * sp.cp + s.left / 2, size_t(cw));
+    }
+}
+
 uint32_t FourCCKeyToArgb(DWORD fourCC, DWORD key) {
+    if (fourCC == MAKEFOURCC('Y', 'V', '1', '2') || fourCC == MAKEFOURCC('I', '4', '2', '0') ||
+        fourCC == MAKEFOURCC('I', 'Y', 'U', 'V'))
+        return YuvToArgb(int(key & 255), int((key >> 8) & 255), int((key >> 16) & 255));  // Y, U, V bytes
     if (fourCC == MAKEFOURCC('Y', 'U', 'Y', '2') || fourCC == MAKEFOURCC('U', 'Y', 'V', 'Y')) {
         const YuvLayout l = Layout(fourCC);
         const uint8_t p[4] = {uint8_t(key), uint8_t(key >> 8), uint8_t(key >> 16), uint8_t(key >> 24)};
@@ -300,13 +421,17 @@ uint32_t FourCCKeyToArgb(DWORD fourCC, DWORD key) {
     return 0xFF000000u | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
 }
 
-void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch) {
-    if (b->fmt.Yuv()) DecodeYuv(b, argb, pitch);
-    else DecodeDxt(b, argb, pitch);
+void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1) {
+    y0 = std::max(y0, 0);
+    y1 = std::min(y1, b->h);
+    if (b->fmt.Yuv()) DecodeYuv(b, argb, pitch, y0, y1);
+    else if (b->fmt.Planar()) DecodePlanar(b, argb, pitch, y0, y1);
+    else DecodeDxt(b, argb, pitch, y0 & ~3, y1);
 }
 
 void EncodeFourCC(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r) {
     if (b->fmt.Yuv()) EncodeYuv(argb, pitch, b, r);
+    else if (b->fmt.Planar()) EncodePlanar(argb, pitch, b, r);
     else EncodeDxt(argb, pitch, b, r);
 }
 

@@ -3,6 +3,135 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.2.0
+The optional items left after 1.1.0:
+- **Overlays in windowed programs.** 1.1.0 offered overlays to fullscreen programs only: a
+  windowed one paints the destination colour key into its window with GDI, on the desktop
+  dd2d9's primary doesn't hold, so its overlay stayed hidden (the DirectX 7 SDK's DDOverlay
+  sample showed nothing). Now the presenter also looks for the key in what the window draws
+  (`WM_PRINT`, ten times a second at most, waiting 50 ms at most for an answer), and a key
+  that shows nowhere under the overlay doesn't hide it. DDOverlay shows its picture; Wine's
+  `test_overlay_rect` (where its DWM check lets it run), `test_offscreen_overlay` and
+  `test_yv12_overlay` run and pass. Only the part of an overlay over the program's own
+  window can be seen (the SDK's Mosquito puts its overlay beside its window). New ddtest
+  check: a window half key colour, half black.
+- **YV12 surfaces** (and I420/IYUV): planar 4:2:0 video, offscreen or overlay, in
+  `GetFourCCCodes`. Locked a luma byte per pixel (pitch 256-byte aligned, as overlay
+  hardware had it), blitted to and from any surface through 32-bit colour, copied plane by
+  plane between two of one format, laid over the screen as overlays. Not colour-filled, not
+  textures. New ddtest checks.
+- **Render-target textures copied on the GPU when mipmapped or colour-keyed** (until now
+  read back through the CPU, which waits for the GPU): the levels Direct3D drew into copied
+  there, the others uploaded from their CPU copies; a colour key made transparent black by a
+  pixel shader, as the CPU path does it. Palettized ones still go through the CPU. New
+  d3d7test checks.
+- **The `DDSCL_CREATEDEVICEWINDOW` window** covers the screen in exclusive mode and shows the
+  picture, as `ddraw.dll`'s did (it was kept hidden, the picture in the focus window, so a
+  game that left that window small or hidden showed nothing). Its mouse messages go on to the
+  focus window (double-clicks as plain clicks where that window takes no double-clicks). It
+  hides while the game is in the background. New ddtest check (with `DDSCL_NOWINDOWCHANGES`).
+- **Direct3D 7's `GetClipStatus`** takes vertex blending and the user clip planes into
+  account (`D3DCLIP_GEN0`-`5`); **Direct3D 3–6's `Pick`** finds a triangle the clip volume
+  cuts in its visible part. New d3d7test and ddtest checks.
+- **Bump maps** (`DDPF_BUMPDUDV`: U8V8, U5V5L6, U8V8L8), found missing by the DirectX 7 SDK's
+  BumpEarth: the caps said the GPU does environment-mapped bump mapping (D3D9's
+  `D3DTEXOPCAPS_BUMPENVMAP`), but no bump format was listed or could be made, so the sample
+  stopped with an error. Now `EnumTextureFormats` lists those the GPU has (Direct3D 6 and 7
+  hardware devices), they are made and uploaded as D3D9's V8U8, L6V5U5 and X8L8V8U8 (U8V8L8
+  widened), and BumpEarth draws as with Wine's own ddraw. Blits between a bump map and a
+  colour surface are refused (they only copy as they are). New d3d7test check.
+- **Overlays laid over the picture on the GPU** (a pixel shader with the destination and
+  source colour keys) instead of on the CPU: until now a visible overlay made the presenter
+  convert the whole primary every frame and read Direct3D's drawing back from the GPU to lay
+  the overlay over it. Now only an overlay that changed is decoded and uploaded; the rest
+  stays on the GPU. The CPU path stays for a GPU without pixel shaders.
+- **Blits from a render target on the GPU**: a plain copy (`Blt` without effects, colour
+  keys or a raster operation other than `SRCCOPY`) from a surface Direct3D drew into, to the
+  primary, a back buffer or another surface on the GPU of one format, is made there with
+  `StretchRect` (stretched too, when unclipped) instead of reading the drawing back to the
+  CPU first. Windowed Direct3D games that blit their back buffer to the primary (the SDK's
+  framework does) no longer wait for the GPU every frame. New d3d7test check.
+- **SSE2** for YUY2/UYVY and YV12/I420 decoding (eight pixels at a time, the same results as
+  before to the bit) and a faster U8V8L8 bump-map upload.
+- **A review of the whole code** for speed and mistakes found:
+  - *Faster software blits:* a blit from or to a DXT/YUV surface decodes only the rows it
+    uses into memory kept from blit to blit (it decoded the whole surface into a newly
+    allocated one, and for a source without alpha copied and compared all of it after: a
+    32x32 sprite out of a 1024x1024 DXT atlas decoded a million pixels); blits between
+    formats convert whole rows with SSE2 and pack through tables (they went through two
+    out-of-line conversions per pixel); a stretched blit copies a repeated row instead of
+    making it again; a plain copy of any depth, overlapping scrolls included, goes row by
+    row with `memmove` (24-bit ones went pixel by pixel, overlapping ones through a copy of
+    the whole source); 24-bit primaries and textures convert four pixels at a time.
+    `ddbench blit` (new cases for these) against 1.1's blitter: a YUY2 frame stretched to
+    640x480 2.8-7.5x faster, 16/32-bit conversion 3.4-3.7x, a scroll 2.3-4.5x, a 2x stretch
+    1.2-1.4x, a sprite out of a DXT atlas about 40x; the rest as fast as before or faster.
+  - *Fewer Direct3D 9 calls:* Direct3D 3-6 send stage 0 and 1's texture operations and
+    the alpha test only when they change (up to 17 calls at every draw before), Direct3D 7
+    the alpha test only when it changes (at every stage-0 texture change before); strided
+    vertices are gathered into memory kept from draw to draw.
+  - *Fixed:* a windowed overlay with a destination colour key didn't show under a gamma
+    ramp (the key was compared with the frame after the ramp); the GPU overlay path could
+    use a released texture when the device was reset while an overlay appeared; an 8-bit
+    overlay's palette changes didn't reach the GPU path; a windowed render target blitted
+    to the primary while the window was partly off the screen was read back every frame
+    (it now goes through the CPU as before); no multisampled copy of the primary is made
+    for it under `antialiasing`; a YUY2/YV12 blit between a surface and its
+    `DuplicateSurface` copy that overlapped copied rows in the wrong order; a duplicate
+    counted its memory twice; a palette released too often left a surface that outlived
+    its flip chain pointing at it; Direct3D 7's `ProcessVertices` without clipping left
+    the clip codes of an earlier clipping one in the destination (those vertices then
+    drawn as clip-space ones); `SetViewport` with sizes that wrap around 4 GB was taken;
+    indexed draws with indices past the vertices given read past them (now vertex 0, as
+    the vertex buffer path did); a huge vertex count could end the game with an uncaught
+    out-of-memory exception; Direct3D 3-6's textured viewport background turned texture
+    wrapping off; `SetExecuteData` vertex counts and offsets near 4 GB weren't refused;
+    matrix handles weren't freed with their device; a vertex buffer made with
+    `D3DDP_DONOTCLIP` was still clipped when drawn; with `desktopbpp`, a game putting back
+    the "current" mode it read switched the real desktop to that depth (or failed); an ini
+    value that is only a comment (`logfile= ; ...`) was taken as the value.
+  - *Startup:* the compatibility hooks walk each module's imports once (they were walked up
+    to five times at every DirectDraw object a game created).
+- **Overlay and capture tools** (RivaTuner Statistics Server, MSI Afterburner) show and
+  record dd2d9's frames: they went out through an additional swap chain on the game's
+  window, which those tools don't hook. Now the device's own implicit back buffer (as large
+  as the largest monitor) holds the frame, `IDirect3DDevice9::Present` shows it in the
+  game's window, the device is made on that window, and every frame has a draw call (one
+  that draws nothing): RivaTuner draws only into frames that had one, and a 2D game's are
+  copied into the back buffer. A window larger than every monitor still gets a swap chain.
+- **Found in games after the review** (with users' logs):
+  - *3DMark 2000:* the benchmark looked like 30 frames a second however fast it ran, and its
+    logo's fade showed few steps: with `cpus=1` the presenter thread shared the one processor
+    with a game drawing without waiting for the vertical blank, at equal priority, and only
+    ran at the end of its time slices. It now runs above the game's threads. The splash
+    showed nothing: it calls `LockWindowUpdate` on its full-screen window (which hid all of
+    dd2d9's picture in it, where `ddraw.dll` drew on the screen itself); that lock is no
+    longer done on the window dd2d9 shows the primary in.
+  - *FlyingSB:* grey instead of its colours: it sets up its palette only when the screen is
+    a palette device, so in an 8-bit mode of the game's own `GetDeviceCaps` now answers as XP
+    did after the switch (8 bits, `RC_PALETTE`, 256 entries, 20 reserved), and in any mode of
+    its own that mode's depth and size; and the display's palette is kept from one primary
+    to the next (a primary made without a palette shows the colours the last one left, as
+    the hardware palette did). Back from Alt+Tab nothing showed: it goes exclusive again
+    while still minimized, and the window region was made from the icon's rectangle.
+  - *Need for Speed: High Stakes* quit after Alt+Tab: it never restores its flip chain, and
+    every Flip failed. With `display=borderless` or `window`, surfaces are no longer lost
+    once the game is back in front (the display never left its mode).
+  - *Two monitors with `display=switch`:* the game's window went to the monitor it was on
+    and the first one changed mode; now both are the primary monitor's, as with
+    `ddraw.dll`.
+  - *Xuan-Yuan Sword 3 EX* crashed: it writes a few rows past the end of its back buffer
+    (surfaces now have slack around their memory); back from Alt+Tab it was told its window
+    was the monitor's size by `WM_SIZE` and made its buffers that size (its window's size and
+    move messages now carry the mode's size, as `GetClientRect` already did); and it draws its
+    cursor where `GetCursorPos` says, unclipped, which went past 640x480 while its window was
+    exactly the mode's size (the cursor is now kept on the game's screen then too; with
+    `mouse=raw` the game still crashes once the cursor leaves that area).
+- Tested against the DirectX 7 SDK's samples (Direct3D and DirectDraw), each compared with
+  the same sample on Wine's own ddraw: all draw what the reference draws (the fullscreen
+  DirectDraw ones, whose mode switch Wine's ddraw can't make on the test display, draw with
+  dd2d9 only).
+
 ## 1.1.0
 The release after 1.0.1: 1.0.2, 1.0.3 and 1.0.4 (below), and the fixes that testing them in
 games brought.

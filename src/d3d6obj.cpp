@@ -866,7 +866,7 @@ UINT FvfSize6(DWORD fvf) {
 }
 
 VBuf::VBuf(D3D* d3d, const D3DVERTEXBUFFERDESC& d, DWORD flags)
-    : d3d_(d3d), caps(d.dwCaps), fvf(d.dwFVF), count(d.dwNumVertices) {
+    : d3d_(d3d), caps(d.dwCaps), fvf(d.dwFVF), count(d.dwNumVertices), drawFlags(flags & D3DDP_DONOTCLIP) {
     stride = FvfSize6(fvf);
     mem.assign(size_t(stride) * std::max<DWORD>(count, 1), 0);
     if ((fvf & 0x0E) == D3DFVF_XYZRHW && !(flags & D3DDP_DONOTCLIP)) clip.assign(std::max<DWORD>(count, 1), 0);

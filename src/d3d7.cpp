@@ -407,6 +407,12 @@ public:
     DWORD fogSentV_[3] = {};
     void SendFog(DWORD fvf);
     int keySent_ = -1;     // whether PushAlphaTest last sent the colour key's alpha test
+    bool alphaSent_ = false;  // ALPHATESTENABLE, ALPHAREF, ALPHAFUNC as PushAlphaTest last sent them
+    DWORD alphaSentV_[3] = {};
+    // Reused from draw to draw (g_lock): strided vertices gathered, vertices given a normal,
+    // indices made safe.
+    std::vector<uint8_t> gathered_, withNormal_;
+    std::vector<WORD> safeIdx_;
     D3DVIEWPORT7 vp_;
     DWORD rs_[256];
     D3DMATERIAL7 mat_ = {};
@@ -575,6 +581,7 @@ Device7::~Device7() {
 // ---- sending state to Direct3D 9
 
 void Device7::PushAll() {
+    alphaSent_ = false;
     for (DWORD s = 0; s < 256; s++) PushRS(s);
     for (DWORD i = 0; i < 8; i++) {
         for (DWORD t = 1; t < 25; t++) PushTSS(i, t);
@@ -637,15 +644,24 @@ void Device7::PushAlphaTest() {
     ctx_.SetColorKeyEnable(rs_[41] == TRUE);
     const bool key = rs_[41] == TRUE && tex_[0] && tex_[0]->hasCk[kCkSrcBlt];
     keySent_ = key;
+    DWORD v[3];
     if (rs_[15] == TRUE || !key) {
-        ctx_.SetRenderState(15, rs_[15] == TRUE);
-        ctx_.SetRenderState(24, rs_[24] & 0xFF);
-        ctx_.SetRenderState(25, rs_[25] == 0xFFFFFFFF ? DWORD(D3DCMP_ALWAYS) : rs_[25]);
+        v[0] = rs_[15] == TRUE;
+        v[1] = rs_[24] & 0xFF;
+        v[2] = rs_[25] == 0xFFFFFFFF ? DWORD(D3DCMP_ALWAYS) : rs_[25];
     } else {
-        ctx_.SetRenderState(15, TRUE);
-        ctx_.SetRenderState(24, 0);
-        ctx_.SetRenderState(25, D3DCMP_GREATER);
+        v[0] = TRUE;
+        v[1] = 0;
+        v[2] = D3DCMP_GREATER;
     }
+    // (Every stage-0 texture change comes here: only what changed goes to D3D9.)
+    static const DWORD kStates[3] = {15, 24, 25};
+    for (int i = 0; i < 3; i++) {
+        if (alphaSent_ && alphaSentV_[i] == v[i]) continue;
+        ctx_.SetRenderState(kStates[i], v[i]);
+        alphaSentV_[i] = v[i];
+    }
+    alphaSent_ = true;
 }
 
 // S §Texture stage states: some move to D3D9's sampler states, two with other values.
@@ -857,7 +873,7 @@ HRESULT Device7::MultiplyTransform(D3DTRANSFORMSTATETYPE t, D3DMATRIX* m) {
 
 HRESULT Device7::SetVP(const D3DVIEWPORT7& in) {
     const DWORD w = DWORD(rt_->W()), h = DWORD(rt_->H());
-    if (in.dwX > w || in.dwY > h || in.dwX + in.dwWidth > w || in.dwY + in.dwHeight > h) return DDERR_INVALIDPARAMS;
+    if (in.dwX > w || in.dwY > h || in.dwWidth > w - in.dwX || in.dwHeight > h - in.dwY) return DDERR_INVALIDPARAMS;
     D3DVIEWPORT7 vp = in;
     if (vp.dvMaxZ - vp.dvMinZ < 0.001f) {  // UpdateViewportCache's nudge, kept in the stored copy
         if (vp.dvMaxZ < 0.5f) vp.dvMaxZ = vp.dvMinZ + 0.001f;
@@ -996,24 +1012,40 @@ HRESULT Device7::SetClipPlane(DWORD i, D3DVALUE* p) {
 }
 
 // The clip status a draw of untransformed vertices leaves (D3DFE_UpdateClipStatus): each
-// vertex's clip code in the front end's 0..w volume, their union ORed into dwStatus and their
-// intersection ANDed (its bits 12 up), and, with D3DRENDERSTATE_EXTENTS, the extents grown by
-// the vertices inside. Vertex blending and user clip planes aren't taken into account (the
-// first world matrix, the six planes of the volume).
+// vertex's clip code in the front end's 0..w volume and against the user clip planes (world
+// space, D3DCLIP_GEN0-5), their union ORed into dwStatus and their intersection ANDed (its
+// bits 12 up), and, with D3DRENDERSTATE_EXTENTS, the extents grown by the vertices inside.
+// Vertex blending as the draw does it: min(the FVF's weights, VERTEXBLEND, 3) weights after
+// the position, the last world matrix weighted 1 - their sum.
 void Device7::TrackClipStatus(DWORD fvf, const void* v, UINT stride, DWORD n) {
-    D3DMATRIX wv, wvp;
-    MatMul(&wv, world_, view_);
-    MatMul(&wvp, wv, proj_);
+    const DWORD posType = fvf & 0x0E, betas = posType >= 0x06 ? (posType - 0x04) / 2 : 0;
+    const DWORD blend = std::min<DWORD>(std::min<DWORD>(rs_[D3DRENDERSTATE_VERTEXBLEND], betas), 3);
+    if (stride < 12 + 4 * blend) return;
+    const D3DMATRIX* worlds[4] = {&world_, &world1_, &world2_, &world3_};
+    D3DMATRIX vpm;
+    MatMul(&vpm, view_, proj_);
+    const DWORD planesOn = rs_[D3DRENDERSTATE_CLIPPLANEENABLE] & 0x3F;
     const bool extents = rs_[D3DRENDERSTATE_EXTENTS] == TRUE;
     const D3DVIEWPORT7& vp = vp_;
     DWORD orCodes = 0, andCodes = 0xFFF;
-    (void)fvf;
     for (DWORD i = 0; i < n; i++) {
         const float* p = reinterpret_cast<const float*>(static_cast<const uint8_t*>(v) + size_t(i) * stride);
-        const float cx = p[0] * wvp._11 + p[1] * wvp._21 + p[2] * wvp._31 + wvp._41;
-        const float cy = p[0] * wvp._12 + p[1] * wvp._22 + p[2] * wvp._32 + wvp._42;
-        const float cz = p[0] * wvp._13 + p[1] * wvp._23 + p[2] * wvp._33 + wvp._43;
-        const float cw = p[0] * wvp._14 + p[1] * wvp._24 + p[2] * wvp._34 + wvp._44;
+        // The world-space point (homogeneous: a world matrix may have a w column).
+        float wp[4] = {0, 0, 0, 0};
+        float sum = 0;
+        for (DWORD k = 0; k <= blend; k++) {
+            const float w = k < blend ? p[3 + k] : 1.0f - sum;
+            if (k < blend) sum += w;
+            const D3DMATRIX& M = *worlds[k];
+            wp[0] += (p[0] * M._11 + p[1] * M._21 + p[2] * M._31 + M._41) * w;
+            wp[1] += (p[0] * M._12 + p[1] * M._22 + p[2] * M._32 + M._42) * w;
+            wp[2] += (p[0] * M._13 + p[1] * M._23 + p[2] * M._33 + M._43) * w;
+            wp[3] += (p[0] * M._14 + p[1] * M._24 + p[2] * M._34 + M._44) * w;
+        }
+        const float cx = wp[0] * vpm._11 + wp[1] * vpm._21 + wp[2] * vpm._31 + wp[3] * vpm._41;
+        const float cy = wp[0] * vpm._12 + wp[1] * vpm._22 + wp[2] * vpm._32 + wp[3] * vpm._42;
+        const float cz = wp[0] * vpm._13 + wp[1] * vpm._23 + wp[2] * vpm._33 + wp[3] * vpm._43;
+        const float cw = wp[0] * vpm._14 + wp[1] * vpm._24 + wp[2] * vpm._34 + wp[3] * vpm._44;
         const float fx = (cx + cw) * 0.5f, fy = (cy + cw) * 0.5f;
         DWORD code = 0;
         if (fx < 0) code |= D3DCLIP_LEFT;
@@ -1022,6 +1054,11 @@ void Device7::TrackClipStatus(DWORD fvf, const void* v, UINT stride, DWORD n) {
         if (fy < 0) code |= D3DCLIP_BOTTOM;
         if (cz < 0) code |= D3DCLIP_FRONT;
         if (cz > cw) code |= D3DCLIP_BACK;
+        // A plane (a, b, c, d) clips where a x + b y + c z + d w < 0.
+        for (DWORD k = 0; k < 6; k++)
+            if ((planesOn & (1u << k)) &&
+                planes_[k][0] * wp[0] + planes_[k][1] * wp[1] + planes_[k][2] * wp[2] + planes_[k][3] * wp[3] < 0)
+                code |= D3DCLIP_GEN0 << k;
         orCodes |= code;
         andCodes &= code;
         if (!code && extents && cw != 0) {
@@ -1146,6 +1183,17 @@ HRESULT Device7::Clear(DWORD count, D3DRECT* rects, DWORD flags, D3DCOLOR color,
 
 // ---- drawing
 
+// Room for `n` elements in `v`, false (instead of std::bad_alloc out of a COM method) when the
+// memory isn't there.
+template <class T> static bool Reserve(std::vector<T>* v, size_t n) {
+    try {
+        v->reserve(n);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT stride, DWORD n, const WORD* idx,
                             DWORD ni) {
     if (!ValidPrim(t)) return DDERR_INVALIDPARAMS;  // undefined on XP (V §5.3)
@@ -1158,12 +1206,26 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
         return D3D_OK;
     }
     fvf &= ~DWORD(0xF001);  // reserved bits (D3D9's LASTBETA flags, RESERVED0)
-    if (csTracking_ && (fvf & 0x0E) && (fvf & 0x0E) != D3DFVF_XYZRHW && stride >= 12) TrackClipStatus(fvf, v, stride, n);
+    if (csTracking_ && (fvf & 0x0E) && (fvf & 0x0E) != D3DFVF_XYZRHW) TrackClipStatus(fvf, v, stride, n);
     // Lit vertices without a normal: XP lights them with a zero one (ambient and emissive
     // only); D3D9 (DXVK) leaves them unlit. Given a zero normal here.
-    std::vector<uint8_t> withNormal;
+    // Indices past the vertices given: vertex 0 instead (the GPU would read past them).
+    if (idx) {
+        for (DWORD i = 0; i < ni; i++) {
+            if (idx[i] >= n) {
+                if (!Reserve(&safeIdx_, ni)) return DDERR_OUTOFMEMORY;
+                safeIdx_.assign(idx, idx + ni);
+                for (WORD& k : safeIdx_)
+                    if (k >= n) k = 0;
+                idx = safeIdx_.data();
+                break;
+            }
+        }
+    }
     if (rs_[D3DRENDERSTATE_LIGHTING] == TRUE && (fvf & 0x0E) != D3DFVF_XYZRHW && !(fvf & D3DFVF_NORMAL)) {
         const UINT posSize = FvfSize(fvf & 0x0E), newStride = stride + 12;
+        std::vector<uint8_t>& withNormal = withNormal_;
+        if (!Reserve(&withNormal, size_t(newStride) * n)) return DDERR_OUTOFMEMORY;
         withNormal.assign(size_t(newStride) * n, 0);
         for (DWORD i = 0; i < n; i++) {
             const uint8_t* src = static_cast<const uint8_t*>(v) + size_t(i) * stride;
@@ -1268,9 +1330,9 @@ HRESULT Device7::DrawPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWPRIM
     if (!d || n > 0x01000000) return DDERR_INVALIDPARAMS;  // sizes that wrap a 32-bit size_t
     Guard l;
     HoldVB(nullptr);
-    std::vector<uint8_t> v;
-    Gather(fvf, *d, n, &v);
-    return DrawCommon(t, fvf, v.data(), FvfSize(fvf), n, nullptr, 0);
+    if (!Reserve(&gathered_, size_t(FvfSize(fvf)) * n + 16)) return DDERR_OUTOFMEMORY;
+    Gather(fvf, *d, n, &gathered_);
+    return DrawCommon(t, fvf, gathered_.data(), FvfSize(fvf), n, nullptr, 0);
 }
 
 HRESULT Device7::DrawIndexedPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWPRIMITIVESTRIDEDDATA* d, DWORD n,
@@ -1279,9 +1341,9 @@ HRESULT Device7::DrawIndexedPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DD
     if (!d || n > 0x01000000) return DDERR_INVALIDPARAMS;  // sizes that wrap a 32-bit size_t
     Guard l;
     HoldVB(nullptr);
-    std::vector<uint8_t> v;
-    Gather(fvf, *d, n, &v);
-    return DrawCommon(t, fvf, v.data(), FvfSize(fvf), n, idx, ni);
+    if (!Reserve(&gathered_, size_t(FvfSize(fvf)) * n + 16)) return DDERR_OUTOFMEMORY;
+    Gather(fvf, *d, n, &gathered_);
+    return DrawCommon(t, fvf, gathered_.data(), FvfSize(fvf), n, idx, ni);
 }
 
 // The device holds the last VB it drew from directly (V §8.7).
@@ -1405,6 +1467,7 @@ static bool ExpandClipped(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* mem, UIN
             if (a.c[2] < 0 && b.c[2] < 0) continue;
             if (a.c[2] < 0) a = lerp(a, b, a.c[2] / (a.c[2] - b.c[2]));
             else if (b.c[2] < 0) b = lerp(b, a, b.c[2] / (b.c[2] - a.c[2]));
+            if (a.c[3] <= 0 || b.c[3] <= 0) continue;
             emit(a);
             emit(b);
         }
@@ -1526,6 +1589,26 @@ HRESULT Device7::ComputeSphereVisibility(D3DVECTOR* centers, D3DVALUE* radii, DW
     return D3D_OK;
 }
 
+// The bump map formats a hardware device lists where the GPU has them with the bump-mapping
+// operations (DirectX 6 and 7: environment-mapped bump mapping).
+static void AddBumpFormats(std::vector<DDPIXELFORMAT>* list) {
+    const GpuCaps c = GpuGetCaps();
+    auto bump = [&](bool have, DWORD bits, DWORD du, DWORD dv, DWORD lum) {
+        if (!have) return;
+        DDPIXELFORMAT f = {};
+        f.dwSize = sizeof(f);
+        f.dwFlags = DDPF_BUMPDUDV | (lum ? DDPF_BUMPLUMINANCE : 0);
+        f.dwBumpBitCount = bits;
+        f.dwBumpDuBitMask = du;
+        f.dwBumpDvBitMask = dv;
+        f.dwBumpLuminanceBitMask = lum;
+        list->push_back(f);
+    };
+    bump(c.bumpV8U8, 16, 0xFF, 0xFF00, 0);
+    bump(c.bumpL6V5U5, 16, 0x1F, 0x3E0, 0xFC00);
+    bump(c.bumpX8L8V8U8, 24, 0xFF, 0xFF00, 0xFF0000);
+}
+
 HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(reinterpret_cast<void*>(cb)))) return DDERR_INVALIDPARAMS;
     std::vector<DDPIXELFORMAT> list;
@@ -1563,6 +1646,7 @@ HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx)
             f.dwFourCC = MAKEFOURCC('D', 'X', 'T', '1' + i);
             list.push_back(f);
         }
+        AddBumpFormats(&list);
     }
     for (DDPIXELFORMAT& f : list)
         if (cb(&f, ctx) != D3DENUMRET_OK) break;
@@ -1952,7 +2036,7 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
         return D3DERR_INVALIDVERTEXFORMAT;
     if (out.texCount < in.texCount) return D3DERR_INVALIDVERTEXFORMAT;
     {
-        const DWORD used = in.texCount >= 16 ? 0xFFFFFFFFu : (1u << (2 * in.texCount)) - 1;
+        const DWORD used = (1u << (2 * in.texCount)) - 1;  // (at most 8 sets)
         const DWORD srcBits = (srcFvf >> 16) & used, dstBits = (dstVb->fvf_ >> 16) & used;
         if ((dstBits & srcBits) != srcBits) return D3DERR_INVALIDVERTEXFORMAT;
     }
@@ -1986,13 +2070,15 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
     struct L {
         const D3DLIGHT7* l;
         Vec3 pos, dir;
+        float cosTheta, cosPhi;  // a spot light's cones' half angles
     };
     std::vector<L> lights;
     if (light)
         for (const Device7::Light& d : dev->lights_)
             if (d.set && d.enabled)
                 lights.push_back({&d.l, XformPoint({d.l.dvPosition.x, d.l.dvPosition.y, d.l.dvPosition.z}, dev->view_),
-                                  Norm(XformDir({d.l.dvDirection.x, d.l.dvDirection.y, d.l.dvDirection.z}, dev->view_))});
+                                  Norm(XformDir({d.l.dvDirection.x, d.l.dvDirection.y, d.l.dvDirection.z}, dev->view_)),
+                                  cosf(d.l.dvTheta * 0.5f), cosf(d.l.dvPhi * 0.5f)});
     const Color ambient = FromArgb(dev->rs_[D3DRENDERSTATE_AMBIENT]);
     DWORD orCodes = 0, andCodes = 0xFFFF;
     for (DWORD i = 0; i < count; i++) {
@@ -2130,7 +2216,7 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
                     att = a > 0 ? 1.0f / a : 1.0f;
                     if (l.l->dltType == D3DLIGHT_SPOT) {
                         const float rho = -Dot(Ld, l.dir);
-                        const float ct = cosf(l.l->dvTheta * 0.5f), cp = cosf(l.l->dvPhi * 0.5f);
+                        const float ct = l.cosTheta, cp = l.cosPhi;
                         if (rho <= cp) continue;
                         if (rho < ct && ct > cp) att *= powf((rho - cp) / (ct - cp), l.l->dvFalloff);
                     }
@@ -2223,6 +2309,10 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
             st = (st | (orCodes & 0xFFF)) & ((andCodes << 12) | 0xFF000FFF);
         }
         dstVb->hasClipCodes_ = true;
+    } else if (dstVb->clip_.size() >= size_t(dstIndex) + count) {
+        // Written in screen space now: not clipped (V §8.5 step 8), whatever an earlier
+        // clipping ProcessVertices left there.
+        std::fill_n(dstVb->clip_.begin() + dstIndex, count, WORD(0));
     }
     return D3D_OK;
 }

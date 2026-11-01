@@ -321,6 +321,7 @@ public:
 
     D3D* d3d_;
     DWORD caps, fvf, count;
+    DWORD drawFlags;  // CreateVertexBuffer's flags (D3DDP_DONOTCLIP): part of every draw from it (B §8.4)
     UINT stride;
     std::vector<uint8_t> mem;
     std::vector<WORD> clip;  // XYZRHW without D3DDP_DONOTCLIP (C §7.1 step 7)
@@ -450,6 +451,7 @@ public:
     D3DMATERIAL curMat = {};  // the material handle's data, for lighting
     // v1 matrix handles (B §4.2): XP's are pointers, good on any device (Wine's test_multiple_devices).
     std::unordered_map<DWORD, D3DMATRIX>& matrices = Matrices();
+    std::vector<DWORD> ownMatrices;  // the handles this device made: they go with it
     DWORD bound[3] = {};  // matrix handles bound by STATETRANSFORM: world, view, projection
     std::vector<MatHandle*> matHandles;
     std::vector<DWORD> texHandles;  // texture handles GetHandle gave for this device
@@ -473,6 +475,7 @@ public:
     std::vector<WORD> batchI;
     // Execute (C §6)
     std::vector<PVert> tl;       // the TL buffer, indices of execute-buffer primitives
+    std::vector<WORD> execIdx;   // Execute's primitives as index lists (scratch)
     // Pick (B §9.2): while set, ExecuteI picks instead of drawing: the triangles that cover
     // the rectangle's top-left pixel, recorded as XP's rasterizer does.
     const D3DRECT* picking = nullptr;
@@ -511,6 +514,10 @@ public:
     void PushRS9(DWORD s);                   // to Direct3D 9 (driver values)
     void PushStage9(DWORD stage, DWORD t);
     void PushAlpha9();                       // alpha test with COLORKEYENABLE's emulation
+    void SetTSS9(DWORD stage, DWORD t, DWORD v);  // stages 0-1, ops and arguments (t < 32)
+    void SetAlphaRS9(int i, DWORD v);              // ALPHATESTENABLE, ALPHAREF, ALPHAFUNC
+    DWORD tssSent[2][32] = {}, tssSentMask[2] = {};
+    DWORD alphaSent[3] = {}, alphaSentMask = 0;
     void PushStageOps9();                    // stage 0/1 ops (legacy texture, MODULATE's alpha)
     Surface* StageSurface(DWORD stage) const;
     void BindTextures9();
@@ -532,7 +539,6 @@ public:
     HRESULT DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT stride, DWORD n, const WORD* idx,
                        DWORD ni, DWORD flags, const WORD* vbClip);
     HRESULT ExecuteI(ExecBuf* eb, DWORD flags);
-    HRESULT FlushBegin(bool end);
     void ForgetSurface(Surface* s);     // a surface it refers to is being destroyed
     void InvalidateTexHandles();        // SetRenderTarget (B §3.5)
     HRESULT SetRenderTargetI(Surface* s, int sVersion);
@@ -700,8 +706,6 @@ Device* DevFrom(IDirect3DDevice3* p);
 // transform of all of them made them), or nothing where neither is kept.
 void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
                     bool extents, PVert* out, DWORD lo = 0, DWORD hi = 0xFFFFFFFF);
-// Lights one vertex position/normal (model space) into diffuse/specular (C §2.2).
-void SetupLights(Device* d);
 // Draws PVerts (indexed or not): screen coordinates as they are where clip is false or every
 // vertex is inside, else clipped against XP's volume first.
 void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx, DWORD ni, bool clip,

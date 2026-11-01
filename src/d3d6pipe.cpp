@@ -68,10 +68,11 @@ void Project(const VpMap& m, PVert* p) {
     p->rhw = rhw;
 }
 
-thread_local std::vector<PVert> t_pverts;
-thread_local std::vector<uint8_t> t_out;
-thread_local std::vector<WORD> t_idx;
-thread_local std::vector<LightC> t_lights;
+// Scratch reused from draw to draw (every caller holds g_lock).
+std::vector<PVert> t_pverts;
+std::vector<uint8_t> t_out;
+std::vector<WORD> t_idx;
+std::vector<LightC> t_lights;
 
 }  // namespace
 
@@ -86,10 +87,10 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
     // device, its viewport, any light or viewport light list, the view matrix).
     std::vector<LightC>& lights = t_lights;
     if (light) {
-        thread_local const Device* cDev = nullptr;
-        thread_local const Viewport* cVp = nullptr;
-        thread_local unsigned cGen = ~0u;
-        thread_local D3DMATRIX cView;
+        static const Device* cDev = nullptr;
+        static const Viewport* cVp = nullptr;
+        static unsigned cGen = ~0u;
+        static D3DMATRIX cView;
         if (cDev != d || cVp != d->cur || cGen != g_lightGen || memcmp(&cView, &d->view, sizeof(cView)) != 0) {
             ActiveLights(d, &lights);
             cDev = d, cVp = d->cur, cGen = g_lightGen, cView = d->view;
@@ -301,10 +302,24 @@ PVert Lerp(const PVert& a, const PVert& b, float t, DWORD ntex) {
     return r;
 }
 
-// Sutherland-Hodgman against the planes in `mask`; the first vertex stays first when inside.
-// A triangle gains at most one vertex per plane: 9 at most (kMaxPoly).
+// The clip volume itself (no guard band), its planes in D3DCLIP_* order (LEFT, RIGHT, TOP,
+// BOTTOM, FRONT, BACK), as PVert::code has them: Pick clips with these.
+float VolumeDist(const PVert& p, int plane) {
+    switch (plane) {
+    case 0: return p.cx;
+    case 1: return p.cw - p.cx;
+    case 2: return p.cw - p.cy;
+    case 3: return p.cy;
+    case 4: return p.cz;
+    default: return p.cw - p.cz;
+    }
+}
+
+// Sutherland-Hodgman against the planes in `mask` (GbCode's guard-band planes, or with
+// `volume` VolumeDist's); the first vertex stays first when inside. A triangle gains at most
+// one vertex per plane: 9 at most (kMaxPoly).
 constexpr int kMaxPoly = 12;
-int ClipPoly(PVert (&poly)[kMaxPoly], int n, WORD mask, DWORD ntex) {
+int ClipPoly(PVert (&poly)[kMaxPoly], int n, WORD mask, DWORD ntex, bool volume = false) {
     PVert next[kMaxPoly];
     for (int plane = 0; plane < 6 && n >= 2; plane++) {
         if (!(mask & (1 << plane))) continue;
@@ -312,7 +327,8 @@ int ClipPoly(PVert (&poly)[kMaxPoly], int n, WORD mask, DWORD ntex) {
         for (int i = 0; i < n; i++) {
             const PVert& a = poly[i];
             const PVert& b = poly[i + 1 < n ? i + 1 : 0];
-            const float da = PlaneDist(a, plane), db = PlaneDist(b, plane);
+            const float da = volume ? VolumeDist(a, plane) : PlaneDist(a, plane);
+            const float db = volume ? VolumeDist(b, plane) : PlaneDist(b, plane);
             if (da >= 0 && m < kMaxPoly) next[m++] = a;
             if ((da >= 0) != (db >= 0) && m < kMaxPoly) next[m++] = Lerp(a, b, da / (da - db), ntex);
         }
@@ -584,7 +600,8 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
     const D3DEXECUTEDATA& ed = eb->data;
     uint8_t* base = eb->mem.data();
     const size_t size = eb->mem.size();
-    const DWORD tlSize = std::max<DWORD>(ed.dwVertexCount, 4096);
+    // (At most 65536: nothing addresses more, wDest and the indices being WORDs.)
+    const DWORD tlSize = std::min<DWORD>(std::max<DWORD>(ed.dwVertexCount, 4096), 65536);
     if (tl.size() < tlSize) tl.resize(tlSize);
     bool copied = false;   // a PROCESSVERTICES COPY ran: the rest is drawn unclipped
     bool lightFlag = false;  // sticky for the Execute (C §6.4)
@@ -599,8 +616,8 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
         }
         DrawPVerts(this, type, tl.data(), DWORD(tl.size()), idx, ni, flags == D3DEXECUTE_CLIPPED && !copied, 1);
     };
-    std::vector<WORD> idx;
-    while (pos + sizeof(D3DINSTRUCTION) <= size) {
+    std::vector<WORD>& idx = execIdx;  // (kept from Execute to Execute)
+    while (pos <= size && size - pos >= sizeof(D3DINSTRUCTION)) {
         const auto* ins = reinterpret_cast<const D3DINSTRUCTION*>(base + pos);
         const uint8_t* rec = base + pos + sizeof(D3DINSTRUCTION);
         const DWORD count = ins->wCount;
@@ -634,26 +651,43 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
             recSize = sizeof(D3DTRIANGLE);
             if (!fits(recSize)) return D3D_OK;
             if (picking) {
-                // XP's GenPickTriangle: the triangle covers the rectangle's top-left pixel; the
-                // record names the triangle's offset from the start of the instructions and
-                // its depth there. (XP also picks the parts of a triangle the clipper cut:
-                // here a triangle with a vertex outside isn't picked.)
+                // XP's GenPickTriangle: the triangle (its part inside the clip volume, for one
+                // the volume cuts) covers the rectangle's top-left pixel; the record names the
+                // triangle's offset from the start of the instructions and its depth there.
                 const float px = float(picking->x1), py = float(picking->y1);
+                // Whether (px, py) is in the screen triangle a-b-c, and its depth there.
+                auto hit = [px, py](const PVert& a0, const PVert& a1, const PVert& a2, float* z) {
+                    const float area = (a1.sx - a0.sx) * (a2.sy - a0.sy) - (a2.sx - a0.sx) * (a1.sy - a0.sy);
+                    if (area == 0.0f) return false;
+                    const float w0 = ((a1.sx - px) * (a2.sy - py) - (a2.sx - px) * (a1.sy - py)) / area;
+                    const float w1 = ((a2.sx - px) * (a0.sy - py) - (a0.sx - px) * (a2.sy - py)) / area;
+                    const float w2 = 1.0f - w0 - w1;
+                    if (w0 < 0 || w1 < 0 || w2 < 0) return false;
+                    *z = w0 * a0.sz + w1 * a1.sz + w2 * a2.sz;
+                    return true;
+                };
                 for (DWORD i = 0; i < count; i++) {
                     const D3DTRIANGLE& t = reinterpret_cast<const D3DTRIANGLE*>(rec)[i];
                     if (t.v1 >= tl.size() || t.v2 >= tl.size() || t.v3 >= tl.size()) continue;
                     const PVert &a0 = tl[t.v1], &a1 = tl[t.v2], &a2 = tl[t.v3];
-                    if (a0.code || a1.code || a2.code) continue;
-                    const float area = (a1.sx - a0.sx) * (a2.sy - a0.sy) - (a2.sx - a0.sx) * (a1.sy - a0.sy);
-                    if (area == 0.0f) continue;
-                    const float w0 = ((a1.sx - px) * (a2.sy - py) - (a2.sx - px) * (a1.sy - py)) / area;
-                    const float w1 = ((a2.sx - px) * (a0.sy - py) - (a0.sx - px) * (a2.sy - py)) / area;
-                    const float w2 = 1.0f - w0 - w1;
-                    if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                    const WORD ca = a0.code & 0x3F, cb = a1.code & 0x3F, cc = a2.code & 0x3F;
+                    if (ca & cb & cc) continue;  // wholly outside one plane
+                    float z = 0;
+                    bool found = false;
+                    if (!(ca | cb | cc)) {
+                        found = hit(a0, a1, a2, &z);
+                    } else {
+                        // Clipped in clip space, the pieces projected as drawing does.
+                        PVert poly[kMaxPoly] = {a0, a1, a2};
+                        const int pn = ClipPoly(poly, 3, ca | cb | cc, 0, true);
+                        for (int j = 0; j < pn; j++) Project(map, &poly[j]);
+                        for (int j = 1; j + 1 < pn && !found; j++) found = hit(poly[0], poly[j], poly[j + 1], &z);
+                    }
+                    if (!found) continue;
                     D3DPICKRECORD r = {};
                     r.bOpcode = D3DOP_TRIANGLE;
                     r.dwOffset = DWORD(reinterpret_cast<const uint8_t*>(&t) - (base + ed.dwInstructionOffset));
-                    r.dvZ = w0 * a0.sz + w1 * a1.sz + w2 * a2.sz;
+                    r.dvZ = z;
                     pickRecs.push_back(r);
                 }
                 break;
@@ -890,6 +924,7 @@ void FillRectsTex(Device* d, const std::vector<RECT>& rects, Surface* tex, const
     DWORD old[std::size(saved)];
     const DWORD oldHandle = d->dTexHandle;  // the driver's, which SetTexture may have ended
     Surface* const oldTex0 = d->dtex[0];
+    const DWORD oldWrap0 = d->dWrap0;  // (WRAPU/V put back after WRAP0 would take its bits off)
     for (size_t i = 0; i < std::size(saved); i++) {
         old[i] = d->rs[saved[i][0]];
         d->SetRS(saved[i][0], saved[i][1], true);
@@ -915,6 +950,8 @@ void FillRectsTex(Device* d, const std::vector<RECT>& rects, Surface* tex, const
     for (size_t i = std::size(saved); i-- > 0;) d->SetRS(saved[i][0], old[i], true);
     d->dTexHandle = oldHandle;
     d->dtex[0] = oldTex0;
+    d->dWrap0 = oldWrap0;
+    d->ctx.SetRenderState(128, oldWrap0);
     d->PushStageOps9();
     d->PushAlpha9();
 }

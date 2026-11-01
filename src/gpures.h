@@ -34,6 +34,11 @@ bool GpuDepthFill(Surface* s, const RECT& r, DWORD value);
 // A Z buffer whose GPU copy DirectDraw can read and write (INTZ): DDBLT_DEPTHFILL then
 // needs no read back first.
 bool GpuDepthWritable(const Buffer* b);
+// A plain Blt (no keys, effects or conversion) from a render target Direct3D drew into (its
+// newest pixels on the GPU) into another render target or the primary, done there with
+// StretchRect (`clips`: the destination's parts, of `d`; unclipped if stretched). false: not
+// such a case, the CPU blits (reading the source back). g_lock held.
+bool GpuBlt(Surface* dst, const RECT& d, Surface* src, const RECT& s, const std::vector<RECT>& clips);
 // The buffer's render target when its GPU copy is the newest (Direct3D drew there since
 // the CPU copy was last read back), for presenting it as it is; null otherwise. Gpu lock held.
 IDirect3DSurface9* GpuNewestSurface(Buffer* b);
@@ -57,6 +62,7 @@ struct GpuCaps {
     bool hwTnL = false;
     bool depth16 = false, depth24x8 = false, depth24s8 = false, depth32 = false;
     bool dxt[5] = {};  // DXT1-5 textures
+    bool bumpV8U8 = false, bumpL6V5U5 = false, bumpX8L8V8U8 = false;  // bump map textures (U8V8, U5V5L6, U8V8L8)
 };
 GpuCaps GpuGetCaps();  // cached after the first call; any thread
 

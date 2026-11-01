@@ -9,8 +9,6 @@
 #include "objects.h"
 
 #include <algorithm>
-#include <cstring>
-#include <vector>
 
 namespace dd2d9 {
 

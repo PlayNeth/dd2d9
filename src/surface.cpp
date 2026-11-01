@@ -14,7 +14,7 @@ namespace dd2d9 {
 static bool DibFormat(const Format& f) {
     // Red in the low byte (A8B8G8R8, X8B8G8R8): ddraw.dll on Vista and later has no DC for it.
     if (f.bpp == 32 && f.r == 0xFF && f.b == 0xFF0000) return false;
-    return !f.zbuf && !f.fourcc && (f.bpp == 8 || f.bpp == 16 || f.bpp == 24 || f.bpp == 32);
+    return !f.zbuf && !f.fourcc && !f.bump && (f.bpp == 8 || f.bpp == 16 || f.bpp == 24 || f.bpp == 32);
 }
 
 // A top-down DIB section for format f (DibFormat(f)). As ddraw.dll's: 8-bit with a
@@ -64,16 +64,28 @@ Buffer* Buffer::Create(int w, int h, const Format& f) {
         int bw = (w + 3) & ~3, bh = (h + 3) & ~3;
         size = f.fourCC == MAKEFOURCC('D', 'X', 'T', '1') ? size_t(bw) * bh / 2 : size_t(bw) * bh;
         b->pitch = LONG(size / bh);
+    } else if (f.Planar()) {
+        // The luma rows (pitch 256-byte aligned, as overlay hardware had it: Wine's
+        // test_yv12_overlay), then the two chroma planes at half the pitch.
+        b->pitch = (w + 255) & ~255;
+        size = size_t(b->pitch) * h + size_t(b->pitch / 2) * ((h + 1) / 2) * 2;
     } else {
         b->pitch = ((w * LONG(f.Bytes())) + 7) & ~7;
         size = size_t(b->pitch) * h;
     }
-    b->bits = static_cast<uint8_t*>(_aligned_malloc(size, 16));
-    if (!b->bits) {
+    // Slack around the pixels: games clip sprites loosely and write a few rows past
+    // the bottom (Xuan-Yuan Sword 3 EX, 6 rows of its 640x480 back buffer) or above the
+    // top, which the video memory or heap slack of XP's drivers took without a crash.
+    int rows = h < 64 ? h : 64;
+    size_t before = (size_t(b->pitch) * (rows < 16 ? rows : 16) + 15) & ~size_t(15);
+    size_t after = size_t(b->pitch) * rows + 4096;
+    b->base = static_cast<uint8_t*>(_aligned_malloc(before + size + after, 16));
+    if (!b->base) {
         delete b;
         return nullptr;
     }
-    memset(b->bits, 0, size);
+    memset(b->base, 0, before + size + after);
+    b->bits = b->base + before;
     b->ownsMemory = true;
     return b;
 }
@@ -123,7 +135,7 @@ void LoadKmt() {
 
 // The D3DDDIFORMAT for f, or 0 if GDI can't take it.
 UINT KmtFormat(const Format& f) {
-    if (f.zbuf || f.fourcc) return 0;
+    if (f.zbuf || f.fourcc || f.bump) return 0;
     if (f.pal8) return 41;  // P8
     if (f.bpp == 32 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return f.a == 0xFF000000u ? 21 : 22;
     if (f.bpp == 32 && f.r == 0x3FF00000 && f.g == 0xFFC00 && f.b == 0x3FF) return 35;  // A2R10G10B10
@@ -145,7 +157,7 @@ void Buffer::Release() {
     }
     if (dc) DeleteDC(dc);
     if (shadow) DeleteObject(shadow);
-    if (ownsMemory) _aligned_free(bits);
+    if (ownsMemory) _aligned_free(base);
     delete this;
 }
 
@@ -220,7 +232,8 @@ Surface::Surface(DDraw* d, const DDSURFACEDESC2& sd, Buffer* b, int ver) : dd(d)
     dd->surfaces.push_back(this);
     if (desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY) OverlayZOrder().insert(OverlayZOrder().begin(), this);  // in front
     if (desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) {  // called with g_lock held
-        vidMemBytes = uint64_t(buf->pitch) * uint64_t(buf->fmt.BlockCompressed() ? (buf->h + 3) & ~3 : buf->h);
+        vidMemBytes = buf->fmt.Planar() ? uint64_t(buf->pitch) * buf->h + uint64_t(buf->pitch / 2) * ((buf->h + 1) / 2) * 2
+                                        : uint64_t(buf->pitch) * uint64_t(buf->fmt.BlockCompressed() ? (buf->h + 3) & ~3 : buf->h);
         dd->vidMemUsed += vidMemBytes;
     }
 }
@@ -256,6 +269,7 @@ Surface::~Surface() {
         else doomed.push_back(c);
     }
     for (Surface* c : doomed) delete c;
+    if (palette && dd->primary == this) dd->KeepHardwarePalette(palette->entries);
     if (palette) palette->Release();
     if (clipper) clipper->Release();
     for (auto& p : priv_)
@@ -278,12 +292,8 @@ Surface::~Surface() {
         dd->MarkDirty();
         dd->OnPrimaryReleased();
     }
-    for (size_t i = 0; i < dd->surfaces.size(); i++) {
-        if (dd->surfaces[i] == this) {
-            dd->surfaces.erase(dd->surfaces.begin() + i);
-            break;
-        }
-    }
+    for (std::vector<Surface*>* list : {&dd->surfaces, &dd->detached})
+        list->erase(std::remove(list->begin(), list->end(), this), list->end());
     dd->IntRelease();
 }
 
@@ -405,6 +415,7 @@ void Surface::Detach(const Surface* oldRoot) {
     vidMemBytes = 0;
     auto& list = dd->surfaces;
     list.erase(std::remove(list.begin(), list.end(), this), list.end());
+    dd->detached.push_back(this);
     DD2D9_LOG("surface %p outlives its complex surface %p (still referenced): kept as a standalone surface",
               static_cast<void*>(this), static_cast<const void*>(oldRoot));
 }
@@ -420,6 +431,12 @@ bool Surface::CanBeLost() const {
 bool Surface::IsLost(bool poll) const {
     if (poll && !dd->Exclusive()) dd->PollDisplayChange();
     if (!CanBeLost()) return false;
+    // Back in front after Alt+Tab in dd2d9's own display mode: kept, not lost (see
+    // UpdateLostSurfaces), from the first call on.
+    if (dd->DevState() == DDraw::kDevNotRestored && dd->FocusLossOnly() && dd->KeepsSurfacesOnFocus()) {
+        Guard l;
+        dd->UpdateLostSurfaces();
+    }
     return lost || dd->DevState() != DDraw::kDevOk;  // in the background, or about to be marked lost
 }
 
@@ -815,13 +832,13 @@ HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key, int version) {
             if (HRESULT hr = destOverlayCheck(); FAILED(hr)) return hr;
             hasCk[kCkDestOverlay] = false;
             overlayFlags &= ~DWORD(DDOVER_KEYDEST | DDOVER_KEYDESTOVERRIDE);
-            if (OverlayShown()) overlayDest->dd->MarkDirty();
+            if (OverlayShown()) overlayDest->dd->MarkOverlayDirty();
         } else if (flags & DDCKEY_DESTBLT) {
             hasCk[kCkDestBlt] = false;
         } else if (flags & DDCKEY_SRCOVERLAY) {
             hasCk[kCkSrcOverlay] = false;
             overlayFlags &= ~DWORD(DDOVER_KEYSRC | DDOVER_KEYSRCOVERRIDE);
-            if (OverlayShown()) overlayDest->dd->MarkDirty();
+            if (OverlayShown()) overlayDest->dd->MarkOverlayDirty();
         } else if (flags & DDCKEY_SRCBLT) {
             hasCk[kCkSrcBlt] = false;
         }
@@ -928,6 +945,7 @@ HRESULT Surface::SetPalette(IDirectDrawPalette* p, int version) {
         return DDERR_INVALIDPIXELFORMAT;
     DD2D9_TRACE("SetPalette %p%s <- %p", static_cast<void*>(this), isPrimary ? " (primary)" : "", static_cast<void*>(np));
     if (np) np->AddRef();
+    if (palette && isPrimary) dd->KeepHardwarePalette(palette->entries);  // (shown until another is)
     if (palette) palette->Release();
     palette = np;
     BumpUniqueness();
@@ -1345,7 +1363,7 @@ Surface* Surface::NextMipLevel() const {
 
 void Surface::MarkDirtyIfVisible(const RECT* area) {
     if (!isPrimary) {
-        if (OverlayShown() && overlayDest->isPrimary) overlayDest->dd->MarkDirty();  // laid over the primary
+        if (OverlayShown() && overlayDest->isPrimary) overlayDest->dd->MarkOverlayDirty();  // laid over the primary
         return;
     }
     if (area) dd->MarkDirtyRect(*area);
@@ -1394,7 +1412,7 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         // As ddraw.dll: only the front and the buffer it swapped with count as changed.
         chain[0]->BumpUniqueness();
         chain[target ? k : 1]->BumpUniqueness();
-        if (OverlayShown()) overlayDest->dd->MarkDirty();
+        if (OverlayShown()) overlayDest->dd->MarkOverlayDirty();
         if (isPrimary) {
             Presenter* p = dd->GetPresenter();
             wait = g_config.vsync == kVSyncOn || (g_config.vsync == kVSyncAuto && !(flags & DDFLIP_NOVSYNC));
@@ -1471,8 +1489,10 @@ void Palette::ReserveSystemEntries() {
 Palette::~Palette() {
     g_palettes->erase(std::find(g_palettes->begin(), g_palettes->end(), this));
     if (dd_) {
-        for (Surface* s : dd_->surfaces)
-            if (s->palette == this) s->palette = nullptr;
+        if (dd_->primary && dd_->primary->ShownPalette() == this) dd_->KeepHardwarePalette(entries);
+        for (const std::vector<Surface*>* list : {&dd_->surfaces, &dd_->detached})
+            for (Surface* s : *list)
+                if (s->palette == this) s->palette = nullptr;
         dd_->IntRelease();
     }
 }

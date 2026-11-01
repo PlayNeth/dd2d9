@@ -21,7 +21,7 @@ public:
         d->GetVertexShader(&vs_);
         d->GetVertexDeclaration(&decl_);
         d->GetFVF(&fvf_);
-        for (DWORD s = 0; s < 2; s++) {
+        for (DWORD s = 0; s < kTexStages; s++) {
             d->GetTexture(s, &tex_[s]);
             for (DWORD i = 0; i < kSamplerCount; i++) d->GetSamplerState(s, kSamplers[i], &samp_[s][i]);
         }
@@ -32,7 +32,7 @@ public:
         IDirect3DDevice9* d = d_;
         for (DWORD i = 0; i < kStateCount; i++) d->SetRenderState(kStates[i], rs_[i]);
         for (DWORD i = 0; i < kStageCount; i++) d->SetTextureStageState(kStages[i].stage, kStages[i].type, stage_[i]);
-        for (DWORD s = 0; s < 2; s++) {
+        for (DWORD s = 0; s < kTexStages; s++) {
             for (DWORD i = 0; i < kSamplerCount; i++) d->SetSamplerState(s, kSamplers[i], samp_[s][i]);
             d->SetTexture(s, tex_[s]);
             if (tex_[s]) tex_[s]->Release();
@@ -73,6 +73,7 @@ private:
     static constexpr Stage kStages[] = {{0, D3DTSS_COLOROP},       {0, D3DTSS_COLORARG1}, {0, D3DTSS_ALPHAOP},
                                         {0, D3DTSS_ALPHAARG1},     {0, D3DTSS_TEXCOORDINDEX},
                                         {0, D3DTSS_TEXTURETRANSFORMFLAGS}, {1, D3DTSS_COLOROP}, {1, D3DTSS_ALPHAOP}};
+    static constexpr DWORD kTexStages = 3;  // textures and samplers kept (the overlays' pass uses three)
     static constexpr DWORD kStageCount = sizeof(kStages) / sizeof(kStages[0]);
 
     IDirect3DDevice9* d_;
@@ -83,8 +84,8 @@ private:
     IDirect3DVertexShader9* vs_ = nullptr;
     IDirect3DVertexDeclaration9* decl_ = nullptr;
     DWORD fvf_ = 0;
-    IDirect3DBaseTexture9* tex_[2] = {};
-    DWORD samp_[2][kSamplerCount] = {};
+    IDirect3DBaseTexture9* tex_[kTexStages] = {};
+    DWORD samp_[kTexStages][kSamplerCount] = {};
     DWORD stage_[kStageCount] = {};
     DWORD rs_[kStateCount] = {};
 };

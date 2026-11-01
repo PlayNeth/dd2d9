@@ -56,17 +56,26 @@ size changes; a Reset destroys every D3DPOOL_DEFAULT resource, which is fine for
 staging surface but not for a game's textures and render targets. So:
 
 - A `Gpu` object per DirectDraw object owns the IDirect3D9 and the IDirect3DDevice9, created
-  when first needed (presenter or Direct3D), windowed, with a 1x1 implicit back buffer on
-  the focus window, `D3DCREATE_MULTITHREADED`, and software vertex processing available
-  (ProcessVertices; DXVK supports it). All device use goes through its lock.
-- Presentation goes through an **additional swap chain** on the game's window
-  (`CreateAdditionalSwapChain`): a window resize recreates only that swap chain, never
-  Resets the device, so the game's GPU resources survive. Windows' d3d9 and DXVK both
-  support additional swap chains. (`present=exclusive`, a D3D9 exclusive-fullscreen device,
-  can't work this way: it stays for 2D-only games, or goes; to decide.)
-- 2D games: the presenter thread shows the primary as now, through the swap chain.
+  when first needed (presenter or Direct3D), windowed, its focus window a hidden one of
+  its own and its device window the game's, `D3DCREATE_MULTITHREADED`, and software vertex
+  processing available (ProcessVertices; DXVK supports it). All device use goes through
+  its lock.
+- Presentation goes through the **device's implicit back buffer**, made as large as the
+  largest monitor (current or registry mode) at creation, `D3DSWAPEFFECT_COPY`: the frame is
+  drawn into its top left and shown with `IDirect3DDevice9::Present(source rectangle, NULL,
+  game window, NULL)`. A window resize changes only the rectangle, never Resets the device,
+  so the game's GPU resources survive; and overlay and capture tools that hook the device's
+  `Present` (RivaTuner/Afterburner) see the frames (until 1.2.0 an **additional swap
+  chain** on the game's window presented, which they didn't capture). Every frame also has
+  a draw call (a triangle of no area, colour writes off): RivaTuner draws its overlay only
+  into frames that had one, and a 2D game's frame is only copied in (`StretchRect`). A window
+  larger than the back buffer still gets an additional swap chain. Windows' d3d9 and DXVK
+  both take a destination window override and a source rectangle. (`present=exclusive`, a
+  D3D9 exclusive-fullscreen device, can't work this way: it stays for 2D-only games, or
+  goes; to decide.)
+- 2D games: the presenter thread shows the primary as now, through that back buffer.
   3D games: the game's own Flip (or Blt to the primary) presents, on its thread, straight
-  from the GPU copy of the back buffer (StretchRect to the swap chain, Present), with the
+  from the GPU copy of the back buffer (StretchRect to the back buffer, Present), with the
   presenter thread idle while a 3D device exists, as it is today behind D7VK. No readback,
   no cross-thread hand-off of render targets.
 - Device loss (D3DERR_DEVICELOST: another program's mode change, the lock screen, UAC; and

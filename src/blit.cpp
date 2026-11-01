@@ -1,11 +1,14 @@
 // Software blitter: Blt / BltFast / color fill.
 #include "objects.h"
+#include "convert.h"
 #include "dxt.h"
 #include "gpures.h"
 
 #include <emmintrin.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <new>
 #include <vector>
 
 namespace dd2d9 {
@@ -73,6 +76,7 @@ struct BlitJob {
     const Format* df;
     const PALETTEENTRY* spal;
     const PALETTEENTRY* dpal;  // an 8-bit destination's palette (conversions pick from it)
+    uint32_t orMask;           // set on every pixel written (g_orMask)
 };
 
 // Colour to palette index for conversions into an 8-bit surface: the nearest entry (squared
@@ -113,6 +117,8 @@ NearestIndex g_nearest;
 std::vector<RECT> g_clips;
 std::vector<int> g_xmap;
 std::vector<uint8_t> g_temp;
+// Set on every pixel a blit writes (BltFourCC: alpha 255 from a source without alpha).
+uint32_t g_orMask;
 
 // Maps each clipped destination column to a source column.
 // Destination rectangles can be huge when a clipper is attached (only the
@@ -156,7 +162,8 @@ template <> struct Simd<uint32_t> {
 // One row of a 1:1 copy with a single-color source key (the usual sprite blit):
 // pixels whose masked value equals `key` are left alone.
 template <typename T>
-static void KeyRow(T* d, const T* s, int n, uint32_t mask, uint32_t key) {
+// (Kept out of line: inlined, the loop came out up to a fifth slower, measured with ddbench.)
+__attribute__((noinline)) static void KeyRow(T* d, const T* s, int n, uint32_t mask, uint32_t key) {
     constexpr int kPerVector = 16 / sizeof(T);
     const __m128i vmask = Simd<T>::Set(mask), vkey = Simd<T>::Set(key);
     int i = 0;
@@ -179,19 +186,29 @@ static void KeyRow(T* d, const T* s, int n, uint32_t mask, uint32_t key) {
     }
 }
 
-// Any combination of keys, 1:1 (Direct) or stretched / mirrored columns.
+// Any combination of keys, 1:1 (Direct) or stretched / mirrored columns (out of line, as KeyRow).
 template <typename T, bool Direct, bool SrcKey, bool DstKey>
-static void KeyRows(const BlitJob& j, const int* xmap) {
+__attribute__((noinline)) static void KeyRows(const BlitJob& j, const int* xmap) {
     const int n = j.dc.right - j.dc.left;
     const int sx = j.s0.left + (j.dc.left - j.d0.left);  // first source column when Direct
+    // (Locals: the row stores could alias the job, which would be read again at every pixel.)
+    const uint32_t skMask = j.skMask, skLo = j.skLo, skHi = j.skHi, dkMask = j.dkMask, dkLo = j.dkLo, dkHi = j.dkHi,
+                   orMask = j.orMask;
+    int lastSy = -1;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
-        const T* srow = reinterpret_cast<const T*>(j.src + MapY(j, y) * j.spitch);
+        const int sy = MapY(j, y);
+        if (!SrcKey && !DstKey && sy == lastSy) {  // stretched taller: the row above again
+            memcpy(drow, reinterpret_cast<const uint8_t*>(drow) - j.dpitch, size_t(n) * sizeof(T));
+            continue;
+        }
+        lastSy = sy;
+        const T* srow = reinterpret_cast<const T*>(j.src + sy * j.spitch);
         for (int i = 0; i < n; i++) {
             const uint32_t v = Direct ? srow[sx + i] : srow[xmap[i]];
-            if (SrcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
-            if (DstKey && !InKey(uint32_t(drow[i]) & j.dkMask, j.dkLo, j.dkHi)) continue;
-            drow[i] = T(v);
+            if (SrcKey && InKey(v & skMask, skLo, skHi)) continue;
+            if (DstKey && !InKey(uint32_t(drow[i]) & dkMask, dkLo, dkHi)) continue;
+            drow[i] = T(v | orMask);
         }
     }
 }
@@ -209,7 +226,7 @@ static void BlitSameFormat(const BlitJob& j) {
     const int dw = j.d0.right - j.d0.left, sw = j.s0.right - j.s0.left;
     const bool direct = !j.mirrorX && dw == sw;
     const int n = j.dc.right - j.dc.left;
-    if (direct && !j.dstKey && (!j.srcKey || j.skLo == j.skHi)) {
+    if (direct && !j.dstKey && (!j.srcKey || j.skLo == j.skHi) && !j.orMask) {
         const int sx = j.s0.left + (j.dc.left - j.d0.left);
         for (int y = j.dc.top; y < j.dc.bottom; y++) {
             T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
@@ -224,22 +241,67 @@ static void BlitSameFormat(const BlitJob& j) {
     }
 }
 
+// A8R8G8B8 to a format's pixel: a table per channel (ARGBToPixel's rounding), made again
+// when the format changes. g_lock held.
+struct Packer {
+    Format fmt;
+    bool valid = false;
+    uint32_t t[4][256];
+    void Prepare(const Format& f) {
+        if (valid && fmt == f) return;
+        fmt = f;
+        valid = true;
+        for (uint32_t i = 0; i < 256; i++) {
+            t[0][i] = ARGBToPixel(f, i << 16) & f.r;
+            t[1][i] = ARGBToPixel(f, i << 8) & f.g;
+            t[2][i] = ARGBToPixel(f, i) & f.b;
+            t[3][i] = ARGBToPixel(f, i << 24) & f.a;
+        }
+    }
+    uint32_t operator()(uint32_t argb) const {
+        return t[0][(argb >> 16) & 255] | t[1][(argb >> 8) & 255] | t[2][argb & 255] | t[3][argb >> 24];
+    }
+};
+Packer g_packer;
+std::vector<uint32_t> g_row;
+
+// Any formats, keys, stretching and mirroring: a pixel at a time, a converting blit's source
+// rows made A8R8G8B8 first (RowConverter: the part the columns read).
 static void BlitGeneric(const BlitJob& j) {
     const int* xmap = BuildXMap(j);
     const int n = j.dc.right - j.dc.left;
+    if (n <= 0) return;
+    const int lo = std::min(xmap[0], xmap[n - 1]), span = std::max(xmap[0], xmap[n - 1]) + 1 - lo;
+    RowConverter conv(*j.sf, j.spal);
+    if (j.convert) {
+        g_row.resize(size_t(span));
+        if (!j.df->pal8) g_packer.Prepare(*j.df);
+    }
+    const bool keys = j.srcKey || j.dstKey;
+    int lastSy = -1;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         uint8_t* drow = j.dst + y * j.dpitch + j.dc.left * j.dbytes;
-        const uint8_t* srow = j.src + MapY(j, y) * j.spitch;
+        const int sy = MapY(j, y);
+        if (!keys && sy == lastSy) {  // stretched taller: the row above again
+            memcpy(drow, drow - j.dpitch, size_t(n) * j.dbytes);
+            continue;
+        }
+        lastSy = sy;
+        const uint8_t* srow = j.src + sy * j.spitch;
+        if (j.convert) conv.Run(srow + lo * j.sbytes, g_row.data(), span);
         for (int i = 0; i < n; i++) {
-            uint32_t v = ReadPx(srow + xmap[i] * j.sbytes, j.sbytes);
-            if (j.srcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
+            uint32_t v = 0;
+            if (j.srcKey || !j.convert) {
+                v = ReadPx(srow + xmap[i] * j.sbytes, j.sbytes);
+                if (j.srcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
+            }
             uint8_t* dp = drow + i * j.dbytes;
             if (j.dstKey && !InKey(ReadPx(dp, j.dbytes) & j.dkMask, j.dkLo, j.dkHi)) continue;
             if (j.convert) {
-                const uint32_t argb = PixelToARGB(*j.sf, v, j.spal);
-                v = j.df->pal8 ? g_nearest(j.dpal, argb) : ARGBToPixel(*j.df, argb);
+                const uint32_t argb = g_row[size_t(xmap[i] - lo)];
+                v = j.df->pal8 ? g_nearest(j.dpal, argb) : g_packer(argb);
             }
-            WritePx(dp, j.dbytes, v);
+            WritePx(dp, j.dbytes, v | j.orMask);
         }
     }
 }
@@ -350,6 +412,26 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         Format::FromDDPF(pf, &f);
         return f;
     }();
+    // Planar (YV12, I420) likewise, by 2x2 block.
+    if (src && buf->fmt.Planar() && src->buf->fmt == buf->fmt && !(flags & ~DWORD(DDBLT_WAIT | DDBLT_ASYNC | DDBLT_DONOTWAIT)) &&
+        !(useClipper && clipper)) {
+        const RECT d = dstRect ? *dstRect : RECT{0, 0, buf->w, buf->h};
+        const RECT sr = srcRect ? *srcRect : RECT{0, 0, src->buf->w, src->buf->h};
+        const LONG w = d.right - d.left, h = d.bottom - d.top;
+        RECT overlap;  // (within one surface: overlapping blocks would copy in the wrong order)
+        // (An odd size only up to both edges: the last block goes whole.)
+        const bool blocks = (!(w & 1) || (d.right == buf->w && sr.right == src->buf->w)) &&
+                            (!(h & 1) || (d.bottom == buf->h && sr.bottom == src->buf->h));
+        if (w > 0 && h > 0 && w == sr.right - sr.left && h == sr.bottom - sr.top && !((d.left | d.top | sr.left | sr.top) & 1) &&
+            blocks && d.left >= 0 && d.top >= 0 && d.right <= buf->w && d.bottom <= buf->h && sr.left >= 0 && sr.top >= 0 &&
+            sr.right <= src->buf->w && sr.bottom <= src->buf->h && (src->buf != buf || (d.left == sr.left && d.top == sr.top) ||
+                                                                    !IntersectRect(&overlap, &d, &sr))) {
+            src->CpuAccess(false);
+            CpuAccess(true, &d);
+            CopyPlanar(buf, d, src->buf, sr);
+            return DD_OK;
+        }
+    }
     if (src && buf->fmt.Yuv() && src->buf->fmt == buf->fmt && !(flags & ~DWORD(DDBLT_WAIT | DDBLT_ASYNC | DDBLT_DONOTWAIT)) &&
         !(useClipper && clipper)) {
         const RECT d = dstRect ? *dstRect : RECT{0, 0, buf->w, buf->h};
@@ -363,7 +445,7 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
             src->CpuAccess(false);
             CpuAccess(true, &d);
             const size_t bytes = size_t((w + 1) & ~1) * 2;
-            const bool down = src == this && sr.top < d.top;  // overlapping: rows in the safe order
+            const bool down = src->buf == buf && sr.top < d.top;  // overlapping: rows in the safe order
             for (LONG i = 0; i < h; i++) {
                 const LONG y = down ? h - 1 - i : i;
                 memmove(buf->Row(d.top + y) + size_t(d.left) * 2, src->buf->Row(sr.top + y) + size_t(sr.left) * 2,
@@ -372,28 +454,56 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
             return DD_OK;
         }
     }
-    auto decode = [&](Surface* s) -> Buffer* {
-        s->CpuAccess(false);
-        Buffer* t = Buffer::Create(s->buf->w, s->buf->h, argb);
-        if (t) DecodeFourCC(s->buf, t->bits, t->pitch);
-        return t;
-    };
+    // Each FourCC side decoded into a scratch buffer of its size (kept from blit to blit, g_lock
+    // held): only the rows the blit reads or the encoding after it rewrites (whole DXT blocks,
+    // whole 2x2 YV12 blocks).
     Buffer* const realDst = buf;
     Buffer* const realSrc = src ? src->buf : nullptr;
     const bool dstConv = realDst->fmt.fourcc, srcConv = realSrc && realSrc->fmt.fourcc;
-    Buffer* td = dstConv ? decode(this) : nullptr;
-    Buffer* ts = srcConv ? (src == this ? td : decode(src)) : nullptr;
-    if ((dstConv && !td) || (srcConv && !ts)) {
-        if (td) td->Release();
-        if (ts && ts != td) ts->Release();
-        return DDERR_OUTOFMEMORY;
+    const RECT dr = dstRect ? *dstRect : RECT{0, 0, realDst->w, realDst->h};
+    const RECT sr = src ? (srcRect ? *srcRect : RECT{0, 0, realSrc->w, realSrc->h}) : RECT{};
+    auto decode = [&](Surface* s, Buffer* t, std::vector<uint8_t>& mem, LONG top, LONG bottom) -> bool {
+        s->CpuAccess(false);
+        const Buffer* b = s->buf;
+        t->w = b->w;
+        t->h = b->h;
+        t->fmt = argb;
+        t->pitch = LONG(b->w) * 4;
+        const size_t size = size_t(t->pitch) * b->h;
+        if (mem.size() < size) {
+            try {
+                mem.resize(size);
+            } catch (const std::bad_alloc&) {
+                return false;
+            }
+        }
+        t->bits = mem.data();
+        const int align = b->fmt.BlockCompressed() ? 4 : b->fmt.Planar() ? 2 : 1;
+        const int y0 = int(std::max<LONG>(top, 0)) / align * align;
+        const int y1 = int(std::min<LONG>((std::min<LONG>(bottom, b->h) + align - 1) / align * align, b->h));
+        if (y0 < y1) DecodeFourCC(b, t->bits, t->pitch, y0, y1);
+        return true;
+    };
+    static std::vector<uint8_t> dstMem, srcMem;
+    Buffer dstTemp, srcTemp;
+    Buffer* td = nullptr;
+    Buffer* ts = nullptr;
+    if (dstConv) {
+        // (Its own source too: the rows of both.)
+        const bool both = src == this || (src && src->buf == buf);
+        const LONG top = both ? std::min(dr.top, sr.top) : dr.top, bottom = both ? std::max(dr.bottom, sr.bottom) : dr.bottom;
+        if (!decode(this, &dstTemp, dstMem, top, bottom)) return DDERR_OUTOFMEMORY;
+        td = &dstTemp;
+        if (both) ts = td;
+    }
+    if (srcConv && !ts) {
+        if (!decode(src, &srcTemp, srcMem, sr.top, sr.bottom)) return DDERR_OUTOFMEMORY;
+        ts = &srcTemp;
     }
     // A source without alpha is opaque (Wine's test_surface_format_conversion_alpha, RGBX
-    // into DXT1-3): the pixels the blit changes get alpha 255, the others (keyed, clipped)
+    // into DXT1-3): the pixels the blit writes get alpha 255, the others (keyed, clipped)
     // keep theirs.
-    const bool opaque = td && !srcConv && (!realSrc || !realSrc->fmt.a);
-    std::vector<uint32_t> before;
-    if (opaque) before.assign(reinterpret_cast<const uint32_t*>(td->bits), reinterpret_cast<const uint32_t*>(td->bits) + size_t(td->pitch / 4) * td->h);
+    const uint32_t opaque = td && !srcConv && (!realSrc || !realSrc->fmt.a) ? 0xFF000000u : 0;
     // Colour keys of the FourCC sides, as the decoded pixels they match (a source key is in
     // the source's format, a destination key in the destination's): set for the blit, put
     // back after.
@@ -414,23 +524,17 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     }
     if (td) buf = td;
     if (ts) src->buf = ts;
+    g_orMask = opaque;
     const HRESULT hr = BltLocked(dstRect, src, srcRect, flags, fx ? &fxConv : nullptr, useClipper, destKeyFromSource);
+    g_orMask = 0;
     buf = realDst;
     if (src) src->buf = realSrc;
     if (src) src->ck[kCkSrcBlt] = savedSrc;
     if (keyDst) keyDst->ck[kCkDestBlt] = savedDst;
     if (SUCCEEDED(hr) && td) {
-        const RECT r = dstRect ? *dstRect : RECT{0, 0, realDst->w, realDst->h};
-        if (opaque) {
-            uint32_t* p = reinterpret_cast<uint32_t*>(td->bits);
-            for (size_t i = 0; i < before.size(); i++)
-                if (p[i] != before[i]) p[i] |= 0xFF000000u;
-        }
-        EncodeFourCC(td->bits, td->pitch, realDst, r);
-        CpuAccess(true, &r);  // (a texture's GPU copy made again from it)
+        EncodeFourCC(td->bits, td->pitch, realDst, dr);
+        CpuAccess(true, &dr);  // (a texture's GPU copy made again from it)
     }
-    if (td) td->Release();
-    if (ts && ts != td) ts->Release();
     return hr;
 }
 
@@ -452,15 +556,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     if (buf->fmt.fourcc && fill && !(buf->fmt.Yuv() && (flags & DDBLT_COLORFILL))) return DDERR_UNSUPPORTED;
     if ((buf->fmt.fourcc && !fill) || (!fill && src && src->buf->fmt.fourcc))
         return BltFourCC(dstRect, src, srcRect, flags, fx, useClipper, destKeyFromSource);
-    // What Direct3D drew into either surface is read back first.
-    if (src && src != this) src->CpuAccess(false);
     const RECT bounds = {0, 0, buf->w, buf->h};
-    // A depth fill into a Z buffer DirectDraw can write on the GPU: no read back first (games
-    // fill every frame); the GPU's copy gets the fill (GpuDepthFill), or, with writes of the
-    // CPU's pending upload, the fill joins them.
-    const bool zfill = (flags & DDBLT_DEPTHFILL) && GpuDepthWritable(buf);
-    if (!zfill) CpuAccess(true, dstRect ? dstRect : &bounds);  // (the rectangle before clipping: at most that)
-    else if (buf->gpuStale) buf->MarkGpuStale(dstRect ? dstRect : &bounds);
     RECT d = dstRect ? *dstRect : bounds;
     if (d.right <= d.left || d.bottom <= d.top) return DDERR_INVALIDRECT;
 
@@ -477,6 +573,26 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         if (d.left < 0 || d.top < 0 || d.right > buf->w || d.bottom > buf->h) return DDERR_INVALIDRECT;
         clips.push_back(d);
     }
+    // A plain copy out of a render target whose newest pixels are on the GPU (a 3D frame
+    // blitted to the screen or another render target): done there, without reading it back.
+    const DWORD kPlain = DDBLT_WAIT | DDBLT_ASYNC | DDBLT_DONOTWAIT | DDBLT_ROP;
+    if (!fill && src && src != this && src->buf != buf && !(flags & ~kPlain) &&
+        (!(flags & DDBLT_ROP) || (fx && fx->dwROP == SRCCOPY))) {
+        const RECT s = srcRect ? *srcRect : RECT{0, 0, src->buf->w, src->buf->h};
+        if (s.right > s.left && s.bottom > s.top && s.left >= 0 && s.top >= 0 && s.right <= src->buf->w &&
+            s.bottom <= src->buf->h && GpuBlt(this, d, src, s, clips)) {
+            MarkClipsDirty(this, clips);
+            return DD_OK;
+        }
+    }
+    // What Direct3D drew into either surface is read back first.
+    if (src && src != this) src->CpuAccess(false);
+    // A depth fill into a Z buffer DirectDraw can write on the GPU: no read back first (games
+    // fill every frame); the GPU's copy gets the fill (GpuDepthFill), or, with writes of the
+    // CPU's pending upload, the fill joins them.
+    const bool zfill = (flags & DDBLT_DEPTHFILL) && GpuDepthWritable(buf);
+    if (!zfill) CpuAccess(true, dstRect ? dstRect : &bounds);  // (the rectangle before clipping: at most that)
+    else if (buf->gpuStale) buf->MarkGpuStale(dstRect ? dstRect : &bounds);
 
     if (flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL)) {
         if (!fx) return DDERR_INVALIDPARAMS;
@@ -493,7 +609,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         if (fx->dwROP == BLACKNESS || fx->dwROP == WHITENESS) {
             // As ddraw.dll's blitter: white leaves the top byte of a 32-bit pixel 0.
             for (RECT& c : clips) FillCore(&c, fx->dwROP == BLACKNESS ? 0 : 0x00FFFFFFu);
-                MarkClipsDirty(this, clips);
+            MarkClipsDirty(this, clips);
             return DD_OK;
         }
         if (fx->dwROP != SRCCOPY) {
@@ -522,6 +638,9 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     j.spal = src->EffectivePalette();
     j.dpal = buf->fmt.pal8 ? EffectivePalette() : nullptr;
     j.convert = !SameLayout(sb->fmt, buf->fmt);
+    j.orMask = g_orMask;
+    // Bump maps (du/dv, not colours) only copy as they are, as the emulation layer's blits.
+    if (j.convert && (sb->fmt.bump || buf->fmt.bump)) return DDERR_UNSUPPORTED;
     if (j.convert && j.dpal) g_nearest.Prepare(j.dpal);
 
     // As in ddraw.dll: a key and its override together, or a key the surface doesn't
@@ -571,6 +690,25 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
             DD2D9_LOG("Blt: unsupported DDFX 0x%08lx", fx->dwDDFX);
     }
 
+    // A plain copy (any pixel size): a row at a time; overlapping in the same memory (a
+    // scroll), in the order that reads each row before it is written (one clip rectangle:
+    // with more, one could overwrite what another reads).
+    const bool plain = !j.convert && j.dbytes == j.sbytes && !j.srcKey && !j.dstKey && !j.mirrorX && !j.mirrorY &&
+                       !j.orMask && d.right - d.left == s.right - s.left && d.bottom - d.top == s.bottom - s.top &&
+                       (sb != buf || clips.size() == 1);
+    if (plain) {
+        const bool up = sb == buf && d.top > s.top;
+        for (const RECT& c : clips) {
+            const size_t bytes = size_t(c.right - c.left) * j.dbytes;
+            for (LONG i = 0, h = c.bottom - c.top; i < h; i++) {
+                const LONG y = up ? c.bottom - 1 - i : c.top + i;
+                memmove(buf->Row(y) + size_t(c.left) * j.dbytes,
+                        sb->Row(s.top + (y - d.top)) + size_t(s.left + (c.left - d.left)) * j.sbytes, bytes);
+            }
+        }
+        MarkClipsDirty(this, clips);
+        return DD_OK;
+    }
     // Copy the source first when it overlaps the destination in the same memory.
     if (sb == buf) {
         RECT ov;

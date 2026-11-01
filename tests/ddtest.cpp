@@ -37,10 +37,12 @@ static int g_fail;
 static int g_userMsgs, g_screensaverMsgs;
 
 static LPARAM g_lastMouseMove = -1;
+static LPARAM g_lastSize = -1;  // WM_SIZE (restored or maximized)
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_USER + 1) g_userMsgs++;
     if (m == WM_MOUSEMOVE) g_lastMouseMove = l;
+    if (m == WM_SIZE && (w == SIZE_RESTORED || w == SIZE_MAXIMIZED)) g_lastSize = l;
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_SCREENSAVE) {
         g_screensaverMsgs++;
         return 0;
@@ -428,6 +430,91 @@ static int RunUnit() {
         } else {
             CHECK(false, "YUY2 surface -> 0x%08lx", hr);
         }
+        // Planar YV12 / I420 (4:2:0): a luma plane, then the chroma planes at half the pitch.
+        {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+            d.dwWidth = 4;
+            d.dwHeight = 2;
+            d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            d.ddpfPixelFormat.dwFlags = DDPF_FOURCC;
+            d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('Y', 'V', '1', '2');
+            IDirectDrawSurface7* yv = nullptr;
+            hr = dd->CreateSurface(&d, &yv, nullptr);
+            CHECK(SUCCEEDED(hr), "YV12 surface -> 0x%08lx", hr);
+            if (yv) {
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                yv->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+                const LONG pitch = l.lPitch;
+                BYTE* b = static_cast<BYTE*>(l.lpSurface);
+                // White, white, red, red on both rows: V plane first (128, 240), then U (128, 90).
+                for (int y = 0; y < 2; y++) {
+                    b[y * pitch + 0] = b[y * pitch + 1] = 235;
+                    b[y * pitch + 2] = b[y * pitch + 3] = 81;
+                }
+                BYTE* v = b + 2 * pitch;
+                BYTE* u = v + pitch / 2;
+                v[0] = 128, v[1] = 240, u[0] = 128, u[1] = 90;
+                yv->Unlock(nullptr);
+                CHECK(!(pitch & 0xFF) && (l.dwFlags & DDSD_PITCH), "YV12: a byte of luma per pixel, pitch %ld", pitch);
+                auto nearRgb = [](DWORD a, DWORD c) {
+                    for (int sh = 0; sh < 24; sh += 8)
+                        if (abs(int((a >> sh) & 255) - int((c >> sh) & 255)) > 2) return false;
+                    return true;
+                };
+                IDirectDrawSurface7* rgb = Make32(dd, 4, 2);
+                hr = rgb->Blt(nullptr, yv, nullptr, DDBLT_WAIT, nullptr);
+                DDSURFACEDESC2 r = {};
+                r.dwSize = sizeof(r);
+                rgb->Lock(nullptr, &r, DDLOCK_WAIT, nullptr);
+                DWORD got[4];
+                for (int x = 0; x < 4; x++) got[x] = reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.lpSurface) + r.lPitch)[x];
+                rgb->Unlock(nullptr);
+                CHECK(SUCCEEDED(hr) && nearRgb(got[0], 0xFFFFFF) && nearRgb(got[1], 0xFFFFFF) && nearRgb(got[2], 0xFF0000) &&
+                          nearRgb(got[3], 0xFF0000),
+                      "YV12 blitted to RGB (0x%08lx): %06lx %06lx %06lx %06lx", hr, got[0] & 0xFFFFFF, got[1] & 0xFFFFFF,
+                      got[2] & 0xFFFFFF, got[3] & 0xFFFFFF);
+                // RGB into I420 (U plane first).
+                d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('I', '4', '2', '0');
+                IDirectDrawSurface7* i420 = nullptr;
+                if (SUCCEEDED(dd->CreateSurface(&d, &i420, nullptr))) {
+                    hr = i420->Blt(nullptr, rgb, nullptr, DDBLT_WAIT, nullptr);
+                    DDSURFACEDESC2 q = {};
+                    q.dwSize = sizeof(q);
+                    i420->Lock(nullptr, &q, DDLOCK_WAIT, nullptr);
+                    const BYTE* qb = static_cast<BYTE*>(q.lpSurface);
+                    const BYTE* qu = qb + 2 * q.lPitch;
+                    const BYTE* qv = qu + q.lPitch / 2;
+                    auto close = [](int a, int c) { return abs(a - c) <= 2; };
+                    const bool ok = close(qb[0], 235) && close(qb[q.lPitch + 3], 81) && close(qu[0], 128) && close(qu[1], 90) &&
+                                    close(qv[0], 128) && close(qv[1], 240);
+                    CHECK(SUCCEEDED(hr) && ok, "RGB blitted into I420 (0x%08lx): Y %u %u, U %u %u, V %u %u", hr, qb[0],
+                          qb[q.lPitch + 3], qu[0], qu[1], qv[0], qv[1]);
+                    i420->Unlock(nullptr);
+                    i420->Release();
+                }
+                // YV12 to YV12: copied as it is, plane by plane.
+                d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('Y', 'V', '1', '2');
+                IDirectDrawSurface7* yv2 = nullptr;
+                if (SUCCEEDED(dd->CreateSurface(&d, &yv2, nullptr))) {
+                    hr = yv2->Blt(nullptr, yv, nullptr, DDBLT_WAIT, nullptr);
+                    DDSURFACEDESC2 a = {}, c = {};
+                    a.dwSize = c.dwSize = sizeof(a);
+                    yv->Lock(nullptr, &a, DDLOCK_WAIT, nullptr);
+                    yv2->Lock(nullptr, &c, DDLOCK_WAIT, nullptr);
+                    const bool same = memcmp(a.lpSurface, c.lpSurface, size_t(a.lPitch) * 3) == 0;
+                    yv2->Unlock(nullptr);
+                    yv->Unlock(nullptr);
+                    CHECK(SUCCEEDED(hr) && same, "YV12 to YV12 copied as it is (0x%08lx)", hr);
+                    yv2->Release();
+                }
+                rgb->Release();
+                yv->Release();
+            }
+        }
         // RGB into an 8-bit surface: each pixel the nearest palette entry.
         {
             IDirectDrawSurface7* rgb8 = Make32(dd, 4, 1);
@@ -460,7 +547,7 @@ static int RunUnit() {
         DWORD codes[16] = {}, n = 16, count = 0;
         dd->GetFourCCCodes(&count, nullptr);
         dd->GetFourCCCodes(&n, codes);
-        CHECK(count == 7 && n == 7 && codes[0] == MAKEFOURCC('Y', 'U', 'Y', '2'), "GetFourCCCodes: %lu codes (%lu copied)", count, n);
+        CHECK(count == 8 && n == 8 && codes[7] == MAKEFOURCC('Y', 'V', '1', '2') && codes[0] == MAKEFOURCC('Y', 'U', 'Y', '2'), "GetFourCCCodes: %lu codes (%lu copied)", count, n);
         d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('X', 'Y', 'Z', 'W');
         IDirectDrawSurface7* unk = nullptr;
         hr = dd->CreateSurface(&d, &unk, nullptr);
@@ -659,6 +746,16 @@ static int RunFullscreen8(int modeW, int modeH) {
     SendMessageA(hwnd, WM_SYSCOMMAND, SC_SCREENSAVE, 0);
     CHECK(g_screensaverMsgs == 0, "screensaver blocked in exclusive mode");
     CHECK(SUCCEEDED(dd->SetDisplayMode(modeW, modeH, 8, 0, 0)), "SetDisplayMode %dx%dx8", modeW, modeH);
+    {
+        // An 8-bit mode makes the screen a palette device, as on XP (FlyingSB sets its palette
+        // up only then).
+        HDC screen = GetDC(nullptr);
+        CHECK(GetDeviceCaps(screen, BITSPIXEL) == 8 && (GetDeviceCaps(screen, RASTERCAPS) & RC_PALETTE) &&
+                  GetDeviceCaps(screen, SIZEPALETTE) == 256 && GetDeviceCaps(screen, NUMRESERVED) == 20,
+              "GDI: an 8-bit palette device in the 8-bit mode (bits %d, raster caps 0x%x, palette %d)",
+              GetDeviceCaps(screen, BITSPIXEL), GetDeviceCaps(screen, RASTERCAPS), GetDeviceCaps(screen, SIZEPALETTE));
+        ReleaseDC(nullptr, screen);
+    }
     // A game changing its window's frame in exclusive mode (JJ2+ while starting up): the
     // client area still covers the screen.
     // Then sizing it to its own idea of fullscreen (Unreal after a style change): still covering.
@@ -788,7 +885,8 @@ static int RunFullscreen8(int modeW, int modeH) {
     SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
     Pump();
     CHECK(!IsIconic(hwnd), "window restored after focus returns (was minimized: %d)", minimized);
-    // The surfaces were lost meanwhile, as in ddraw.dll: the game restores them.
+    // The surfaces were lost meanwhile, as in ddraw.dll: the game restores them (display=switch,
+    // even where the test display lacks the mode and dd2d9 shows it scaled).
     hr = front->Flip(nullptr, DDFLIP_WAIT);
     CHECK(hr == DDERR_SURFACELOST, "flip after focus returns: surface lost (0x%08lx)", hr);
     // Its other surfaces report lost too, as in ddraw.dll, but can still be drawn with (a
@@ -999,6 +1097,57 @@ static int RunExecute() {
     dev->GetPickRecords(&n, nullptr);
     CHECK(n == 0, "Pick outside it: %lu records", n);
 
+    // A triangle the clip volume cuts (a vertex far left): picked in its visible part. Lit
+    // vertices transformed by the default (identity) matrices; the viewport maps -1..1 to 0..64.
+    {
+        IDirect3DExecuteBuffer* eb2 = nullptr;
+        D3DEXECUTEBUFFERDESC ed2 = {};
+        ed2.dwSize = sizeof(ed2);
+        ed2.dwFlags = D3DDEB_BUFSIZE;
+        ed2.dwBufferSize = 512;
+        if (SUCCEEDED(dev->CreateExecuteBuffer(&ed2, &eb2, nullptr)) && SUCCEEDED(eb2->Lock(&ed2))) {
+            BYTE* b2 = static_cast<BYTE*>(ed2.lpData);
+            const D3DLVERTEX lv[3] = {{{-3.0f}, {1.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}},
+                                      {{1.0f}, {1.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}},
+                                      {{1.0f}, {-1.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}}};
+            memcpy(b2, lv, sizeof(lv));
+            p = b2 + sizeof(lv);
+            const DWORD start2 = DWORD(p - b2);
+            ins(D3DOP_PROCESSVERTICES, sizeof(D3DPROCESSVERTICES), 1);
+            D3DPROCESSVERTICES pv2 = {D3DPROCESSVERTICES_TRANSFORM, 0, 0, 3};
+            memcpy(p, &pv2, sizeof(pv2));
+            p += sizeof(pv2);
+            ins(D3DOP_TRIANGLE, sizeof(D3DTRIANGLE), 1);
+            D3DTRIANGLE t2 = {};
+            t2.v1 = 0, t2.v2 = 1, t2.v3 = 2;
+            t2.wFlags = D3DTRIFLAG_EDGEENABLETRIANGLE;
+            memcpy(p, &t2, sizeof(t2));
+            p += sizeof(t2);
+            ins(D3DOP_EXIT, 0, 0);
+            eb2->Unlock();
+            D3DEXECUTEDATA xd2 = {};
+            xd2.dwSize = sizeof(xd2);
+            xd2.dwVertexCount = 3;
+            xd2.dwInstructionOffset = start2;
+            xd2.dwInstructionLength = DWORD(p - b2) - start2;
+            eb2->SetExecuteData(&xd2);
+            D3DRECT visible = {48, 16, 49, 17}, beyond = {8, 40, 9, 41};
+            dev->Pick(eb2, vp, 0, &visible);
+            n = 0;
+            dev->GetPickRecords(&n, nullptr);
+            room = 4;
+            if (n) dev->GetPickRecords(&room, rec);
+            const DWORD n2 = n;
+            dev->Pick(eb2, vp, 0, &beyond);
+            n = 9;
+            dev->GetPickRecords(&n, nullptr);
+            CHECK(n2 == 1 && rec[0].dvZ > 0.4f && rec[0].dvZ < 0.6f && n == 0,
+                  "Pick a triangle the clipper cuts: %lu record(s) in its visible part (z %.3f), %lu outside it", n2,
+                  rec[0].dvZ, n);
+        }
+        if (eb2) eb2->Release();
+    }
+
     // The span is drawn on XP's driver path: executed unclipped, or (as here) clipped after a
     // PROCESSVERTICES COPY. (Clipped otherwise it's skipped.)
     auto pixel = [&](int x, int y) {
@@ -1108,6 +1257,31 @@ static int RunLifetime() {
         if (SUCCEEDED(hr)) l2->Unlock(nullptr);
         r = l2 ? l2->Release() : 1;
         CHECK(r == 0, "lifetime: level 2 released (refcount %lu)", r);
+    }
+
+    // Writes a few rows past either end of a surface's memory (Xuan-Yuan Sword 3 EX's loose
+    // sprite clipping): no crash, and the surface still frees.
+    DDSURFACEDESC2 o = {};
+    o.dwSize = sizeof(o);
+    o.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    o.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    o.dwWidth = 640;
+    o.dwHeight = 480;
+    IDirectDrawSurface7* off = nullptr;
+    hr = dd->CreateSurface(&o, &off, nullptr);
+    CHECK(SUCCEEDED(hr) && off, "lifetime: 640x480 offscreen -> 0x%08lx", hr);
+    if (off) {
+        DDSURFACEDESC2 ld = {};
+        ld.dwSize = sizeof(ld);
+        if (SUCCEEDED(off->Lock(nullptr, &ld, DDLOCK_WAIT, nullptr))) {
+            auto* p = static_cast<uint8_t*>(ld.lpSurface);
+            const size_t pitch = size_t(ld.lPitch);
+            memset(p + pitch * ld.dwHeight, 0x5A, pitch * 8);  // 8 rows below
+            memset(p - pitch * 4, 0x5A, pitch * 4);             // 4 rows above
+            off->Unlock(nullptr);
+        }
+        r = off->Release();
+        CHECK(r == 0, "lifetime: offscreen written past its ends released (refcount %lu)", r);
     }
     r = dd->Release();
     CHECK(r == 0, "lifetime: DirectDraw released (refcount %lu)", r);
@@ -1462,6 +1636,78 @@ static int RunMouse() {
     SendMessageA(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(sw / 2, sh / 2));
     CHECK(LOWORD(g_lastMouseMove) == 320 && HIWORD(g_lastMouseMove) == 240, "WM_MOUSEMOVE in the mode's coordinates (%d,%d)",
           LOWORD(g_lastMouseMove), HIWORD(g_lastMouseMove));
+    {
+        // The game sizing its window to the mode at 0,0 (Xuan-Yuan Sword 3 EX back from
+        // Alt+Tab), before dd2d9 covers the screen again: the cursor is still kept on the
+        // game's screen (the game draws it there unclipped).
+        using SetPosFn = BOOL(WINAPI*)(int, int);
+        const auto realSetCursorPos =
+            reinterpret_cast<SetPosFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "SetCursorPos")));
+        SetWindowPos(hwnd, nullptr, 0, 0, 640, 480, SWP_NOZORDER | SWP_NOACTIVATE);  // (not pumped: not covered yet)
+        realSetCursorPos(sw - 1, sh - 1);
+        POINT p = {};
+        GetCursorPos(&p);
+        CHECK(p.x >= 0 && p.x < 640 && p.y >= 0 && p.y < 480, "window the mode's size: the cursor on the game's screen (%ld,%ld)",
+              p.x, p.y);
+        for (int i = 0; i < 10; i++) {
+            Pump();
+            Sleep(20);
+        }
+    }
+    {
+        // Borderless: back in front after Alt+Tab, the primary isn't lost (the display never
+        // left the game's mode; NFS High Stakes never restores its flip chain).
+        DDSURFACEDESC2 pd = {};
+        pd.dwSize = sizeof(pd);
+        pd.dwFlags = DDSD_CAPS;
+        pd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+        IDirectDrawSurface7* prim = nullptr;
+        if (SUCCEEDED(dd->CreateSurface(&pd, &prim, nullptr))) {
+            SendMessageA(hwnd, WM_ACTIVATEAPP, FALSE, 0);
+            Pump();
+            CHECK(prim->IsLost() == DDERR_SURFACELOST, "borderless: primary lost in the background");
+            g_lastSize = -1;
+            SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
+            Pump();
+            hr = prim->IsLost();
+            CHECK(hr == DD_OK, "borderless: primary not lost back in front (0x%08lx)", hr);
+            prim->Release();
+            // The window covering the monitor again: the game is told the mode's size, as by
+            // GetClientRect (Xuan-Yuan Sword 3 EX made its buffers the monitor's size).
+            CHECK(g_lastSize == -1 || (LOWORD(g_lastSize) == 640 && HIWORD(g_lastSize) == 480),
+                  "borderless: WM_SIZE back in front in the mode's size (%d,%d)", LOWORD(g_lastSize), HIWORD(g_lastSize));
+            HDC screen = GetDC(nullptr);
+            CHECK(GetDeviceCaps(screen, HORZRES) == 640 && GetDeviceCaps(screen, VERTRES) == 480,
+                  "borderless: GDI's screen size the mode's (%dx%d)", GetDeviceCaps(screen, HORZRES),
+                  GetDeviceCaps(screen, VERTRES));
+            ReleaseDC(nullptr, screen);
+        }
+    }
+    {
+        // FlyingSB's Alt+Tab: out of exclusive mode while minimized, back into it (and its
+        // mode) before Windows restores the window. Restored, the window shows the screen
+        // (its region was once made from the icon's rectangle, hiding everything).
+        ShowWindow(hwnd, SW_MINIMIZE);
+        Pump();
+        dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+        dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        dd->SetDisplayMode(640, 480, 32, 0, 0);
+        ShowWindow(hwnd, SW_RESTORE);
+        for (int i = 0; i < 10; i++) {
+            Pump();
+            Sleep(20);
+        }
+        using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+        const auto realWindowRect =
+            reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+        RECT w = {}, box = {};
+        realWindowRect(hwnd, &w);
+        const int region = GetWindowRgnBox(hwnd, &box);
+        OffsetRect(&box, w.left, w.top);  // (relative to the window)
+        CHECK(region == ERROR || (box.left <= 0 && box.top <= 0 && box.right >= sw && box.bottom >= sh),
+              "restored after going exclusive while minimized: its region shows the screen (%d: %ld,%ld-%ld,%ld)", region,
+              box.left, box.top, box.right, box.bottom);
+    }
     dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
     CHECK(ScreenMetric(SM_CXSCREEN) == sw, "the real screen again out of exclusive mode");
     dd->Release();
@@ -1504,6 +1750,124 @@ static HRESULT WINAPI ListZ(IDirectDrawSurface7* s, DDSURFACEDESC2*, void* ctx) 
     return DDENUMRET_OK;
 }
 
+// A windowed video player: its window's background is the key colour (painted by GDI, which
+// dd2d9's primary doesn't see), its left half painted black over it. The overlay shows only
+// over the key, as on a real screen.
+static LRESULT CALLBACK KeyWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    auto paintLeft = [h](HDC dc) {
+        RECT c;
+        GetClientRect(h, &c);
+        c.right /= 2;
+        FillRect(dc, &c, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    };
+    if (m == WM_PRINTCLIENT) {
+        paintLeft(reinterpret_cast<HDC>(w));
+        return 0;
+    }
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        paintLeft(dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static int RunOverlayWindowed() {
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = KeyWndProc;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.lpszClassName = "ddtestkey";
+    wc.hbrBackground = CreateSolidBrush(RGB(255, 0, 255));
+    RegisterClassA(&wc);
+    HWND hwnd = CreateWindowExA(0, "ddtestkey", "overlay", WS_POPUP, 0, 0, 320, 240, nullptr, nullptr, wc.hInstance, nullptr);
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    IDirectDrawSurface7* ov = MakeOverlay(dd, 32, 32, MAKEFOURCC('Y', 'U', 'Y', '2'));
+    if (!prim || !ov) return 1;
+    d = {};
+    d.dwSize = sizeof(d);
+    ov->Lock(nullptr, &d, DDLOCK_WAIT, nullptr);
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 16; x++) reinterpret_cast<DWORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] = 0x80EB80EB;  // white
+    ov->Unlock(nullptr);
+    DDOVERLAYFX ofx = {};
+    ofx.dwSize = sizeof(ofx);
+    ofx.dckDestColorkey.dwColorSpaceLowValue = ofx.dckDestColorkey.dwColorSpaceHighValue = 0xFF00FF;  // (32-bit desktop)
+    RECT r = {0, 0, 320, 240};
+    CHECK(ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_KEYDESTOVERRIDE | DDOVER_DDFX, &ofx) == DD_OK,
+          "overlay (windowed): shown behind the window's key colour");
+    for (int i = 0; i < 10; i++) {
+        Pump();
+        Sleep(100);
+    }
+    HDC sdc = GetDC(nullptr);
+    const COLORREF left = GetPixel(sdc, 60, 120) & 0xFFFFFF, right = GetPixel(sdc, 260, 120) & 0xFFFFFF;
+    ReleaseDC(nullptr, sdc);
+    CHECK(right == RGB(255, 255, 255) && left != RGB(255, 255, 255),
+          "overlay (windowed): over the GDI key colour only (left %06lx, right %06lx)", left, right);
+    ov->Release();
+    prim->Release();
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// DDSCL_CREATEDEVICEWINDOW with DDSCL_NOWINDOWCHANGES: the focus window stays small, the
+// device window covers the screen and shows the picture.
+static int RunDeviceWindow() {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    HWND focus = MakeWindow(WS_POPUP, 100, 100);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    HRESULT hr = dd->SetCooperativeLevel(focus, DDSCL_SETFOCUSWINDOW);
+    HRESULT hr2 = dd->SetCooperativeLevel(nullptr, DDSCL_CREATEDEVICEWINDOW | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES);
+    CHECK(SUCCEEDED(hr) && SUCCEEDED(hr2), "device window: focus window set (0x%08lx), device window made (0x%08lx)", hr, hr2);
+    dd->SetDisplayMode(sw, sh, 32, 0, 0);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    if (prim) {
+        DDBLTFX fx = {};
+        fx.dwSize = sizeof(fx);
+        fx.dwFillColor = 0x00FF00;
+        prim->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    }
+    for (int i = 0; i < 10; i++) {
+        Pump();
+        Sleep(100);
+    }
+    HWND dev = FindWindowA("DirectDrawDeviceWnd", nullptr);
+    HDC sdc = GetDC(nullptr);
+    const COLORREF far_ = GetPixel(sdc, sw - 10, sh - 10) & 0xFFFFFF;
+    ReleaseDC(nullptr, sdc);
+    RECT fr = {};
+    GetWindowRect(focus, &fr);
+    CHECK(dev && IsWindowVisible(dev) && far_ == RGB(0, 255, 0) && fr.right - fr.left == 100,
+          "device window: shown, the picture on it over the screen (%06lx), the focus window left alone (%ld wide)", far_,
+          fr.right - fr.left);
+    if (prim) prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(focus, DDSCL_NORMAL);
+    CHECK(!IsWindow(dev), "device window: gone with normal mode");
+    dd->Release();
+    DestroyWindow(focus);
+    return 0;
+}
+
 static int RunOverlay() {
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
@@ -1513,16 +1877,7 @@ static int RunOverlay() {
     DDCAPS hal = {}, hel = {};
     hal.dwSize = hel.dwSize = sizeof(DDCAPS);
     dd->GetCaps(&hal, nullptr);
-    CHECK(!(hal.dwCaps & DDCAPS_OVERLAY) && !(hal.dwCKeyCaps & DDCKEYCAPS_DESTOVERLAY), "overlay: none for a windowed program");
-    {
-        DDSURFACEDESC2 o = {};
-        o.dwSize = sizeof(o);
-        o.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
-        o.dwWidth = o.dwHeight = 16;
-        o.ddsCaps.dwCaps = DDSCAPS_OVERLAY;
-        IDirectDrawSurface7* none = nullptr;
-        CHECK(dd->CreateSurface(&o, &none, nullptr) == DDERR_NOOVERLAYHW, "overlay: a windowed program can't make one");
-    }
+    CHECK((hal.dwCaps & DDCAPS_OVERLAY) && (hal.dwCKeyCaps & DDCKEYCAPS_DESTOVERLAY), "overlay: offered to a windowed program");
     dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
     CHECK(SUCCEEDED(dd->SetDisplayMode(sw, sh, 32, 0, 0)), "overlay: exclusive at %dx%dx32", sw, sh);
     hal = {};
@@ -1698,7 +2053,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
         r = RunFullscreen8(w, h);
     }
     else if (strstr(cmd, "mouse")) r = RunMouse();
-    else if (strstr(cmd, "overlay")) r = RunOverlay();
+    else if (strstr(cmd, "overlay")) r = RunOverlay() | RunOverlayWindowed() | RunDeviceWindow();
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
     else r = RunUnit() | RunExecute() | RunLifetime() | RunCoopModes();

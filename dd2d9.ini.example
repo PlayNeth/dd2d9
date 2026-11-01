@@ -91,10 +91,9 @@ lockwhole=off
 ; that draws wrongly with it.
 zaccess=on
 
-; Overlays (video players, some games' movies): on (default) offers overlay surfaces to
-; fullscreen (exclusive-mode) programs, laid over the screen's image when shown, as the
-; hardware of the era did (windowed programs get none and blit, as before); off reports no
-; overlay hardware at all, as before 1.1.0.
+; Overlays (video players, some games' movies): on (default) offers overlay surfaces, laid
+; over the screen's image when shown, as the hardware of the era did; off reports no overlay
+; hardware, as before 1.1.0 (games then blit their video instead).
 videooverlay=on
 
 ; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too

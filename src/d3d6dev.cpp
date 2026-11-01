@@ -2,6 +2,7 @@
 // their state into Direct3D 9's (B §1.4).
 #include "d3d6int.h"
 
+#include <algorithm>
 #include <new>
 
 namespace dd2d9 {
@@ -100,10 +101,12 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
 Device::~Device() {
     // DestroyDevice (A): viewports deleted, stage textures released, handles and buffers go.
     inBegin = false;  // DeleteViewport would refuse (and leave them pointing here)
+    g_lightGen++;  // (TransformVerts' light cache: a device made at this address later is another)
     for (Viewport* v : std::vector<Viewport*>(viewports)) DeleteViewportI(v);
     for (DWORD s = 0; s < 8; s++)
         if (stageTex[s]) stageTex[s]->s->Release(Surface::SlotFor(stageTex[s]->version));
     for (MatHandle* h : std::vector<MatHandle*>(matHandles)) h->mat->DestroyHandle(h);
+    for (DWORD m : ownMatrices) matrices.erase(m);  // (handles never come back: an id deleted already is no other's)
     for (ExecBuf* b : execBufs) b->dev = nullptr;  // XP destroys them under the game
     execBufs.clear();
     if (d3d) Unlink(d3d->devices, this);
@@ -203,6 +206,8 @@ void Device::ForgetSurface(Surface* s) {
 
 // Pushes everything to a new (or reset, or shared) Direct3D 9 device. Use held.
 void Device::PushAll() {
+    tssSentMask[0] = tssSentMask[1] = 0;
+    alphaSentMask = 0;
     // What the vertices bring: Direct3D 9 gets transformed vertices only (d3d6pipe.cpp),
     // with the fog factor in specular alpha.
     ctx.SetRenderState(137, FALSE);  // LIGHTING
@@ -292,13 +297,31 @@ Surface* Device::StageSurface(DWORD stage) const {
     return s;
 }
 
+// Stage 0 and 1's ops and arguments and the alpha test, as PushStageOps9 and PushAlpha9 last
+// sent them (they run at every draw): only changes go to D3D9. Forgotten in PushAll.
+void Device::SetTSS9(DWORD stage, DWORD t, DWORD v) {
+    const DWORD bit = 1u << t;
+    if ((tssSentMask[stage] & bit) && tssSent[stage][t] == v) return;
+    tssSentMask[stage] |= bit;
+    tssSent[stage][t] = v;
+    ctx.SetTextureStageState(stage, t, v);
+}
+
+void Device::SetAlphaRS9(int i, DWORD v) {
+    static const DWORD kStates[3] = {15, 24, 25};
+    if ((alphaSentMask & (1u << i)) && alphaSent[i] == v) return;
+    alphaSentMask |= 1u << i;
+    alphaSent[i] = v;
+    ctx.SetRenderState(kStates[i], v);
+}
+
 // Stages 0 and 1: while TEXTUREHANDLE is set only stage 0 runs; legacy MODULATE takes alpha
 // from the texture when it has alpha, else from the vertex (B §1.4: the reference
 // rasterizer's span choice for MODULATE(TEXTURE, DIFFUSE) / SELECTARG1(TEXTURE)).
 void Device::PushStageOps9() {
     const DWORD* s0 = dtss[0];
     for (DWORD t : {D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_COLORARG2, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2})
-        if (s0[t] != 0xFFFFFFFF) ctx.SetTextureStageState(0, t, s0[t]);
+        if (s0[t] != 0xFFFFFFFF) SetTSS9(0, t, s0[t]);
     const DWORD op1 = dTexHandle ? DWORD(D3DTOP_DISABLE) : dtss[1][D3DTSS_COLOROP];
     DWORD alphaOp = s0[D3DTSS_ALPHAOP];
     Surface* tex = StageSurface(0);
@@ -307,7 +330,7 @@ void Device::PushStageOps9() {
         op1 == D3DTOP_DISABLE && tex && !tex->buf->fmt.a && !tex->buf->fmt.fourcc) {
         // Texture alpha is 1 (or 0 where colour-keyed): MODULATE gives the vertex alpha.
         alphaOp = D3DTOP_MODULATE;
-        ctx.SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+        SetTSS9(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
     }
     // Colour keying works on the texel alone on XP: with the game's alpha unused (no blending,
     // no alpha test), the alpha test of the key emulation gets the texture's alpha
@@ -315,17 +338,17 @@ void Device::PushStageOps9() {
     const bool keyOn = rs[41] == TRUE && tex && tex->hasCk[kCkSrcBlt] && s0[D3DTSS_COLOROP] != D3DTOP_DISABLE;
     if (keyOn && rs[27] != TRUE && rs[15] != TRUE) {
         alphaOp = D3DTOP_SELECTARG1;
-        ctx.SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        SetTSS9(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
     } else if (keyOn && !tex->buf->fmt.a && alphaOp == D3DTOP_SELECTARG2) {
         // With blending, the vertex alpha kept but keyed texels still dropped: the texture's
         // alpha is 1 except there, so MODULATE gives the same alpha everywhere else.
         alphaOp = D3DTOP_MODULATE;
-        ctx.SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        SetTSS9(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
     }
-    if (alphaOp != 0xFFFFFFFF) ctx.SetTextureStageState(0, D3DTSS_ALPHAOP, alphaOp);
+    if (alphaOp != 0xFFFFFFFF) SetTSS9(0, D3DTSS_ALPHAOP, alphaOp);
     for (DWORD t : {D3DTSS_COLORARG1, D3DTSS_COLORARG2, D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2})
-        if (dtss[1][t] != 0xFFFFFFFF) ctx.SetTextureStageState(1, t, dtss[1][t]);
-    if (op1 != 0xFFFFFFFF) ctx.SetTextureStageState(1, D3DTSS_COLOROP, op1);
+        if (dtss[1][t] != 0xFFFFFFFF) SetTSS9(1, t, dtss[1][t]);
+    if (op1 != 0xFFFFFFFF) SetTSS9(1, D3DTSS_COLOROP, op1);
 }
 
 // COLORKEYENABLE: keyed texels were uploaded transparent; an alpha test drops them.
@@ -334,13 +357,13 @@ void Device::PushAlpha9() {
     Surface* t = StageSurface(0);
     const bool key = rs[41] == TRUE && t && t->hasCk[kCkSrcBlt];
     if (rs[15] == TRUE || !key) {
-        ctx.SetRenderState(15, rs[15] == TRUE);
-        ctx.SetRenderState(24, rs[24] & 0xFF);
-        ctx.SetRenderState(25, rs[25] == 0xFFFFFFFF ? DWORD(D3DCMP_ALWAYS) : rs[25]);
+        SetAlphaRS9(0, rs[15] == TRUE);
+        SetAlphaRS9(1, rs[24] & 0xFF);
+        SetAlphaRS9(2, rs[25] == 0xFFFFFFFF ? DWORD(D3DCMP_ALWAYS) : rs[25]);
     } else {
-        ctx.SetRenderState(15, TRUE);
-        ctx.SetRenderState(24, 0);
-        ctx.SetRenderState(25, D3DCMP_GREATER);
+        SetAlphaRS9(0, TRUE);
+        SetAlphaRS9(1, 0);
+        SetAlphaRS9(2, D3DCMP_GREATER);
     }
 }
 
@@ -701,6 +724,7 @@ HRESULT Device::F1::CreateMatrix(D3DMATRIXHANDLE* h) {
     Guard l;
     const DWORD id = NewMatrixHandle();
     o->matrices[id] = kIdentity;
+    o->ownMatrices.push_back(id);
     *h = id;
     return D3D_OK;
 }
@@ -731,6 +755,8 @@ HRESULT Device::F1::DeleteMatrix(D3DMATRIXHANDLE h) {
     if (!h) return DDERR_INVALIDPARAMS;
     Guard l;
     if (!o->matrices.erase(h)) return DDERR_INVALIDPARAMS;
+    std::vector<DWORD>& own = o->ownMatrices;  // (another device's made: not in this list)
+    own.erase(std::remove(own.begin(), own.end(), DWORD(h)), own.end());
     return D3D_OK;
 }
 
@@ -1008,6 +1034,26 @@ HRESULT Device::GetCapsI(D3DDEVICEDESC* h, D3DDEVICEDESC* s) {
     memcpy(s, &hel, s->dwSize);
     return D3D_OK;
 }
+// The bump map formats a hardware device lists where the GPU has them with the bump-mapping
+// operations (DirectX 6 and 7: environment-mapped bump mapping).
+static void AddBumpFormats(std::vector<DDPIXELFORMAT>* list) {
+    const GpuCaps c = GpuGetCaps();
+    auto bump = [&](bool have, DWORD bits, DWORD du, DWORD dv, DWORD lum) {
+        if (!have) return;
+        DDPIXELFORMAT f = {};
+        f.dwSize = sizeof(f);
+        f.dwFlags = DDPF_BUMPDUDV | (lum ? DDPF_BUMPLUMINANCE : 0);
+        f.dwBumpBitCount = bits;
+        f.dwBumpDuBitMask = du;
+        f.dwBumpDvBitMask = dv;
+        f.dwBumpLuminanceBitMask = lum;
+        list->push_back(f);
+    };
+    bump(c.bumpV8U8, 16, 0xFF, 0xFF00, 0);
+    bump(c.bumpL6V5U5, 16, 0x1F, 0x3E0, 0xFC00);
+    bump(c.bumpX8L8V8U8, 24, 0xFF, 0xFF00, 0xFF0000);
+}
+
 
 // B §7.4: XP's inclusion list (and FOURCC formats) among what dd2d9 textures can be.
 HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) {
@@ -1048,6 +1094,7 @@ HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) {
             f.dwFourCC = MAKEFOURCC('D', 'X', 'T', '1' + i);
             list.push_back(f);
         }
+        AddBumpFormats(&list);
     }
     if (version < 3 && list.size() > 10) list.resize(10);
     for (DDPIXELFORMAT& f : list) {
@@ -1266,10 +1313,16 @@ HRESULT Device::F3::DrawIndexedPrimitive(D3DPRIMITIVETYPE t, DWORD fvf, void* v,
     return o->DrawCommon(t, fvf, static_cast<const uint8_t*>(v), FvfSize6(fvf), n, idx, ni, flags, nullptr);
 }
 
-// Strided data gathered into interleaved vertices (texture coordinates: two floats each).
-static void Gather6(DWORD fvf, const D3DDRAWPRIMITIVESTRIDEDDATA& d, DWORD n, std::vector<uint8_t>* out) {
+// Strided data gathered into interleaved vertices (texture coordinates: two floats each);
+// false without the memory for them. Into g_gathered (kept from draw to draw, g_lock).
+static std::vector<uint8_t> g_gathered;
+static bool Gather6(DWORD fvf, const D3DDRAWPRIMITIVESTRIDEDDATA& d, DWORD n, std::vector<uint8_t>* out) {
     const UINT stride = FvfSize6(fvf);
-    out->assign(size_t(stride) * n, 0);
+    try {
+        out->assign(size_t(stride) * n, 0);
+    } catch (const std::exception&) {
+        return false;
+    }
     const UINT posSize = (fvf & 0x0E) == D3DFVF_XYZ ? 12 : FvfSize6(fvf & 0x0E);
     const DWORD tex = (fvf >> 8) & 0xF;
     for (DWORD i = 0; i < n; i++) {
@@ -1285,6 +1338,7 @@ static void Gather6(DWORD fvf, const D3DDRAWPRIMITIVESTRIDEDDATA& d, DWORD n, st
         if (fvf & D3DFVF_SPECULAR) copy(d.specular, 4);
         for (DWORD t = 0; t < tex && t < D3DDP_MAXTEXCOORD; t++) copy(d.textureCoords[t], 8);
     }
+    return true;
 }
 
 HRESULT Device::F3::DrawPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWPRIMITIVESTRIDEDDATA* d, DWORD n,
@@ -1293,8 +1347,8 @@ HRESULT Device::F3::DrawPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D3DDRAWP
     if (!d) return DDERR_INVALIDPARAMS;
     if (n > 0x01000000) return DDERR_INVALIDPARAMS;  // as Direct3D 7's cap (n * stride stays far from 4 GB)
     Guard l;
-    std::vector<uint8_t> v;
-    Gather6(fvf, *d, n, &v);
+    std::vector<uint8_t>& v = g_gathered;
+    if (!Gather6(fvf, *d, n, &v)) return DDERR_OUTOFMEMORY;
     return o->DrawCommon(t, fvf, v.data(), FvfSize6(fvf), n, nullptr, 0, flags, nullptr);
 }
 
@@ -1304,8 +1358,8 @@ HRESULT Device::F3::DrawIndexedPrimitiveStrided(D3DPRIMITIVETYPE t, DWORD fvf, D
     if (!d) return DDERR_INVALIDPARAMS;
     if (n > 0x01000000) return DDERR_INVALIDPARAMS;  // as Direct3D 7's cap (n * stride stays far from 4 GB)
     Guard l;
-    std::vector<uint8_t> v;
-    Gather6(fvf, *d, n, &v);
+    std::vector<uint8_t>& v = g_gathered;
+    if (!Gather6(fvf, *d, n, &v)) return DDERR_OUTOFMEMORY;
     return o->DrawCommon(t, fvf, v.data(), FvfSize6(fvf), n, idx, ni, flags, nullptr);
 }
 
@@ -1313,6 +1367,7 @@ HRESULT Device::DrawPrimitiveVBI(D3DPRIMITIVETYPE t, VBuf* vb, DWORD start, DWOR
                                  DWORD flags) {
     if (!vb) return DDERR_INVALIDPARAMS;  // XP faults
     Guard l;
+    flags |= vb->drawFlags;
     if (idx) {  // no start vertex: the indices address the whole buffer
         start = 0;
         n = vb->count;

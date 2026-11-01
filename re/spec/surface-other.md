@@ -378,8 +378,8 @@ DDRAWISURF_HASOVERLAYDATA, which creation gives overlays and (with overlay caps)
 Removing an overlay key clears the overlay's KEYSRC/KEYSRCOVERRIDE or KEYDEST/KEYDESTOVERRIDE flags and updates a
 visible overlay again. Flip takes DDFLIP_EVEN/ODD on overlays.
 
-dd2d9 (overlay.cpp) offers overlays to DirectDraw objects in exclusive mode only (a windowed program paints the
-destination key on the desktop with GDI, which dd2d9's primary never sees), and follows this with its own caps: overlay, stretch, FourCC, DESTOVERLAY and SRCOVERLAY keys, arbitrary
+dd2d9 (overlay.cpp) follows this with its own caps (a windowed program's destination key is also looked for in
+what GDI draws in its window, and one shown nowhere under the overlay doesn't hide it): overlay, stretch, FourCC, DESTOVERLAY and SRCOVERLAY keys, arbitrary
 stretching and shrinking, mirroring, stretch 1..100000, 16 visible overlays (a 17th → OUTOFCAPS). Overlays are laid
 over the primary when presented; on any other destination they are kept but not shown.
 

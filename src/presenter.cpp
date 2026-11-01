@@ -1,4 +1,5 @@
 // Direct3D 9 presentation of the primary surface.
+#include "convert.h"
 #include "objects.h"
 #include "gpu.h"
 #include "gpures.h"
@@ -41,7 +42,7 @@ bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out) {
     return true;
 }
 
-Presenter::Presenter(DDraw* dd) : dd_(dd) {
+Presenter::Presenter(DDraw* dd) : ovGpu_(NewOverlayGpu()), dd_(dd) {
     InitializeCriticalSection(&gammaLock_);
     for (int c = 0; c < 3; c++) {
         WORD* ch = c == 0 ? gammaRamp_.red : c == 1 ? gammaRamp_.green : gammaRamp_.blue;
@@ -54,6 +55,12 @@ Presenter::Presenter(DDraw* dd) : dd_(dd) {
 
 Presenter::~Presenter() {
     Stop();
+    DeleteOverlayGpu(ovGpu_);
+    if (gdiDc_ && !gdiPending_) {
+        SelectObject(gdiDc_, gdiOld_);
+        DeleteObject(gdiBm_);
+        DeleteDC(gdiDc_);
+    }
     if (dirtyEvent_) CloseHandle(dirtyEvent_);
     if (dropDone_) CloseHandle(dropDone_);
     DeleteCriticalSection(&gammaLock_);
@@ -96,6 +103,13 @@ void Presenter::DropDevice() {
 }
 
 DWORD WINAPI Presenter::ThreadProc(void* self) {
+    // Above the game's threads: it runs briefly when woken, and must then run at once. A
+    // game drawing as fast as it can without waiting for a vertical blank (DDFLIP_NOVSYNC,
+    // or blits to the primary in a loop) would otherwise share a processor with it at equal
+    // priority (cpus=1 puts the whole process on one) and only be let run at the end of its
+    // time slices, about 30 times a second: the picture moved at that rate whatever the
+    // game's, and a fade the game blits in a few seconds showed few of its steps.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     static_cast<Presenter*>(self)->Loop();
     return 0;
 }
@@ -140,6 +154,7 @@ void Presenter::GetGamma(DDGAMMARAMP* ramp) {
 
 // The staging surface and the shaders' resources (the shared device's).
 void Presenter::ReleaseGpuResources() {
+    if (ovGpu_) ReleaseOverlayGpu(ovGpu_);
     if (staging_) staging_->Release();
     staging_ = nullptr;
     if (gammaSrc_) gammaSrc_->Release();
@@ -427,6 +442,31 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
     return true;
 }
 
+// One draw call each frame, which draws nothing: RivaTuner (and other overlay tools) draws its
+// overlay only into frames that had one, and a 2D game's are only copied into the back buffer
+// (StretchRect): it showed in Direct3D games and with filter=sharp (a draw), not otherwise.
+// A triangle of no area, colour writes off. Gpu lock held, outside a scene.
+static void DrawCall(Gpu& gpu, IDirect3DDevice9* d) {
+    const SavedDeviceState saved(d);  // put back at the return
+    IDirect3DSurface9* bb = gpu.TargetBackBuffer();
+    if (!bb) return;
+    d->SetRenderTarget(0, bb);
+    bb->Release();
+    d->SetDepthStencilSurface(nullptr);
+    d->SetPixelShader(nullptr);
+    d->SetVertexShader(nullptr);
+    d->SetFVF(D3DFVF_XYZRHW);
+    d->SetTexture(0, nullptr);
+    const DWORD rs[][2] = {{D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE},
+                           {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_STENCILENABLE, FALSE},
+                           {D3DRS_COLORWRITEENABLE, 0}, {D3DRS_CLIPPLANEENABLE, 0}};
+    for (const auto& r : rs) d->SetRenderState(D3DRENDERSTATETYPE(r[0]), r[1]);
+    const float t[3][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}};
+    gpu.OpenScene();
+    d->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, t, sizeof(t[0]));
+    gpu.CloseScene();
+}
+
 RECT Presenter::FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const {
     if (g_config.stretch == 1 || (sw == bw && sh == bh)) return RECT{0, 0, LONG(bw), LONG(bh)};
     double scale = std::fmin(double(bw) / sw, double(bh) / sh);
@@ -506,6 +546,7 @@ void Presenter::Convert(const Snapshot& s, const RECT& area, void* bits, int pit
                       gamma[2][s.pal[i].peBlue];
     }
     const bool fastCopy = f.IsStandardX8R8G8B8() && !gammaOn;
+    const RowConverter conv(f, nullptr);
 
     for (int y = 0; y < ah; y++) {
         auto* out = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(bits) + size_t(y) * pitch);
@@ -527,21 +568,78 @@ void Presenter::Convert(const Snapshot& s, const RECT& area, void* bits, int pit
             for (int i = 0; i < n; i++) o[i] = lut16_[src[i]];
         } else if (fastCopy) {
             memcpy(o, reinterpret_cast<const uint32_t*>(row) + x0, size_t(n) * 4);
-        } else {
-            const int bytes = int(f.Bytes());
-            const uint8_t* src = row + x0 * bytes;
-            for (int i = 0; i < n; i++, src += bytes) {
-                uint32_t v = bytes == 3 ? (uint32_t(src[0]) | (uint32_t(src[1]) << 8) | (uint32_t(src[2]) << 16))
-                                        : *reinterpret_cast<const uint32_t*>(src);
-                uint32_t c = PixelToARGB(f, v, nullptr);
-                o[i] = (uint32_t(gamma[0][(c >> 16) & 0xFF]) << 16) | (uint32_t(gamma[1][(c >> 8) & 0xFF]) << 8) |
-                       gamma[2][c & 0xFF];
+        } else {  // 24 and 32-bit: RowConverter, the gamma after
+            conv.Run(row + x0 * int(f.Bytes()), o, n);
+            if (gammaOn) {
+                for (int i = 0; i < n; i++) {
+                    const uint32_t c = o[i];
+                    o[i] = (uint32_t(gamma[0][(c >> 16) & 0xFF]) << 16) | (uint32_t(gamma[1][(c >> 8) & 0xFF]) << 8) |
+                           gamma[2][c & 0xFF];
+                }
+            } else {
+                for (int i = 0; i < n; i++) o[i] &= 0x00FFFFFFu;
             }
         }
     }
 }
 
 // ---------------------------------------------------------------- render loop
+
+bool Presenter::CaptureGdi(HWND hwnd, LONG w, LONG h) {
+    const double now = Seconds();
+    const bool have = hwnd == gdiWnd_ && w == gdiW_ && h == gdiH_;
+    // At most every 0.1 s, answered or not (a window slow to answer costs up to 50 ms a try).
+    if (now - gdiTime_ < 0.1) return have;
+    gdiTime_ = now;
+    if (w <= 0 || h <= 0) return false;
+    if (!gdiDc_ || gdiDcW_ != w || gdiDcH_ != h) {
+        // A new size. The old DC goes unless a timed-out WM_PRINT may still paint it (then it
+        // is left: rare, and a crash in the game's painting would be worse).
+        if (gdiDc_ && !gdiPending_) {
+            SelectObject(gdiDc_, gdiOld_);
+            DeleteObject(gdiBm_);
+            DeleteDC(gdiDc_);
+        }
+        gdiDc_ = nullptr;
+        gdiBm_ = nullptr;
+        gdiPending_ = false;
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;  // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        HDC dc = CreateCompatibleDC(nullptr);
+        void* bits = nullptr;
+        HBITMAP bm = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+        if (!bm) {
+            if (dc) DeleteDC(dc);
+            return false;
+        }
+        gdiOld_ = SelectObject(dc, bm);
+        gdiDc_ = dc;
+        gdiBm_ = bm;
+        gdiBits_ = bits;
+        gdiDcW_ = w;
+        gdiDcH_ = h;
+    }
+    // The window paints itself into the DC on its own thread (background, client, child
+    // windows); one that doesn't answer in time keeps its last picture, if any.
+    DWORD_PTR result = 0;
+    const bool ok = SendMessageTimeoutW(hwnd, WM_PRINT, reinterpret_cast<WPARAM>(gdiDc_),
+                                        PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN, SMTO_ABORTIFHUNG, 50, &result) != 0;
+    gdiPending_ = !ok;
+    if (!ok) return have;
+    GdiFlush();
+    const uint32_t* p = static_cast<const uint32_t*>(gdiBits_);
+    gdi_.assign(p, p + size_t(w) * h);
+    gdiSeq_++;
+    gdiWnd_ = hwnd;
+    gdiW_ = w;
+    gdiH_ = h;
+    return true;
+}
 
 void Presenter::Loop() {
     while (running_) {
@@ -595,7 +693,7 @@ void Presenter::Loop() {
             active_ = false;
             continue;
         }
-        // The shared device, through its swap chain on the window.
+        // The shared device, presenting into the window (see Gpu::PrepareTarget).
         bool ready;
         {
             Gpu& gpu = dd_->GetGpu();
@@ -605,8 +703,9 @@ void Presenter::Loop() {
                 usingGpu_ = true;
                 stagingStale_ = true;
             }
+            gpu.SetWindowHint(hwnd);
             IDirect3DDevice9* d = gpu.Ensure();
-            ready = d && gpu.SwapChain(hwnd, bw, bh) && EnsureStaging(d, sw, sh);
+            ready = d && gpu.PrepareTarget(hwnd, bw, bh) && EnsureStaging(d, sw, sh);
         }
         if (!ready) {
             active_ = false;
@@ -630,10 +729,21 @@ void Presenter::Loop() {
         // never wait for the conversion.
         Snapshot snap;
         std::vector<OverlayLayer*> overlays;  // shown over the primary (overlay.cpp)
+        Buffer* keyPrimary = nullptr;  // the primary's pixels, for windowed destination keys (GPU path)
+        struct Drop {  // both let go at the end of the iteration, however it ends
+            std::vector<OverlayLayer*>& o;
+            Buffer*& k;
+            ~Drop() {
+                DropOverlays(&o);
+                if (k) k->Release();
+            }
+        } dropOverlays{overlays, keyPrimary};
+        bool cpuOverlays = false;  // overlays laid over the frame on the CPU (no pixel shaders)
         bool gpuFrame = false;     // snap.buf's render target is the newest copy: presented from it
         RECT area = {0, 0, 0, 0};  // what to convert, in primary surface coordinates
         uint64_t seq = 0;
         bool primaryExists = false;
+        bool windowed = false;  // overlays' destination keys also see what GDI drew (CaptureGdi)
         double lockTime;
         {
             Guard l;
@@ -647,10 +757,17 @@ void Presenter::Loop() {
                 // The staging surface holds the last converted frame: a partial update
                 // needs it to show this very surface and buffer, at the same position.
                 all = all || stagingStale_ || !EqualRect(&src, &lastSrc_) || p != lastPrimary_ || p->buf != lastBuf_;
-                // Overlays shown on it: laid over the whole frame, converted whole (and the next
-                // frame too, see stagingStale_ below: what they covered comes back).
+                // Overlays shown on it: drawn over the frame in the back buffer (DrawOverlaysGpu),
+                // or without pixel shaders laid over the whole frame on the CPU, converted whole
+                // (and the next frame too, see stagingStale_ below: what they covered comes back).
                 TakeOverlays(p, &overlays);
-                if (!overlays.empty()) all = true;
+                windowed = !dd_->Exclusive();
+                cpuOverlays = !overlays.empty() && !OverlayGpuUsable(ovGpu_);
+                if (cpuOverlays) all = true;
+                if (!overlays.empty() && !cpuOverlays && windowed && OverlaysKeyedOnDest(overlays)) {
+                    keyPrimary = p->buf;
+                    keyPrimary->AddRef();
+                }
                 if (p->dcOut) all = true;  // GDI may be drawing anywhere
                 else if (p->lockCount) UnionRect(&changed, &changed, &p->lockArea);  // being written right now
                 if (all) area = src;
@@ -661,9 +778,9 @@ void Presenter::Loop() {
                 // applied there. So does a source rectangle outside the surface (a window
                 // partly off the screen), which StretchRect would refuse.
                 const bool inside = src.left >= 0 && src.top >= 0 && src.right <= p->buf->w && src.bottom <= p->buf->h;
-                // So does one with overlays over it.
+                // So does one with overlays laid over it on the CPU.
                 if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale &&
-                    (p->buf->fmt.pal8 || !inside || !overlays.empty())) {
+                    (p->buf->fmt.pal8 || !inside || cpuOverlays)) {
                     GpuCpuAccess(p, false);
                     area = src;
                 }
@@ -684,7 +801,7 @@ void Presenter::Loop() {
                 lastSrc_ = src;
                 lastPrimary_ = p;
                 lastBuf_ = p->buf;
-                if (!gpuFrame) stagingStale_ = !overlays.empty();
+                if (!gpuFrame) stagingStale_ = cpuOverlays;
                 DD2D9_TRACE("present #%llu: primary %p, area %ld,%ld-%ld,%ld, palette %p v%lu",
                            static_cast<unsigned long long>(seq), static_cast<void*>(p), area.left, area.top,
                            area.right, area.bottom, static_cast<const void*>(p->ShownPalette()),
@@ -707,10 +824,27 @@ void Presenter::Loop() {
         if (snap.buf && !gpuFrame) {
             const double t0 = Seconds();
             Convert(snap, area, frame_.data() + size_t(area.top - src.top) * sw + (area.left - src.left), int(sw * 4));
-            if (!overlays.empty()) DrawOverlays(overlays, snap.buf, src, frame_.data(), sw);
+            if (cpuOverlays) {
+                OverlayGdi g = {nullptr, 0, 0, src.left, src.top};
+                if (windowed && OverlaysKeyedOnDest(overlays) && CaptureGdi(hwnd, LONG(sw), LONG(sh))) {
+                    g.px = gdi_.data();
+                    g.w = gdiW_;
+                    g.h = gdiH_;
+                }
+                DrawOverlays(overlays, snap.buf, src, frame_.data(), sw, windowed ? &g : nullptr);
+            }
             convertTime = Seconds() - t0;
         }
-        DropOverlays(&overlays);
+        // The GPU path: what changed in the overlays decoded now, without the device's lock.
+        OverlayGdi ovGdi = {nullptr, 0, 0, src.left, src.top};
+        if (!overlays.empty() && !cpuOverlays) {
+            if (keyPrimary && CaptureGdi(hwnd, LONG(sw), LONG(sh))) {
+                ovGdi.px = gdi_.data();
+                ovGdi.w = gdiW_;
+                ovGdi.h = gdiH_;
+            }
+            PrepareOverlays(ovGpu_, overlays, keyPrimary, src, keyPrimary ? &ovGdi : nullptr);
+        }
         // The shared device again (taken after g_lock, never the other way round: the game's
         // Direct3D calls hold g_lock and then take it). It may have been lost meanwhile,
         // taking the staging surface with it.
@@ -718,8 +852,7 @@ void Presenter::Loop() {
         gpu.Lock();
         gpu.CloseScene();  // a game's Direct3D scene: D3D9 presents only outside one
         IDirect3DDevice9* const d = gpu.Device();
-        IDirect3DSwapChain9* const swap = gpu.SwapChain(hwnd, bw, bh);
-        if (!d || !staging_ || !swap) {
+        if (!d || !staging_ || !gpu.PrepareTarget(hwnd, bw, bh)) {
             gpu.Unlock();
             if (snap.buf) snap.buf->Release();
             stagingStale_ = true;
@@ -731,12 +864,27 @@ void Presenter::Loop() {
         IDirect3DSurface9* source = staging_;
         IDirect3DSurface9* heldRt = nullptr;
         RECT sourceRect = {0, 0, LONG(sw), LONG(sh)};
+        // The frame as converted: what overlays' destination keys are compared with (the
+        // staging surface has the gamma ramp in: the key gets it too).
+        IDirect3DSurface9* keySrc = staging_;
+        RECT keyRect = sourceRect;
+        uint8_t keyGamma[3][256];
+        bool keyGammaOn = false;
+        if (!overlays.empty()) {
+            EnterCriticalSection(&gammaLock_);
+            keyGammaOn = gammaActive_;
+            if (keyGammaOn) memcpy(keyGamma, gammaLut_, sizeof(keyGamma));
+            LeaveCriticalSection(&gammaLock_);
+        }
         if (gpuFrame && snap.buf) {
             if (IDirect3DSurface9* rt = GpuNewestSurface(snap.buf)) {
                 rt->AddRef();  // snap.buf may hold the last reference to it: released after Present
                 heldRt = rt;
                 source = rt;
                 sourceRect = src;
+                keySrc = rt;
+                keyRect = src;
+                keyGammaOn = false;  // (before ApplyGammaGpu)
                 EnterCriticalSection(&gammaLock_);
                 const bool gammaOn = gammaActive_;
                 LeaveCriticalSection(&gammaLock_);
@@ -773,8 +921,7 @@ void Presenter::Loop() {
         CountPresent(lockTime, convertTime,
                      double(area.right - area.left) * (area.bottom - area.top) / (double(sw) * sh));
 
-        IDirect3DSurface9* bb = nullptr;
-        if (SUCCEEDED(swap->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
+        if (IDirect3DSurface9* bb = gpu.TargetBackBuffer()) {
             // Fitted into the target area of the back buffer (the client area's part on the
             // screen, see DDraw::PresentTarget).
             RECT tg;
@@ -782,10 +929,10 @@ void Presenter::Loop() {
             if (!IntersectRect(&tg, &target, &whole)) tg = whole;
             RECT dst = FitRect(sw, sh, UINT(tg.right - tg.left), UINT(tg.bottom - tg.top));
             OffsetRect(&dst, tg.left, tg.top);
-            // ColorFill rather than Clear: Clear works on the device's render target, which a
-            // swap chain's back buffer isn't.
+            // ColorFill rather than Clear: Clear works on the device's render target, which the
+            // back buffer needn't be. Only the frame's part (the device's back buffer is larger).
             if (dst.left > 0 || dst.top > 0 || dst.right < LONG(bw) || dst.bottom < LONG(bh))
-                d->ColorFill(bb, nullptr, D3DCOLOR_XRGB(0, 0, 0));
+                d->ColorFill(bb, &whole, D3DCOLOR_XRGB(0, 0, 0));
             const UINT dw = UINT(dst.right - dst.left), dh = UINT(dst.bottom - dst.top);
             const bool same = dw == sw && dh == sh;
             if (same || g_config.filter == 0) {
@@ -803,9 +950,14 @@ void Presenter::Loop() {
             } else {
                 d->StretchRect(source, &sourceRect, bb, &dst, D3DTEXF_LINEAR);
             }
+            if (!overlays.empty() && !cpuOverlays &&
+                !DrawOverlaysGpu(ovGpu_, gpu, d, overlays, bb, src, dst, keySrc, keyRect, keyPrimary ? &ovGdi : nullptr,
+                                 gdiSeq_, keyGammaOn ? keyGamma : nullptr))
+                MarkDirty();  // no pixel shaders after all: the CPU path in the next frame
             bb->Release();
         }
-        const HRESULT hr = swap->Present(nullptr, nullptr, nullptr, nullptr, 0);
+        DrawCall(gpu, d);
+        const HRESULT hr = gpu.PresentTarget();
         if (heldRt) heldRt->Release();
         gpu.Unlock();
         active_ = SUCCEEDED(hr);

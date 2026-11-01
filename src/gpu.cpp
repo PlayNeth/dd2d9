@@ -40,18 +40,50 @@ IDirect3D9* CreateD3D9() {
     return create(D3D_SDK_VERSION);
 }
 
-// The device's own presentation parameters: windowed, a 1x1 back buffer on its hidden
-// window, never presented (the swap chains present).
-static D3DPRESENT_PARAMETERS DeviceParams(HWND window) {
+// The largest monitor's size, current or as the registry has it (the device may be made
+// while a game has the display switched to a small mode): the implicit back buffer's.
+static BOOL CALLBACK AddMonitor(HMONITOR h, HDC, RECT*, LPARAM p) {
+    SIZE* m = reinterpret_cast<SIZE*>(p);
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(h, &mi)) return TRUE;
+    m->cx = std::max(m->cx, mi.rcMonitor.right - mi.rcMonitor.left);
+    m->cy = std::max(m->cy, mi.rcMonitor.bottom - mi.rcMonitor.top);
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsW(mi.szDevice, ENUM_REGISTRY_SETTINGS, &dm) && (dm.dmFields & DM_PELSWIDTH) &&
+        (dm.dmFields & DM_PELSHEIGHT)) {
+        m->cx = std::max(m->cx, LONG(dm.dmPelsWidth));
+        m->cy = std::max(m->cy, LONG(dm.dmPelsHeight));
+    }
+    return TRUE;
+}
+
+static SIZE LargestMonitor() {
+    SIZE m = {640, 480};
+    EnumDisplayMonitors(nullptr, nullptr, AddMonitor, reinterpret_cast<LPARAM>(&m));
+    m.cx = std::min(m.cx, LONG(16384));
+    m.cy = std::min(m.cy, LONG(16384));
+    return m;
+}
+
+static UINT PresentInterval() {
+    return g_config.vsync == kVSyncOff ? D3DPRESENT_INTERVAL_IMMEDIATE : D3DPRESENT_INTERVAL_ONE;
+}
+
+// The device's own presentation parameters: windowed, on `window` (the game's, see
+// DeviceWindow), a w x h back buffer presented into the game's window (COPY: Present takes a
+// source rectangle only then).
+static D3DPRESENT_PARAMETERS DeviceParams(HWND window, UINT w, UINT h) {
     D3DPRESENT_PARAMETERS pp = {};
     pp.Windowed = TRUE;
-    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    pp.SwapEffect = D3DSWAPEFFECT_COPY;
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-    pp.BackBufferWidth = 1;
-    pp.BackBufferHeight = 1;
+    pp.BackBufferWidth = w;
+    pp.BackBufferHeight = h;
     pp.BackBufferCount = 1;
     pp.hDeviceWindow = window;
-    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+    pp.PresentationInterval = PresentInterval();
     return pp;
 }
 
@@ -62,8 +94,8 @@ Gpu::~Gpu() {
     DeleteCriticalSection(&lock_);
 }
 
-// The device's own window: hidden, never shown or presented into. The game's window only
-// ever gets a swap chain, which another device (a wrapper's) can replace (DropSwapChain).
+// The device's own window: hidden, never shown or presented into (Present goes to the game's
+// window instead).
 // It belongs to a thread of its own that does nothing but handle its messages: Windows
 // sends every top-level window some (WM_DISPLAYCHANGE when a display mode changes,
 // WM_ACTIVATEAPP), and the sender waits for an answer. Owned by the presenter thread, which
@@ -133,7 +165,10 @@ IDirect3DDevice9* Gpu::Ensure() {
             failedAt_ = GetTickCount();
             return nullptr;
         }
-        D3DPRESENT_PARAMETERS pp = DeviceParams(window_);
+        const SIZE size = LargestMonitor();
+        devW_ = UINT(size.cx);
+        devH_ = UINT(size.cy);
+        D3DPRESENT_PARAMETERS pp = DeviceParams(DeviceWindow(), devW_, devH_);
         // Mixed vertex processing: hardware, with software available for ProcessVertices.
         // FPU_PRESERVE: games rely on the FPU state they set. NOWINDOWCHANGES: windows
         // are dd2d9's to manage.
@@ -155,9 +190,9 @@ IDirect3DDevice9* Gpu::Ensure() {
             D3DADAPTER_IDENTIFIER9 id = {};
             dev_->GetDeviceCaps(&caps);
             d3d_->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id);
-            DD2D9_LOG("D3D9 device created: %s (%s), pixel shaders %lu.%lu", id.Description, id.Driver,
+            DD2D9_LOG("D3D9 device created: %s (%s), pixel shaders %lu.%lu, back buffer %ux%u", id.Description, id.Driver,
                       static_cast<unsigned long>((caps.PixelShaderVersion >> 8) & 0xFF),
-                      static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF));
+                      static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF), devW_, devH_);
         }
         generation_++;
         inScene_ = false;
@@ -167,7 +202,7 @@ IDirect3DDevice9* Gpu::Ensure() {
     if (coop == D3DERR_DEVICELOST) return nullptr;  // until Windows gives it back
     if (coop == D3DERR_DEVICENOTRESET) {
         ReleaseResources();  // D3DPOOL_DEFAULT resources must go before a Reset
-        D3DPRESENT_PARAMETERS pp = DeviceParams(window_);
+        D3DPRESENT_PARAMETERS pp = DeviceParams(DeviceWindow(), devW_, devH_);
         const HRESULT hr = dev_->Reset(&pp);
         if (hr == D3DERR_DEVICELOST) return nullptr;
         if (FAILED(hr)) {
@@ -191,10 +226,28 @@ IDirect3DDevice9* Gpu::Ensure() {
     return dev_;
 }
 
-IDirect3DSwapChain9* Gpu::SwapChain(HWND hwnd, UINT w, UINT h) {
-    if (!dev_) return nullptr;
-    const int interval = g_config.vsync == kVSyncOff ? 0 : 1;
-    if (swap_ && swapWnd_ == hwnd && swapW_ == w && swapH_ == h && swapInterval_ == interval) return swap_;
+// The game's window if it has one that still exists (SetWindowHint), else the hidden one.
+HWND Gpu::DeviceWindow() {
+    HWND h = static_cast<HWND>(InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(&hint_), nullptr, nullptr));
+    if (!h || !IsWindow(h)) h = window_;
+    if (h != devWindow_) DD2D9_LOG("device window %p%s", static_cast<void*>(h), h == window_ ? " (dd2d9's own)" : "");
+    devWindow_ = h;
+    return h;
+}
+
+bool Gpu::PrepareTarget(HWND hwnd, UINT w, UINT h) {
+    if (!dev_ || !hwnd || !w || !h) return false;
+    if (hwnd != targetWnd_ || w != targetW_ || h != targetH_)
+        DD2D9_LOG("presenting into window %p, %ux%u%s", static_cast<void*>(hwnd), w, h,
+                  w <= devW_ && h <= devH_ ? "" : " (larger than the device's back buffer: a swap chain of its own)");
+    targetWnd_ = hwnd;
+    targetW_ = w;
+    targetH_ = h;
+    if (w <= devW_ && h <= devH_) {
+        DropSwapChain();
+        return true;
+    }
+    if (swap_ && swapWnd_ == hwnd && swapW_ == w && swapH_ == h) return true;
     DropSwapChain();
     D3DPRESENT_PARAMETERS pp = {};
     pp.Windowed = TRUE;
@@ -204,19 +257,32 @@ IDirect3DSwapChain9* Gpu::SwapChain(HWND hwnd, UINT w, UINT h) {
     pp.BackBufferHeight = h;
     pp.BackBufferCount = 1;
     pp.hDeviceWindow = hwnd;
-    pp.PresentationInterval = interval ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
+    pp.PresentationInterval = PresentInterval();
     const HRESULT hr = dev_->CreateAdditionalSwapChain(&pp, &swap_);
     if (FAILED(hr)) {
         DD2D9_LOG("CreateAdditionalSwapChain(%ux%u) failed: 0x%08lx", w, h, hr);
         swap_ = nullptr;
-        return nullptr;
+        return false;
     }
     swapWnd_ = hwnd;
     swapW_ = w;
     swapH_ = h;
-    swapInterval_ = interval;
-    DD2D9_LOG("swap chain for window %p, %ux%u", static_cast<void*>(hwnd), w, h);
-    return swap_;
+    return true;
+}
+
+IDirect3DSurface9* Gpu::TargetBackBuffer() {
+    IDirect3DSurface9* bb = nullptr;
+    const HRESULT hr = swap_ ? swap_->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb)
+                       : dev_ ? dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)
+                              : E_FAIL;
+    return SUCCEEDED(hr) ? bb : nullptr;
+}
+
+HRESULT Gpu::PresentTarget() {
+    if (swap_) return swap_->Present(nullptr, nullptr, nullptr, nullptr, 0);
+    if (!dev_ || !targetWnd_) return E_FAIL;
+    const RECT src = {0, 0, LONG(targetW_), LONG(targetH_)};
+    return dev_->Present(&src, nullptr, targetWnd_, nullptr);
 }
 
 void Gpu::OpenScene() {
@@ -235,7 +301,6 @@ void Gpu::DropSwapChain() {
     swap_ = nullptr;
     swapWnd_ = nullptr;
     swapW_ = swapH_ = 0;
-    swapInterval_ = -1;
 }
 
 void Gpu::AddOwner(Owner* o) {

@@ -35,6 +35,10 @@ static D3DFORMAT NativeFormat(const Format& f) {
         default: return D3DFMT_UNKNOWN;
         }
     }
+    if (f.bump) {
+        if (f.bpp == 24) return D3DFMT_X8L8V8U8;  // (widened: see WriteLevel)
+        return f.b ? D3DFMT_L6V5U5 : D3DFMT_V8U8;
+    }
     if (f.pal8 || f.zbuf) return D3DFMT_UNKNOWN;
     if (f.bpp == 16) {
         if (f.r == 0xF800 && f.g == 0x07E0 && f.b == 0x001F && !f.a) return D3DFMT_R5G6B5;
@@ -663,6 +667,86 @@ static void UploadDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
 
 bool GpuDepthWritable(const Buffer* b) { return b->gpu && b->gpu->depth && b->gpu->ztex; }
 
+static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g);
+
+bool GpuBlt(Surface* dst, const RECT& d, Surface* src, const RECT& s, const std::vector<RECT>& clips) {
+    Buffer* sb = src->buf;
+    Buffer* db = dst->buf;
+    GpuSurf* sg = sb->gpu;
+    // The source: a render target whose newest pixels Direct3D drew (the CPU copy behind).
+    if (!sg || !sg->gpu || sg->depth || !sg->surf || !sb->cpuStale || sb->gpuStale) return false;
+    if (sb->fmt.pal8 || db->fmt.pal8 || !(sb->fmt == db->fmt) || clips.empty()) return false;
+    // The destination: a render target too, or the primary (given a GPU copy: the presenter
+    // then shows it from there, as when Direct3D draws into it).
+    if (db->gpu && (db->gpu->depth || db->gpu->gpu != sg->gpu)) return false;
+    if (!db->gpu && !dst->isPrimary) return false;
+    if (&dst->dd->GetGpu() != sg->gpu) return false;
+    if (dst->isPrimary) {
+        // Not when the presenter couldn't show it from there: the part of a windowed primary
+        // shown (the window) partly off it would be read back every frame instead.
+        const RECT shown = dst->dd->PresentSource(dst->dd->PresentWindow());
+        if (shown.left < 0 || shown.top < 0 || shown.right > db->w || shown.bottom > db->h) return false;
+    }
+    // Stretched: whole (StretchRect takes whole rectangles: a clipped part's source edge
+    // would fall between pixels).
+    const LONG dw = d.right - d.left, dh = d.bottom - d.top, sw = s.right - s.left, sh = s.bottom - s.top;
+    const bool stretched = dw != sw || dh != sh;
+    if (stretched && (clips.size() != 1 || !EqualRect(&clips[0], &d))) return false;
+    Gpu& gpu = *sg->gpu;
+    GpuGuard l(gpu);
+    IDirect3DDevice9* dev = gpu.Ensure();
+    if (!dev) return false;
+    if (!sg->surf || !sb->cpuStale) return false;  // (Ensure reset the device: read back meanwhile)
+    // A primary's GPU copy made here is never drawn into multisampled: none made (the
+    // antialiasing setting would make one).
+    if (!db->gpu && MsaaType(dev)) return false;
+    GpuSurf* dg = EnsureSurf(gpu, dev, db, false);
+    if (!dg || !dg->surf || dg->fmt != sg->fmt) return false;
+    Resolve(gpu, dev, sg);
+    Resolve(gpu, dev, dg);  // (what Direct3D drew there, in `surf` before it is written)
+    if (db->gpuStale) {
+        // The CPU's newer parts first, unless the blit covers them all.
+        RECT cover;
+        const RECT bounds = {0, 0, db->w, db->h};
+        if (IntersectRect(&cover, &db->gpuDirty, &bounds)) {
+            bool covered = false;
+            for (const RECT& c : clips) {
+                RECT u;
+                UnionRect(&u, &c, &cover);
+                covered |= EqualRect(&u, &c) != 0;
+            }
+            if (!covered) UploadSurf(gpu, dev, dg);
+            else db->gpuStale = false;
+        } else {
+            db->gpuStale = false;
+        }
+    }
+    if (db->gpuStale) return false;
+    gpu.CloseScene();
+    for (const RECT& c : clips) {
+        const RECT sr = stretched ? s : RECT{s.left + (c.left - d.left), s.top + (c.top - d.top),
+                                             s.left + (c.right - d.left), s.top + (c.bottom - d.top)};
+        if (FAILED(dev->StretchRect(sg->surf, &sr, dg->surf, &c, D3DTEXF_POINT))) {
+            // (Nothing written, or a part: the CPU copy can't be trusted for the rest either way.)
+            ReadBack(gpu, dev, dg);
+            return false;
+        }
+        if (dg->ms) {  // the multisampled image lacks it now
+            if (!dg->msStale) dg->msDirty = c;
+            else UnionRect(&dg->msDirty, &dg->msDirty, &c);
+            dg->msStale = true;
+        }
+    }
+    db->cpuStale = true;
+    dg->serial = ++g_drawSerial;
+    static bool logged;  // Gpu lock
+    if (!logged) {
+        logged = true;
+        DD2D9_LOG("Blt from a render target copied on the GPU (%s)", dst->isPrimary ? "to the primary" : "between render targets");
+    }
+    return true;
+}
+
 // A render target back into the CPU copy.
 static void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     Buffer* b = g->buf;
@@ -763,18 +847,35 @@ struct GpuTex final : Gpu::Owner {
     DWORD palVersion = 0;
     bool keyed = false;
     DWORD key = 0;
+    bool shownKeyed = false;  // the texture last handed out (managed or rtTex) has the key as alpha
     bool autogen = false;  // mipmaps=on: one level from the game, the rest made by the GPU
     int w = 0, h = 0;      // the top level's size and layout when made (SetSurfaceDesc may change them)
     Format made = {};
     std::vector<Buffer*> levelBufs;
     std::vector<unsigned> levelSerials;  // each level's Buffer::cpuSerial when uploaded
-    // A render target used as a texture while the GPU has its newest pixels: a copy made on
-    // the GPU (no read back through the CPU), of `rtSrc` as its serial was `rtSerial`.
+    // A texture whose levels Direct3D drew into (render targets used as textures) while the
+    // GPU has their newest pixels: a copy made on the GPU (no read back through the CPU), each
+    // level from its render target (`rtLevelSrc` the GpuSurf as its serial was) or, for one
+    // the GPU doesn't have newer, its CPU copy (the Buffer as its cpuSerial was) through
+    // `rtSys`. Colour-keyed: the key made transparent by a shader pass from `rtTmp`.
     IDirect3DTexture9* rtTex = nullptr;
-    const void* rtSrc = nullptr;
-    unsigned rtSerial = 0;
-    UINT rtW = 0, rtH = 0;
-    D3DFORMAT rtFmt = D3DFMT_UNKNOWN;
+    IDirect3DTexture9* rtSys = nullptr;  // SYSTEMMEM, the CPU levels on their way up
+    IDirect3DTexture9* rtTmp = nullptr;  // a level's render target as a texture (keyed only)
+    IDirect3DPixelShader9* keyPs = nullptr;
+    std::vector<const void*> rtLevelSrc;
+    std::vector<unsigned> rtLevelSerial;
+    UINT rtW = 0, rtH = 0, rtLevels = 0, tmpW = 0, tmpH = 0;
+    D3DFORMAT rtFmt = D3DFMT_UNKNOWN, tmpFmt = D3DFMT_UNKNOWN;
+    bool rtKeyed = false;
+    DWORD rtKey = 0;
+    void DropRt() {
+        if (rtTex) rtTex->Release();
+        if (rtSys) rtSys->Release();
+        if (rtTmp) rtTmp->Release();
+        rtTex = rtSys = rtTmp = nullptr;
+        rtLevelSrc.clear();
+        rtLevelSerial.clear();
+    }
 
     GpuTex(Gpu* g, Surface* s) : gpu(g), top(s) {}
     void Drop() {
@@ -784,9 +885,9 @@ struct GpuTex final : Gpu::Owner {
         cube = nullptr;
         levelBufs.clear();
         levelSerials.clear();
-        if (rtTex) rtTex->Release();
-        rtTex = nullptr;
-        rtSrc = nullptr;
+        DropRt();
+        if (keyPs) keyPs->Release();
+        keyPs = nullptr;
     }
     void ReleaseGpuResources() override { Drop(); }
     void GpuReleased() override {
@@ -824,6 +925,28 @@ static bool CanAutogen(IDirect3DDevice9* d, D3DFORMAT fmt) {
 // One level of a texture's CPU copy into its locked GPU level.
 static void WriteLevel(const Buffer* b, const D3DLOCKED_RECT& lr, const PALETTEENTRY* entries, bool convert, bool keyed,
                        DWORD key) {
+    if (b->fmt.bump && b->fmt.bpp == 24) {
+        // U8V8L8 widened to X8L8V8U8 (the same bytes, a fourth unused): four pixels from three
+        // 32-bit words at a time.
+        for (int y = 0; y < b->h; y++) {
+            const uint8_t* src = b->Row(y);
+            uint32_t* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch);
+            int x = 0;
+            for (; x + 4 <= b->w; x += 4) {
+                uint32_t w[3];
+                memcpy(w, src + size_t(x) * 3, 12);
+                dst[x] = w[0] | 0xFF000000u;
+                dst[x + 1] = (w[0] >> 24) | (w[1] << 8) | 0xFF000000u;
+                dst[x + 2] = (w[1] >> 16) | (w[2] << 16) | 0xFF000000u;
+                dst[x + 3] = (w[2] >> 8) | 0xFF000000u;
+            }
+            for (; x < b->w; x++) {
+                const uint8_t* p = src + size_t(x) * 3;
+                dst[x] = uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | 0xFF000000u;
+            }
+        }
+        return;
+    }
     if (b->fmt.BlockCompressed()) {
         // Rows of 4x4 blocks: the CPU copy's pitch is a quarter of a block row.
         const int rows = (b->h + 3) / 4;
@@ -859,7 +982,7 @@ static IDirect3DCubeTexture9* EnsureCube(Gpu& gpu, IDirect3DDevice9* d, Surface*
     }
     if (!levels) return nullptr;
     const Palette* pal = s->buf->fmt.pal8 ? TexturePalette(s) : nullptr;
-    const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc;
+    const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc && !s->buf->fmt.bump;
     const DWORD key = keyed ? s->ck[kCkSrcBlt].dwColorSpaceLowValue : 0;
     bool all = false;
     if (!t->cube || t->levels != levels || keyed != t->keyed || t->w != s->buf->w || !(t->made == s->buf->fmt)) {
@@ -868,7 +991,7 @@ static IDirect3DCubeTexture9* EnsureCube(Gpu& gpu, IDirect3DDevice9* d, Surface*
         t->convert = native == D3DFMT_UNKNOWN || keyed;
         t->fmt = t->convert ? D3DFMT_A8R8G8B8 : native;
         HRESULT hr = d->CreateCubeTexture(s->buf->w, levels, 0, t->fmt, D3DPOOL_MANAGED, &t->cube, nullptr);
-        if (FAILED(hr) && !t->convert && !s->buf->fmt.fourcc) {
+        if (FAILED(hr) && !t->convert && !s->buf->fmt.fourcc && !s->buf->fmt.bump) {
             t->convert = true;
             t->fmt = D3DFMT_A8R8G8B8;
             hr = d->CreateCubeTexture(s->buf->w, levels, 0, t->fmt, D3DPOOL_MANAGED, &t->cube, nullptr);
@@ -914,7 +1037,159 @@ static IDirect3DCubeTexture9* EnsureCube(Gpu& gpu, IDirect3DDevice9* d, Surface*
     t->palVersion = pal ? pal->version : 0;
     t->keyed = keyed;
     t->key = key;
+    t->shownKeyed = keyed;
     return t->cube;
+}
+
+// ps_2_0: the texel transparent black where its colour, in the texture's own format, is the
+// key (as the CPU path's RowConverter makes it). c0 = each channel's largest value (r, g, b), c3 = minus
+// the key's channels. Each channel quantized as ARGBToPixel rounds: floor(c * max + 0.498).
+// Assembled (psasm) from:
+//   def c2, 0.498, -0.5, 0, 0 / dcl t0 / dcl_2d s0 / mov r1..r3, c2.z / texld r0, t0, s0
+//   r1.xyz = r0 * c0 + c2.x / r2.xy = frc(r1) / r3.x = r1.z, r3.xy = frc(r3), r2.z = r3.x
+//   r1.xyz = abs(r1 - r2 + c3) / r1.x = max(r1.x, r1.y, r1.z) + c2.y
+//   r0 = r1.x >= 0 ? r0 : 0 / oC0 = r0
+// Written to Windows' ps_2_0 rules as the presenter's shaders are (registers set whole
+// first, no negated constants, one constant per instruction, frc on .xy).
+static const DWORD kKeyPs[] = {
+    0xffff0200, 0x0200001f, 0x80000000, 0xb00f0000, 0x0200001f, 0x90000000, 0xa00f0800, 0x05000051, 0xa00f0002,
+    0x3efef9db, 0xbf000000, 0x00000000, 0x00000000, 0x02000001, 0x800f0001, 0xa0aa0002, 0x02000001, 0x800f0002,
+    0xa0aa0002, 0x02000001, 0x800f0003, 0xa0aa0002, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x03000005,
+    0x80070001, 0x80e40000, 0xa0e40000, 0x03000002, 0x80070001, 0x80e40001, 0xa0000002, 0x02000013, 0x80030002,
+    0x80e40001, 0x02000001, 0x80010003, 0x80aa0001, 0x02000013, 0x80030003, 0x80e40003, 0x02000001, 0x80040002,
+    0x80000003, 0x03000002, 0x80070001, 0x80e40001, 0x81e40002, 0x03000002, 0x80070001, 0x80e40001, 0xa0e40003,
+    0x02000023, 0x80070001, 0x80e40001, 0x0300000b, 0x80010001, 0x80000001, 0x80550001, 0x0300000b, 0x80010001,
+    0x80000001, 0x80aa0001, 0x03000002, 0x80010001, 0x80000001, 0xa0550002, 0x04000058, 0x800f0000, 0x80000001,
+    0x80e40000, 0xa0aa0002, 0x02000001, 0x800f0800, 0x80e40000, 0x0000ffff};
+
+// A texture with levels Direct3D drew into, made on the GPU (see GpuTex::rtTex); null when
+// none of its levels is newer on the GPU, or this can't be done here (the CPU copy is used:
+// read back, then uploaded). Palettized textures go through the CPU (the palette is applied
+// there). Gpu lock held.
+static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Surface* const* chain, size_t n,
+                                    const Format& fmt, bool keyed, DWORD key) {
+    auto newest = [](const Buffer* b) { return b->gpu && b->gpu->surf && b->cpuStale && !b->gpuStale; };
+    D3DFORMAT gfmt = D3DFMT_UNKNOWN;
+    for (size_t i = 0; i < n; i++) {
+        const Buffer* b = chain[i]->buf;
+        if (!newest(b)) continue;
+        if (gfmt == D3DFMT_UNKNOWN) gfmt = b->gpu->fmt;
+        else if (b->gpu->fmt != gfmt) return nullptr;  // (levels drawn in different formats)
+    }
+    if (gfmt == D3DFMT_UNKNOWN || fmt.pal8 || fmt.fourcc || fmt.bump) return nullptr;
+    // The texture's format: the render targets', or with a key A8R8G8B8 (alpha for it). The
+    // levels the CPU has newer go up as they are (the render targets' layout is the
+    // texture's) or converted to 32-bit colour.
+    const D3DFORMAT T = keyed ? D3DFMT_A8R8G8B8 : gfmt;
+    const bool cpuConvert = keyed || T != NativeFormat(fmt);
+    if (cpuConvert && T != D3DFMT_A8R8G8B8 && T != D3DFMT_X8R8G8B8) return nullptr;
+    if (keyed && !t->keyPs && FAILED(d->CreatePixelShader(kKeyPs, &t->keyPs))) {
+        t->keyPs = nullptr;
+        return nullptr;
+    }
+    const Buffer* top = chain[0]->buf;
+    if (!t->rtTex || t->rtW != UINT(top->w) || t->rtH != UINT(top->h) || t->rtFmt != T || t->rtLevels != n) {
+        t->DropRt();
+        if (FAILED(d->CreateTexture(top->w, top->h, UINT(n), D3DUSAGE_RENDERTARGET, T, D3DPOOL_DEFAULT, &t->rtTex, nullptr))) {
+            t->rtTex = nullptr;
+            return nullptr;
+        }
+        t->rtW = top->w;
+        t->rtH = top->h;
+        t->rtFmt = T;
+        t->rtLevels = UINT(n);
+    }
+    if (t->rtLevelSrc.size() != n || keyed != t->rtKeyed || key != t->rtKey) {
+        t->rtLevelSrc.assign(n, nullptr);
+        t->rtLevelSerial.assign(n, 0);
+        t->rtKeyed = keyed;
+        t->rtKey = key;
+    }
+    for (size_t i = 0; i < n; i++) {
+        Buffer* b = chain[i]->buf;
+        IDirect3DSurface9* level = nullptr;
+        D3DSURFACE_DESC ld;
+        if (FAILED(t->rtTex->GetLevelDesc(UINT(i), &ld)) || UINT(b->w) != ld.Width || UINT(b->h) != ld.Height ||
+            !(b->fmt == fmt))
+            return nullptr;  // (a level given another size or format since: the CPU path copes)
+        if (newest(b)) {
+            GpuSurf* g = b->gpu;
+            if (t->rtLevelSrc[i] == g && t->rtLevelSerial[i] == g->serial) continue;
+            Resolve(gpu, d, g);
+            if (FAILED(t->rtTex->GetSurfaceLevel(UINT(i), &level))) return nullptr;
+            gpu.CloseScene();  // StretchRect: outside a scene
+            bool ok;
+            if (!keyed) {
+                ok = SUCCEEDED(d->StretchRect(g->surf, nullptr, level, nullptr, D3DTEXF_NONE));
+            } else {
+                // The render target copied into a texture, drawn through the key shader.
+                if (!t->rtTmp || t->tmpW != UINT(b->w) || t->tmpH != UINT(b->h) || t->tmpFmt != g->fmt) {
+                    if (t->rtTmp) t->rtTmp->Release();
+                    if (FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &t->rtTmp,
+                                                nullptr)))
+                        t->rtTmp = nullptr;
+                    t->tmpW = b->w;
+                    t->tmpH = b->h;
+                    t->tmpFmt = g->fmt;
+                }
+                IDirect3DSurface9* tmp = nullptr;
+                ok = t->rtTmp && SUCCEEDED(t->rtTmp->GetSurfaceLevel(0, &tmp)) &&
+                     SUCCEEDED(d->StretchRect(g->surf, nullptr, tmp, nullptr, D3DTEXF_NONE));
+                if (tmp) tmp->Release();
+                if (ok) {
+                    auto bits = [](DWORD mask) { return mask ? float(mask >> __builtin_ctz(mask)) : 0.0f; };
+                    auto chan = [](DWORD v, DWORD mask) { return mask ? -float((v & mask) >> __builtin_ctz(mask)) : 0.0f; };
+                    const float maxes[4] = {bits(fmt.r), bits(fmt.g), bits(fmt.b), 0};
+                    const float minusKey[4] = {chan(key, fmt.r), chan(key, fmt.g), chan(key, fmt.b), 0};
+                    const SavedDeviceState saved(d);
+                    d->SetRenderTarget(0, level);
+                    d->SetDepthStencilSurface(nullptr);
+                    d->SetTexture(0, t->rtTmp);
+                    d->SetPixelShaderConstantF(0, maxes, 1);
+                    d->SetPixelShaderConstantF(3, minusKey, 1);
+                    const RECT all = {0, 0, b->w, b->h};
+                    ok = DrawZQuad(gpu, d, t->keyPs, b->w, b->h, all, b->w, b->h, all, false);
+                    gpu.CloseScene();
+                }
+            }
+            level->Release();
+            if (!ok) return nullptr;
+            t->rtLevelSrc[i] = g;
+            t->rtLevelSerial[i] = g->serial;
+        } else {
+            // A level the CPU has newer (or that nothing drew into): its CPU copy, through a
+            // system-memory texture (what Direct3D drew there merged in first, if both changed).
+            if (b->gpu && b->cpuStale && b->gpu->surf) ReadBack(gpu, d, b->gpu);
+            if (t->rtLevelSrc[i] == b && t->rtLevelSerial[i] == b->cpuSerial) continue;
+            if (!t->rtSys && FAILED(d->CreateTexture(top->w, top->h, UINT(n), 0, T, D3DPOOL_SYSTEMMEM, &t->rtSys, nullptr))) {
+                t->rtSys = nullptr;
+                return nullptr;
+            }
+            D3DLOCKED_RECT lr;
+            if (FAILED(t->rtSys->LockRect(UINT(i), &lr, nullptr, 0))) return nullptr;
+            WriteLevel(b, lr, chain[0]->dd->defaultPalette, cpuConvert, keyed, key);
+            t->rtSys->UnlockRect(UINT(i));
+            IDirect3DSurface9* sys = nullptr;
+            bool ok = SUCCEEDED(t->rtSys->GetSurfaceLevel(UINT(i), &sys)) && SUCCEEDED(t->rtTex->GetSurfaceLevel(UINT(i), &level));
+            gpu.CloseScene();
+            ok = ok && SUCCEEDED(d->UpdateSurface(sys, nullptr, level, nullptr));
+            if (sys) sys->Release();
+            if (level) level->Release();
+            if (!ok) return nullptr;
+            t->rtLevelSrc[i] = b;
+            t->rtLevelSerial[i] = b->cpuSerial;
+        }
+    }
+    static bool loggedKeyed, loggedMip;  // Gpu lock
+    if (keyed && !loggedKeyed) {
+        loggedKeyed = true;
+        DD2D9_LOG("Direct3D: a colour-keyed render-target texture copied on the GPU");
+    }
+    if (n > 1 && !loggedMip) {
+        loggedMip = true;
+        DD2D9_LOG("Direct3D: a mipmapped render-target texture copied on the GPU");
+    }
+    return t->rtTex;
 }
 
 // The texture's GPU copy, uploaded where the CPU copy changed. Gpu lock held.
@@ -935,44 +1210,13 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
     for (Surface* l = s; l && chain.n < 16; l = l->NextMipLevel()) chain.l[chain.n++] = l;
     const Palette* pal = s->buf->fmt.pal8 ? TexturePalette(s) : nullptr;
     // The colour key becomes alpha only while D3DRENDERSTATE_COLORKEYENABLE is on.
-    const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc;
+    const bool keyed = colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc && !s->buf->fmt.bump;
     const DWORD key = keyed ? s->ck[kCkSrcBlt].dwColorSpaceLowValue : 0;
-    // Rendered into by Direct3D and not touched by the CPU since: copied on the GPU. (Mipmapped
-    // or colour-keyed ones go through the CPU copy below.)
-    if (chain.size() == 1 && !keyed) {
-        Buffer* b = s->buf;
-        GpuSurf* g = b->gpu;
-        if (g && g->surf && b->cpuStale && !b->gpuStale) {
-            if (!t->rtTex || t->rtW != UINT(b->w) || t->rtH != UINT(b->h) || t->rtFmt != g->fmt) {
-                if (t->rtTex) t->rtTex->Release();
-                t->rtTex = nullptr;
-                if (FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &t->rtTex,
-                                            nullptr)))
-                    t->rtTex = nullptr;
-                t->rtW = b->w;
-                t->rtH = b->h;
-                t->rtFmt = g->fmt;
-                t->rtSrc = nullptr;
-            }
-            if (t->rtTex) {
-                if (t->rtSrc != g || t->rtSerial != g->serial) {
-                    Resolve(gpu, d, g);
-                    IDirect3DSurface9* level = nullptr;
-                    if (SUCCEEDED(t->rtTex->GetSurfaceLevel(0, &level))) {
-                        gpu.CloseScene();  // StretchRect: outside a scene
-                        if (SUCCEEDED(d->StretchRect(g->surf, nullptr, level, nullptr, D3DTEXF_NONE))) {
-                            t->rtSrc = g;
-                            t->rtSerial = g->serial;
-                        }
-                        level->Release();
-                    }
-                }
-                if (t->rtSrc == g) {
-                    t->levelBufs.assign(chain.size(), nullptr);  // the managed copy is behind now
-                    return t->rtTex;
-                }
-            }
-        }
+    // Levels rendered into by Direct3D and not touched by the CPU since: copied on the GPU.
+    if (IDirect3DTexture9* rt = RtTexture(gpu, d, t, chain.l, chain.n, s->buf->fmt, keyed, key)) {
+        t->levelBufs.assign(chain.size(), nullptr);  // the managed copy is behind now
+        t->shownKeyed = keyed;
+        return rt;
     }
     bool all = false;
     if (!t->tex || t->levels != chain.size() || keyed != t->keyed || t->w != s->buf->w || t->h != s->buf->h ||
@@ -987,7 +1231,7 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
         // block-compressed ones (D3D9 can't), not 1x1.
         HRESULT hr = E_FAIL;
         t->autogen = false;
-        if (g_config.mipmaps && chain.size() == 1 && !keyed && !s->buf->fmt.a && !s->buf->fmt.fourcc &&
+        if (g_config.mipmaps && chain.size() == 1 && !keyed && !s->buf->fmt.a && !s->buf->fmt.fourcc && !s->buf->fmt.bump &&
             (s->buf->w > 1 || s->buf->h > 1) &&
             CanAutogen(d, t->fmt)) {
             hr = d->CreateTexture(s->buf->w, s->buf->h, 0, D3DUSAGE_AUTOGENMIPMAP, t->fmt, D3DPOOL_MANAGED, &t->tex, nullptr);
@@ -1000,7 +1244,7 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
         }
         if (!t->autogen)
             hr = d->CreateTexture(s->buf->w, s->buf->h, UINT(chain.size()), 0, t->fmt, D3DPOOL_MANAGED, &t->tex, nullptr);
-        if (FAILED(hr) && !t->convert && !s->buf->fmt.fourcc) {  // a layout this GPU lacks: convert it
+        if (FAILED(hr) && !t->convert && !s->buf->fmt.fourcc && !s->buf->fmt.bump) {  // a layout this GPU lacks: convert it
             t->autogen = false;
             t->convert = true;
             t->fmt = D3DFMT_A8R8G8B8;
@@ -1046,6 +1290,7 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
     t->palVersion = pal ? pal->version : 0;
     t->keyed = keyed;
     t->key = key;
+    t->shownKeyed = keyed;
     return t->tex;
 }
 
@@ -1125,6 +1370,14 @@ GpuCaps GpuGetCaps() {
             for (int i = 0; i < 5; i++)
                 caps.dxt[i] = SUCCEEDED(
                     d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, disp, 0, D3DRTYPE_TEXTURE, dxt[i]));
+            auto texOk = [&](D3DFORMAT f) {
+                return SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, disp, 0, D3DRTYPE_TEXTURE, f));
+            };
+            // Bump maps only where the GPU also does the bump-mapping operations.
+            const bool bumpOps = (caps.textureOpCaps & (D3DTEXOPCAPS_BUMPENVMAP | D3DTEXOPCAPS_BUMPENVMAPLUMINANCE)) != 0;
+            caps.bumpV8U8 = bumpOps && texOk(D3DFMT_V8U8);
+            caps.bumpL6V5U5 = bumpOps && texOk(D3DFMT_L6V5U5);
+            caps.bumpX8L8V8U8 = bumpOps && texOk(D3DFMT_X8L8V8U8);
             d3d->Release();
         }
         InterlockedExchange(&done, 2);
@@ -1406,7 +1659,7 @@ void GpuContext::Impl::BindTextures() {
     for (DWORD i = 0; i < 8; i++) {
         IDirect3DBaseTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
         dev->SetTexture(i, t);
-        cutoutStage[i] = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->keyed));
+        cutoutStage[i] = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->shownKeyed));
         if (g_config.anisotropy > 1 || g_config.texLinear) {
             if (g_config.anisotropy > 1 && !anisoLimit) {
                 D3DCAPS9 caps = {};
@@ -1756,7 +2009,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                   "tex0 %p %dbpp%s%s bias %g slope %g fog(en %lu v %lu t %lu) | z %.6f..%.6f rhw %g..%g%s",
                   primType, primCount, vertexCount, fvf, rs[7], rs[14], rs[23], rs[27], rs[19], rs[20], rs[15], rs[25], rs[24],
                   static_cast<void*>(t0), t0 ? int(t0->buf->fmt.bpp) : 0, t0 && t0->buf->fmt.a ? " alpha" : "",
-                  t0 && t0->gpuTex && t0->gpuTex->keyed ? " keyed" : "", bias, slope, rs[28], rs[140], rs[35],
+                  t0 && t0->gpuTex && t0->gpuTex->shownKeyed ? " keyed" : "", bias, slope, rs[28], rs[140], rs[35],
                   tl ? zlo : 0.0f, tl ? zhi : 0.0f, tl ? wlo : 0.0f, tl ? whi : 0.0f, flat2d ? " FLAT2D" : "");
     }
     p.gpu.OpenScene();

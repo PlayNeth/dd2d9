@@ -1,5 +1,6 @@
 // Rows of pixels to A8R8G8B8, exactly as PixelToARGB converts one (util.cpp), with SSE2 for
-// the common layouts: 8-bit palettized (a table), 16-bit 565/555/1555/4444 and 32-bit RGB,
+// the common layouts: 8-bit palettized (a table), 16-bit 565/555/1555/4444 and 32-bit RGB
+// (24-bit RGB unkeyed: four pixels from three words),
 // with an optional colour key (keyed pixels become 0, transparent black). Used for textures
 // and render targets on their way to the GPU (gpures.cpp).
 #pragma once
@@ -15,11 +16,12 @@ public:
     void Run(const uint8_t* src, uint32_t* dst, int n) const;
 
 private:
-    enum Kind { kGeneric, kPal8, k16, k32 };
+    enum Kind { kGeneric, kPal8, k16, k24, k32 };
     struct Channel {
         int shift = 0, bits = 0;  // bits 0: absent (alpha: 0xFF)
     };
     void Run16(const uint16_t* src, uint32_t* dst, int n) const;
+    void Run24(const uint8_t* src, uint32_t* dst, int n) const;
     void Run32(const uint32_t* src, uint32_t* dst, int n) const;
     uint32_t One(uint32_t v) const;
 

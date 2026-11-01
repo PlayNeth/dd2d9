@@ -18,6 +18,10 @@ namespace dd2d9 {
 
 namespace {
 std::vector<DDraw*> g_ddraws;  // every DirectDraw object (g_lock), for the GetSurfaceFromDC export
+// The display's hardware palette as the last palette shown on a primary left it (g_lock):
+// what a new DirectDraw object's 8-bit primary without a palette shows too.
+PALETTEENTRY g_hwPalette[256];
+bool g_hwPaletteKept;
 // The DirectDraw object in exclusive mode, if any (g_displayLock): the display mode is
 // its to change and restore, as in ddraw.dll.
 DDraw* g_exclusiveDD = nullptr;
@@ -33,7 +37,12 @@ DDraw::DDraw() {
     wraps_[1] = new DDWrap<2>(this);
     wraps_[2] = new DDWrap<4>(this);
     wraps_[3] = new DDWrap<7>(this);
-    for (int i = 0; i < 256; i++) defaultPalette[i] = {BYTE(i), BYTE(i), BYTE(i), 0};
+    {
+        Guard l;
+        if (g_hwPaletteKept) memcpy(defaultPalette, g_hwPalette, sizeof(defaultPalette));
+        else
+            for (int i = 0; i < 256; i++) defaultPalette[i] = {BYTE(i), BYTE(i), BYTE(i), 0};
+    }
     UpdateRefreshRate();
     QueryPerformanceFrequency(&qpcFreq_);
     QueryPerformanceCounter(&qpcBase_);
@@ -167,6 +176,7 @@ void DDraw::DisplayMode(DWORD* w, DWORD* h, DWORD* bpp) const {
 }
 
 HWND DDraw::PresentWindow() const {
+    if (deviceWnd_ && IsWindowVisible(deviceWnd_)) return deviceWnd_;  // (see UpdateDeviceWindow)
     if (hwnd_ && IsWindow(hwnd_)) return hwnd_;
     if (primary && primary->clipper && primary->clipper->hwnd && IsWindow(primary->clipper->hwnd))
         return primary->clipper->hwnd;
@@ -197,7 +207,7 @@ RECT DDraw::PresentTarget(HWND hwnd) const {
     if (!Exclusive() || display == kDisplayWindow || hwnd != hwnd_) return c;
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+    GetMonitorInfoW(GameMonitor(hwnd), &mi);
     RECT m = mi.rcMonitor;
     MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&m), 2);  // into client coordinates
     RECT t;
@@ -214,7 +224,11 @@ bool DDraw::ImageOnScreen(RECT* image, SIZE* mode) const {
     RECT r = presenter_->FitRect(modeW_, modeH_, UINT(t.right - t.left), UINT(t.bottom - t.top));
     OffsetRect(&r, t.left, t.top);
     MapWindowPoints(hwnd_, nullptr, reinterpret_cast<POINT*>(&r), 2);
-    if (r.left == 0 && r.top == 0 && r.right == LONG(modeW_) && r.bottom == LONG(modeH_)) return false;  // 1:1
+    // 1:1 (the window the mode's size at 0,0: a game sizing it back, before CheckCover covers
+    // the screen again, or a monitor of the mode's size) is translated too: the cursor is kept
+    // on the game's screen, as on a real one of that size. Xuan-Yuan Sword 3 EX draws its
+    // cursor where GetCursorPos says, unclipped: a cursor past 640x480 wrote past its back
+    // buffer (a crash back from Alt+Tab, while its window was 640x480).
     *image = r;
     *mode = SIZE{LONG(modeW_), LONG(modeH_)};
     return true;
@@ -257,19 +271,40 @@ void GameImageChanged() { g_snapDirty.store(true); }
 // desktopbpp=: the colour depth GDI and EnumDisplaySettings report (compat.cpp): the game's
 // display mode's while it has one, else the desktop's as desktopbpp= says. Never waits for
 // g_lock (GDI is called from window procedures): the last answer when another thread has it.
+namespace {
+std::atomic<int> g_shownBpp{0};
+std::atomic<DWORD> g_shownSize{0};  // a display mode of dd2d9's own (EmulatedMode): width << 16 | height
+
+void UpdateShownDisplay() {
+    if (!TryEnterCriticalSection(&g_lock)) return;  // the last answer
+    const DDraw* d = g_exclusiveDD;
+    DWORD w = 0, h = 0, bpp;
+    if (d) d->DisplayMode(&w, &h, &bpp);
+    else bpp = DWORD(g_config.desktopBpp);
+    const bool own = d && d->EmulatedMode() && w && h && w < 0x10000 && h < 0x10000;
+    LeaveCriticalSection(&g_lock);
+    g_shownBpp.store(int(bpp));
+    g_shownSize.store(own ? w << 16 | h : 0);
+    if (g_deferredCount && !LockHeldByMe()) RunDeferred();
+}
+}  // namespace
+
 int ShownDisplayBpp() {
-    static std::atomic<int> last{0};
-    if (TryEnterCriticalSection(&g_lock)) {
-        const DDraw* d = g_exclusiveDD;
-        DWORD w, h, bpp;
-        if (d) d->DisplayMode(&w, &h, &bpp);
-        else bpp = DWORD(g_config.desktopBpp);
-        LeaveCriticalSection(&g_lock);
-        last.store(int(bpp));
-        if (g_deferredCount && !LockHeldByMe()) RunDeferred();
-    }
-    const int b = last.load();
+    UpdateShownDisplay();
+    const int b = g_shownBpp.load();
     return b ? b : g_config.desktopBpp;
+}
+
+// The size of the game's display mode while it is one of dd2d9's own (shown scaled or in a
+// window: the real screen is another size); false otherwise (the real screen is the mode).
+// Never waits for g_lock, as ShownDisplayBpp.
+bool ShownDisplaySize(int* w, int* h) {
+    UpdateShownDisplay();
+    const DWORD v = g_shownSize.load();
+    if (!v) return false;
+    *w = int(v >> 16);
+    *h = int(v & 0xFFFF);
+    return true;
 }
 namespace {
 // GameImageChanged at the end of a scope that moves or resizes the game's window.
@@ -572,6 +607,16 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         DDraw* owner = g_hook.owner;
         if (h == g_hook.hwnd && owner && owner->Exclusive()) return 0;
     }
+    // The game's window in a display mode of dd2d9's own: the mode's size at 0,0, as
+    // GetClientRect and GetSystemMetrics answer it (input.cpp) and as after a real mode switch,
+    // not the monitor's it covers. (Xuan-Yuan Sword 3 EX, told the monitor's size back from
+    // Alt+Tab, made its buffers that size and drew into its 640x480 ones as if they were: a
+    // crash.)
+    if (((msg == WM_SIZE && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED)) || (msg == WM_MOVE && !IsIconic(h))) &&
+        h == g_hook.hwnd) {
+        int mw, mh;
+        if (ShownDisplaySize(&mw, &mh)) lp = msg == WM_SIZE ? MAKELPARAM(mw, mh) : 0;
+    }
     const WNDPROC orig = g_hook.orig;
     const bool unicode = g_hook.unicode;
     if (msg == WM_NCDESTROY && h == g_hook.hwnd) {
@@ -726,6 +771,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         }
         // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
         if (cover && windowChanges && IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);  // a hidden one stays so
+        if (cover) UpdateDeviceWindow();  // hidden
         if (cover) LogFocusThief(thread, GetForegroundWindow());
         return;
     }
@@ -737,6 +783,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // Only now: until the mode is switched back the presenter must not create
         // a device (it would make a windowed one, then replace it right away).
         suspended_ = false;
+        UpdateDeviceWindow();
         GameImageChanged();
         MarkDirty();
     } else if (display != kDisplayWindow && !(coop_ & DDSCL_NOWINDOWCHANGES)) {
@@ -754,8 +801,22 @@ void DDraw::OnDisplayChange() {
     const int display = modeSet_ ? activeDisplay_ : g_config.display;
     if (display == kDisplayWindow) return;
     CoverMonitor(HWND_TOP, SWP_NOACTIVATE);
+    UpdateDeviceWindow();  // (the monitor's new size)
     // As ddraw.dll: the cursor stays on the (possibly resized) screen while in front.
     if (GetForegroundWindow() == hwnd_) ConfineCursor(true);
+}
+
+// The monitor the game's screen is on: with the display really switched, the primary one,
+// whose mode ChangeDisplaySettings changes (ddraw.dll's default device is the primary
+// display: its fullscreen window goes there, wherever it was); a mode of dd2d9's own is shown
+// on the window's monitor. (A game on the second monitor had the first one switched and its
+// picture on the second.)
+HMONITOR DDraw::GameMonitor(HWND h) const {
+    if ((modeSet_ ? activeDisplay_ : g_config.display) == kDisplaySwitch) {
+        const POINT origin = {0, 0};
+        return MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    }
+    return MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY);
 }
 
 // The window covers its monitor in exclusive mode. ddraw.dll leaves the window's style
@@ -767,7 +828,7 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    GetMonitorInfoW(GameMonitor(hwnd_), &mi);
     const RECT m = mi.rcMonitor;
     const LONG style = GetWindowLongW(hwnd_, GWL_STYLE), exStyle = GetWindowLongW(hwnd_, GWL_EXSTYLE);
     RECT r = m;
@@ -775,6 +836,14 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     coverHwnd_ = hwnd_;
     coverSize_ = {r.right - r.left, r.bottom - r.top};  // first: WM_GETMINMAXINFO lets it be this large
     SetWindowPos(hwnd_, insertAfter, r.left, r.top, coverSize_.cx, coverSize_.cy, flags);
+    // Minimized (a game going exclusive again from its own activation, before Windows has
+    // restored the window): its rectangle and client area are the icon's. No region from
+    // them: one worked out at -32000,-32000 hid the whole restored window (FlyingSB after
+    // Alt+Tab: nothing shown). CheckCover covers it again once it is restored.
+    if (IsIconic(hwnd_)) {
+        SetWindowRgn(hwnd_, nullptr, TRUE);
+        return;
+    }
     // A frame other than AdjustWindowRectEx's (a game handling WM_NCCALCSIZE, a menu bar
     // on two lines): corrected by where the client area really is.
     RECT c = {};
@@ -806,7 +875,7 @@ void DDraw::Uncover() {
         GetWindowRect(coverHwnd_, &w);
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
-        GetMonitorInfoW(MonitorFromWindow(coverHwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+        GetMonitorInfoW(GameMonitor(coverHwnd_), &mi);
         const RECT& m = mi.rcMonitor;
         coverSize_ = {};  // first: WM_GETMINMAXINFO back to normal
         // Unless the game has moved or sized it since.
@@ -829,7 +898,7 @@ void DDraw::ConfineCursor(bool on) {
     if (on && hwnd_) {
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
-        GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+        GetMonitorInfoW(GameMonitor(hwnd_), &mi);
         cursorConfined_ = ClipCursor(&mi.rcMonitor) != FALSE;
         // Only the process in front may lock it; a failure leaves things as they were.
         if (!foregroundLocked_) foregroundLocked_ = LockSetForegroundWindow(LSFW_LOCK) != FALSE;
@@ -862,15 +931,21 @@ void DDraw::CheckCover(HWND h, bool moved) {
         return;
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi);
+    GetMonitorInfoW(GameMonitor(h), &mi);
     RECT c = {};
     GetClientRect(h, &c);
     MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&c), 2);
-    if (EqualRect(&c, &mi.rcMonitor)) return;
-    if (moved) {
+    // Covering, and its region showing the monitor (none: made while it was minimized).
+    RECT w = {}, box = {};
+    GetWindowRect(h, &w);
+    const RECT& m = mi.rcMonitor;
+    const RECT want = {m.left - w.left, m.top - w.top, m.right - w.left, m.bottom - w.top};
+    const int region = GetWindowRgnBox(h, &box);
+    const bool regionOk = region == SIMPLEREGION && EqualRect(&box, &want);
+    const bool covers = EqualRect(&c, &mi.rcMonitor) != FALSE;
+    if (covers && regionOk) return;
+    if (moved && !covers) {
         if (!modeSet_ || activeDisplay_ != kDisplayBorderless) return;
-        RECT w = {};
-        GetWindowRect(h, &w);
         const LONG x = mi.rcMonitor.left, y = mi.rcMonitor.top;
         if (w.left > x || w.top > y || w.right < x + LONG(modeW_) || w.bottom < y + LONG(modeH_)) return;  // smaller: windowed
     }
@@ -879,8 +954,8 @@ void DDraw::CheckCover(HWND h, bool moved) {
     if (now - recoverStart_ > 2000) recoverCount_ = 0;
     recoverStart_ = now;
     if (++recoverCount_ > 5) return;
-    DD2D9_LOG("the window no longer covers the screen (client %ld,%ld-%ld,%ld): covering it again", c.left, c.top,
-              c.right, c.bottom);
+    DD2D9_LOG("the window no longer covers the screen (client %ld,%ld-%ld,%ld%s): covering it again", c.left, c.top,
+              c.right, c.bottom, covers ? ", its region not the screen's" : "");
     // Without the game seeing the move: Unreal answers it by sizing its window back to its
     // own idea of fullscreen (after a style change), leaving the taskbar showing.
     quietMove_ = true;
@@ -936,7 +1011,7 @@ void DDraw::ApplyWindow() {
     LONG exStyle = GetWindowLongW(hwnd_, GWL_EXSTYLE);
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    GetMonitorInfoW(GameMonitor(hwnd_), &mi);
     if (display == kDisplayWindow) {
         Uncover();
         RECT r = {0, 0, LONG(modeW_), LONG(modeH_)};
@@ -1124,7 +1199,30 @@ HRESULT DDraw::Initialize(GUID*) {
 
 // DDSCL_CREATEDEVICEWINDOW's window, as ddraw.dll registers and makes it: WM_CREATE keeps the
 // focus window (its extra bytes), WM_SETFOCUS passes the focus there, no cursor over it.
+// Unlike ddraw.dll's, mouse messages go on to the focus window (in its client coordinates;
+// the wheel's are the screen's already): the game handles them there, as it does when it
+// covers the screen itself.
 static LRESULT CALLBACK DeviceWndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) {
+        const HWND focus = reinterpret_cast<HWND>(GetWindowLongPtrA(w, 0));
+        if (IsWindow(focus)) {
+            // This class takes double-clicks; a focus window's without CS_DBLCLKS gets the
+            // second click as a plain one, as its own clicks come.
+            if (!(GetClassLongPtrA(focus, GCL_STYLE) & CS_DBLCLKS)) {
+                if (msg == WM_LBUTTONDBLCLK) msg = WM_LBUTTONDOWN;
+                else if (msg == WM_RBUTTONDBLCLK) msg = WM_RBUTTONDOWN;
+                else if (msg == WM_MBUTTONDBLCLK) msg = WM_MBUTTONDOWN;
+                else if (msg == WM_XBUTTONDBLCLK) msg = WM_XBUTTONDOWN;
+            }
+            if (msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL) {
+                POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                MapWindowPoints(w, focus, &pt, 1);
+                lp = MAKELPARAM(pt.x, pt.y);
+            }
+            PostMessageA(focus, msg, wp, lp);
+            return 0;
+        }
+    }
     if (msg == WM_CREATE) {
         SetWindowLongPtrA(w, 0, LONG_PTR(reinterpret_cast<CREATESTRUCTA*>(lp)->lpCreateParams));
     } else if (msg == WM_SETFOCUS) {
@@ -1154,13 +1252,42 @@ static HWND CreateDeviceWindow(HWND focus) {
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(MonitorFromWindow(focus, MONITOR_DEFAULTTOPRIMARY), &mi);
     const RECT& r = mi.rcMonitor;
-    // ddraw.dll's style is WS_POPUP | WS_VISIBLE (see SetCooperativeLevel: kept hidden here).
+    // ddraw.dll's style is WS_POPUP | WS_VISIBLE; shown here by UpdateDeviceWindow.
     return CreateWindowExA(0, kClass, kClass, WS_POPUP, r.left, r.top, r.right - r.left, r.bottom - r.top, focus,
                            nullptr, self, focus);
 }
 
+// The device window is where the picture goes in exclusive mode (see PresentWindow): shown
+// over the monitor, as ddraw.dll's covers it, while the game is in front and the display
+// covers the screen (switch or borderless); hidden otherwise (in the background, out of
+// exclusive mode, display=window: there the focus window shows it). g_displayLock held.
+void DDraw::UpdateDeviceWindow() {
+    if (!deviceWnd_ || !IsWindow(deviceWnd_)) return;
+    const int display = modeSet_ ? activeDisplay_ : g_config.display;
+    const bool show = Exclusive() && !suspended_ && display != kDisplayWindow;
+    if (show) {
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(GameMonitor(hwnd_ ? hwnd_ : deviceWnd_), &mi);
+        const RECT& m = mi.rcMonitor;
+        SetWindowPos(deviceWnd_, HWND_TOPMOST, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    } else if (IsWindowVisible(deviceWnd_)) {
+        ShowWindow(deviceWnd_, SW_HIDE);
+    }
+    GameImageChanged();
+    MarkDirty();
+}
+
 void DDraw::DestroyDeviceWindow() {
-    if (deviceWnd_ && IsWindow(deviceWnd_)) DestroyWindow(deviceWnd_);
+    if (deviceWnd_ && IsWindow(deviceWnd_)) {
+        // Hidden at once from any thread; destroyed by its own (DestroyWindow fails from
+        // another: WM_CLOSE asks it to).
+        SetWindowPos(deviceWnd_, nullptr, 0, 0, 0, 0,
+                     SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+        if (GetWindowThreadProcessId(deviceWnd_, nullptr) == GetCurrentThreadId()) DestroyWindow(deviceWnd_);
+        else PostMessageA(deviceWnd_, WM_CLOSE, 0, 0);
+    }
     if (lclWnd_ == deviceWnd_) lclWnd_ = nullptr;
     deviceWnd_ = nullptr;
 }
@@ -1217,7 +1344,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
         if (version == 1) ddraw1Coop_ = true;
         Guard l;
         focusWnd_ = hwnd;  // (NULL too)
-        if (hwnd) hwnd_ = hwnd;
+        if (hwnd) {
+            hwnd_ = hwnd;
+            gpu_->SetWindowHint(hwnd);
+        }
         GameImageChanged();
         return DD_OK;
     }
@@ -1238,10 +1368,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     if (prev && !prev->suspended_ && prev->hwnd_ && IsWindow(prev->hwnd_) && IsWindowVisible(prev->hwnd_))
         return DDERR_EXCLUSIVEMODEALREADYSET;
     // DDSCL_CREATEDEVICEWINDOW: ddraw.dll's "DirectDrawDeviceWnd", a popup over the monitor
-    // owned by the focus window, handing it the keyboard focus. dd2d9 keeps presenting into
-    // the focus window, so the device window stays hidden (shown, its black would cover
-    // the picture). The next call with another window (NORMAL with none too) or the object's
-    // release destroys it.
+    // owned by the focus window, handing it the keyboard focus. The picture goes there while it
+    // is shown (UpdateDeviceWindow); the focus window gets the rest of dd2d9's window handling.
+    // The next call with another window (NORMAL with none too) or the object's release
+    // destroys it.
     if (create) {
         if (flags & DDSCL_SETFOCUSWINDOW) {
             focusWnd_ = hwnd;
@@ -1322,13 +1452,17 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     {
         Guard l;
         coop_ = flags;
-        if (hwnd) hwnd_ = hwnd;
+        if (hwnd) {
+            hwnd_ = hwnd;
+            gpu_->SetWindowHint(hwnd);
+        }
         if (restore) modeSet_ = false;
         GameImageChanged();
         ApplyGamma();
     }
     if (Exclusive()) HookWindow();
     ApplyWindow();
+    UpdateDeviceWindow();
     // After the window is set up, as ddraw.dll: the activation (WM_ACTIVATEAPP, see
     // OnActivate) then makes it topmost.
     // From another thread than the window's, without waiting for it: its WM_ACTIVATEAPP
@@ -1377,6 +1511,7 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
     }
     if (Exclusive()) {
         ApplyWindow();
+        UpdateDeviceWindow();
     } else if (g_config.display == kDisplaySwitch && !SwitchMode()) {
         // ddraw.dll changes the display mode in normal mode too (the window stays as it is).
         DD2D9_LOG("display mode %lux%lu not available: it stays virtual", w, h);
@@ -1456,6 +1591,8 @@ void DDraw::PollDisplayChange() {
 // mode needs; dd2d9's surfaces need none. Nerf ArenaBlast (Unreal) quits with "Failed
 // blt" when a texture upload finds them lost. Read without a lock, as InOwnMode.
 bool DDraw::EmulatedMode() const { return Exclusive() && modeSet_ && !switched_; }
+
+bool DDraw::KeepsSurfacesOnFocus() const { return EmulatedMode() && g_config.display != kDisplaySwitch; }
 
 bool DDraw::OtherExclusive() const {
     const DDraw* x = g_exclusiveDD;
@@ -1546,10 +1683,17 @@ void DDraw::UpdateLostSurfaces() {
     // deliberate difference; display mode changes leave nothing drawable, as in ddraw.dll.
     const bool focusOnly = focusLossOnly_;
     focusLossOnly_ = false;
+    // Shown in a window (window, borderless) the display never left the game's mode: back in
+    // front, nothing is lost (the background only made them report it). Need for Speed: High
+    // Stakes never restores its flip chain after Alt+Tab: every Flip failed and it quit. A
+    // deliberate difference from ddraw.dll, whose switched display did lose them (as
+    // display=switch does, even where dd2d9 can't switch to the mode and shows it scaled).
+    const bool keep = focusOnly && KeepsSurfacesOnFocus();
     for (Surface* s : surfaces) {
-        s->lost = s->CanBeLost();
+        s->lost = s->CanBeLost() && !keep;
         s->drawableLost = s->lost && focusOnly && !s->InPrimaryChain();
     }
+    if (keep) DD2D9_LOG("back in front in dd2d9's own display mode: the surfaces kept");
     InterlockedCompareExchange(&deviceState_, kDevOk, kDevNotRestored);
 }
 
@@ -1682,7 +1826,7 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL | DDCAPS_BLTSTRETCH | DDCAPS_COLORKEY | DDCAPS_PALETTE |
                DDCAPS_CANBLTSYSMEM | DDCAPS_BLTDEPTHFILL | DDCAPS_CANCLIP | DDCAPS_CANCLIPSTRETCHED |
                DDCAPS_BLTFOURCC;  // (GetFourCCCodes' formats: converted by Blt)
-    c.dwNumFourCCCodes = 7;  // as GetFourCCCodes lists them (wrappers.h)
+    c.dwNumFourCCCodes = 8;  // as GetFourCCCodes lists them (wrappers.h)
     c.dwCaps2 = DDCAPS2_WIDESURFACES | DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_CANRENDERWINDOWED |
                 DDCAPS2_PRIMARYGAMMA | DDCAPS2_FLIPNOVSYNC | DDCAPS2_FLIPINTERVAL | DDCAPS2_CERTIFIED;
     c.dwCKeyCaps = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT;  // no key ranges (see SetColorKey)
@@ -1926,6 +2070,20 @@ HRESULT DDraw::GetSurfaceFromDC(HDC dc, void** out, int version) {
     return DDERR_NOTFOUND;
 }
 
+void DDraw::KeepHardwarePalette(const PALETTEENTRY* entries) {
+    memcpy(defaultPalette, entries, sizeof(defaultPalette));
+    memcpy(g_hwPalette, entries, sizeof(g_hwPalette));
+    g_hwPaletteKept = true;
+}
+
+bool PresentsOnWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    Guard l;
+    for (DDraw* d : g_ddraws)
+        if (d->primary && d->PresentWindow() == hwnd) return true;
+    return false;
+}
+
 // The GetSurfaceFromDC export: any DirectDraw object's surface, as IDirectDrawSurface.
 HRESULT DDraw::FindSurfaceFromDC(HDC dc, void** out, HDC* deviceDC) {
     if (!out) return E_INVALIDARG;
@@ -2114,6 +2272,8 @@ HRESULT DDraw::DuplicateSurface(void* src, void** out, int ddVersion) {
     n->modeW = s->modeW;
     n->modeH = s->modeH;
     n->modeBpp = s->modeBpp;
+    vidMemUsed -= n->vidMemBytes;  // the memory is the source's: counted once
+    n->vidMemBytes = 0;
     n->AddRef(Surface::SlotFor(version));
     n->ddVersion = ddVersion;
     *out = n->Iface(version);
@@ -2319,6 +2479,8 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
             return DDERR_INVALIDPIXELFORMAT;
         }
         if (f.BlockCompressed() && ((in.dwWidth | in.dwHeight) & 3)) return DDERR_INVALIDPARAMS;
+        // Planar video (YV12, I420): offscreen and overlay surfaces only (no texture format lists it).
+        if (f.Planar() && (C & (DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER))) return DDERR_INVALIDPIXELFORMAT;
     }
     // Color keys, as SetColorKey takes them: no ranges, overlay keys only while overlays are offered.
     static const DWORD kCkFlags[4] = {DDSD_CKDESTOVERLAY, DDSD_CKDESTBLT, DDSD_CKSRCOVERLAY, DDSD_CKSRCBLT};
@@ -2336,12 +2498,12 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
     if ((C2 & DDSCAPS2_CUBEMAP) &&
         (ddVersion != 7 || in.dwWidth != in.dwHeight || !PowerOfTwo(in.dwWidth) || (F & DDSD_BACKBUFFERCOUNT)))
         return DDERR_INVALIDPARAMS;
-    // Overlays: offered in video memory (overlay.cpp), uncompressed or YUY2 / UYVY.
+    // Overlays: offered in video memory (overlay.cpp): RGB, palettized, YUY2, UYVY, YV12, I420.
     if (C & DDSCAPS_OVERLAY) {
         if (!overlays || (C & DDSCAPS_SYSTEMMEMORY)) return DDERR_NOOVERLAYHW;
         if (F & DDSD_PIXELFORMAT) {
             Format f;
-            if (Format::FromDDPF(pf, &f) && f.BlockCompressed()) return DDERR_INVALIDPIXELFORMAT;
+            if (Format::FromDDPF(pf, &f) && (f.BlockCompressed() || f.bump)) return DDERR_INVALIDPIXELFORMAT;
         }
     }
     // What this implementation doesn't have.

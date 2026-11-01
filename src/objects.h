@@ -19,11 +19,12 @@ struct GpuSurf;
 struct GpuTex;
 class Palette;
 class Presenter;
+class OverlayGpu;
 class Gpu;
 
 // ---------------------------------------------------------------- Buffer
-// Pixel memory of a surface. RGB / palettized buffers are GDI DIB sections so
-// GetDC() works natively; Flip() swaps buffers between the surfaces of a chain.
+// Pixel memory of a surface (16-byte aligned, or the game's own with DDSD_LPSURFACE); GetDC
+// makes a DC over it. Flip() swaps buffers between the surfaces of a chain.
 inline unsigned NextCpuSerial() {
     static volatile LONG n;
     return unsigned(InterlockedIncrement(&n));
@@ -36,7 +37,8 @@ struct Buffer {
     Format fmt;
     uint8_t* bits = nullptr;
     HDC dc = nullptr;  // from GetDC, kept until the buffer goes
-    bool ownsMemory = false;  // allocated here (_aligned_malloc)
+    bool ownsMemory = false;  // allocated here (_aligned_malloc of base, bits inside it)
+    uint8_t* base = nullptr;
     const Palette* dcPal = nullptr;  // palette last loaded into the DIB color table
     DWORD dcPalVersion = 0;
 
@@ -392,6 +394,22 @@ private:
         PALETTEENTRY pal[256];  // 8-bit formats
     };
     void Convert(const Snapshot& s, const RECT& area, void* bits, int pitch);
+    // A windowed program's window as GDI draws it (WM_PRINT, refreshed every 0.1 s at most),
+    // for overlays' destination keys (overlay.cpp). Presenter thread, no lock held.
+    bool CaptureGdi(HWND hwnd, LONG w, LONG h);
+    std::vector<uint32_t> gdi_;
+    HWND gdiWnd_ = nullptr;
+    LONG gdiW_ = 0, gdiH_ = 0;
+    double gdiTime_ = -1;
+    // The DC the window paints into, kept: a WM_PRINT that timed out is still handled later.
+    HDC gdiDc_ = nullptr;
+    HBITMAP gdiBm_ = nullptr;
+    HGDIOBJ gdiOld_ = nullptr;
+    void* gdiBits_ = nullptr;
+    LONG gdiDcW_ = 0, gdiDcH_ = 0;
+    bool gdiPending_ = false;  // the last WM_PRINT timed out (its DC may still be painted)
+    unsigned gdiSeq_ = 0;      // counts captures (the GPU path uploads a new one)
+    OverlayGpu* ovGpu_ = nullptr;
     void BuildLut16(const Format& f);
     void CountPresent(double lockSeconds, double convertSeconds, double fraction);
 
@@ -514,6 +532,11 @@ public:
         InterlockedExchange(&dirtyAll_, 1);
         if (presenter_) presenter_->MarkDirty();
     }
+    // An overlay over the primary changed (overlay.cpp): presented again, the primary's own
+    // pixels unchanged (the presenter lays overlays over the frame as it presents). Any thread.
+    void MarkOverlayDirty() {
+        if (presenter_) presenter_->MarkDirty();
+    }
     // Part of the primary surface changed. Called with g_lock held.
     void MarkDirtyRect(const RECT& r) {
         if (r.right <= r.left || r.bottom <= r.top) return;
@@ -567,6 +590,10 @@ public:
     void NoteDisplayMode();
     void PollDisplayChange();     // the display mode changed behind dd2d9's back: surfaces lost
     bool InOwnMode() const;  // the display is in the mode this object set and switched to
+    // Back in front after Alt+Tab, the surfaces aren't lost: the game's mode is shown in a
+    // window (window, borderless display), the display never left it (see UpdateLostSurfaces).
+    bool KeepsSurfacesOnFocus() const;
+    HMONITOR GameMonitor(HWND h) const;  // where the game's screen is (see ddraw.cpp)
     bool EmulatedMode() const;  // exclusive, in a mode set but not switched to (scaled or windowed)
     bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
     bool QuietMove() const { return quietMove_; }  // CheckCover's move: hidden from the game
@@ -577,7 +604,13 @@ public:
 
     Surface* primary = nullptr;
     std::vector<Surface*> surfaces;
+    std::vector<Surface*> detached;  // outlived their complex surface (Surface::Detach): not listed
+    // What an 8-bit primary without a palette shows (and 8-bit surfaces without one convert
+    // with): the display's hardware palette, as the last palette shown on a primary left it
+    // (a game that set one, then made its primary again without, still showed those
+    // colours); a grey ramp until any was.
     PALETTEENTRY defaultPalette[256];
+    void KeepHardwarePalette(const PALETTEENTRY* entries);  // g_lock held
     void* d3d7 = nullptr;       // dd2d9's own Direct3D 7 object (d3d7.cpp), while it lives
     void* d3dLegacy = nullptr;  // dd2d9's own Direct3D 3-6 object (d3d6obj.cpp), while it lives
     bool dd7 = false;           // made by DirectDrawCreateEx (ddraw.dll's DDRAWILCL_DIRECTDRAW7)
@@ -627,6 +660,7 @@ private:
     HWND focusWnd_ = nullptr;
     HWND deviceWnd_ = nullptr;
     void DestroyDeviceWindow();
+    void UpdateDeviceWindow();
     DWORD coop_ = 0;
     bool modeSet_ = false;
     DWORD modeW_ = 0, modeH_ = 0, modeBpp_ = 0, modeRefresh_ = 0;
@@ -661,9 +695,7 @@ private:
 };
 
 // Overlays (overlay.cpp). Offered (DDCAPS_OVERLAY reported, overlay surfaces made) with
-// videooverlay=on to a DirectDraw object in exclusive mode only. A windowed program's screen
-// is the desktop, where it paints the destination key with GDI, which dd2d9's primary never
-// sees (the overlay would stay hidden): without overlays it blits instead, as before 1.1.0.
+// videooverlay=on.
 bool OverlaysOffered(const DDraw* dd);
 // Every overlay surface of the process, front to back, as ddraw.dll keeps the device's
 // z-order list (g_lock). A new overlay goes in front.
@@ -672,11 +704,34 @@ std::vector<Surface*>& OverlayZOrder();
 // taken under g_lock (buffers referenced), drawn without it into the frame converted from
 // the primary (`frame`: X8R8G8B8, the primary's area `area`, `pitch` pixels a row);
 // `primaryBits` is the primary's buffer, whose raw pixels destination keys compare.
+// gdi: a windowed program's window as GDI drew it (its key colour, painted there, is what a
+// destination key compares too; a key shown nowhere under an overlay doesn't hide it).
 struct OverlayLayer;
+struct OverlayGdi {
+    const uint32_t* px;  // X8R8G8B8, w a row
+    LONG w, h;
+    LONG left, top;      // where it lies in the primary's coordinates
+};
 void TakeOverlays(const Surface* primary, std::vector<OverlayLayer*>* out);
+bool OverlaysKeyedOnDest(const std::vector<OverlayLayer*>& layers);
 void DrawOverlays(const std::vector<OverlayLayer*>& layers, const Buffer* primaryBits, const RECT& area,
-                  uint32_t* frame, size_t pitch);
+                  uint32_t* frame, size_t pitch, const OverlayGdi* gdi);
 void DropOverlays(std::vector<OverlayLayer*>* layers);
+// The GPU path (the presenter's): the overlays drawn into the back buffer over the frame,
+// each uploaded when its pixels change. PrepareOverlays (no lock) decodes what changed and,
+// with `gdi`, decides windowed keys shown nowhere; DrawOverlaysGpu (Gpu lock) draws them over
+// `dst` of `bb`, where the primary's `src` was drawn; `keySrc`'s `keyRect` is that frame as
+// converted (for destination keys; `keyGamma`: the gamma ramp it was converted with, or
+// null). false: no pixel shaders, the CPU path from now on.
+OverlayGpu* NewOverlayGpu();
+void DeleteOverlayGpu(OverlayGpu* g);
+void ReleaseOverlayGpu(OverlayGpu* g);  // its D3D9 resources (Gpu lock)
+bool OverlayGpuUsable(const OverlayGpu* g);
+void PrepareOverlays(OverlayGpu* g, const std::vector<OverlayLayer*>& layers, const Buffer* keyPrimary,
+                     const RECT& area, const OverlayGdi* gdi);
+bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::vector<OverlayLayer*>& layers,
+                     IDirect3DSurface9* bb, const RECT& src, const RECT& dst, IDirect3DSurface9* keySrc,
+                     const RECT& keyRect, const OverlayGdi* gdi, unsigned gdiSeq, const uint8_t (*keyGamma)[256]);
 
 // A cube map's face (DDSCAPS2_CUBEMAP_POSITIVEX ... NEGATIVEZ) under its root: the root, or the
 // member with that face's caps that isn't a mip level; null if there is none.

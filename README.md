@@ -65,7 +65,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **Surfaces in system memory,** laid out as `ddraw.dll` lays them out. `Lock` gives a direct pointer, and `GetDC` puts a GDI device context right on that memory, so games that draw text with GDI work.
 - **A software blitter for all 2D:** colour fills, raster ops, stretching, mirroring, source and destination colour keys, overlapping copies, and conversion between 8, 16, 24 and 32-bit formats (to 8 bits, the nearest palette entry). Colour-keyed copies (sprites) use SSE2.
 - **Flip chains** swap memory between surfaces, as the hardware did, including chains games put together themselves.
-- **Presenting:** a thread of its own owns the Direct3D 9 device. It converts only the changed part of the image (applying the palette and the gamma ramp), scales it into the game's window and presents it, without holding up the game.
+- **Presenting:** a thread of its own owns the Direct3D 9 device. It converts only the changed part of the image (applying the palette and the gamma ramp), scales it into the game's window and presents it, without holding up the game. Frames go out through the device's own `Present`, so overlay and capture tools (RivaTuner, Afterburner) show and record them, 2D games included.
 - **V-sync as the game asks:** `Flip` waits for its frame unless the game passes `DDFLIP_NOVSYNC`. `WaitForVerticalBlank`, `GetScanLine` and `GetVerticalBlankStatus` run on a virtual vblank timer.
 
 ### Display modes and windows
@@ -74,9 +74,9 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **Alt+Tab as in `ddraw.dll`:** losing focus restores the desktop and minimizes the game, and coming back sets it up again. The screensaver and monitor power-off are blocked while the game is in front.
 - **Lost surfaces as in `ddraw.dll`:** mode changes and focus loss make surfaces lost until the game restores them, as games expect. Unlike on real hardware, their contents survive.
 - **Several DirectDraw objects:** a second one taking exclusive mode takes it over from the first, for games that recreate their DirectDraw object without releasing the old one.
-- **The mouse follows the game's mode** when it's shown scaled or in a window: the game sees its mode's coordinates, with its window as the screen, as after a real mode switch. `mouse=raw` turns this off.
+- **The mouse follows the game's mode** when it's shown scaled or in a window: the game sees its mode's coordinates, with its window as the screen, as after a real mode switch, and the cursor never leaves that screen. `mouse=raw` turns this off (a game that draws its own cursor where `GetCursorPos` says, unclipped, can then write past its buffers: Xuan-Yuan Sword 3 EX crashes). The window's size messages and GDI's screen size are the mode's whatever the setting.
 - **Windowed games** get a desktop-sized primary surface, and the part under their window is shown.
-- **Overlays in exclusive mode:** overlay surfaces (RGB, YUY2 or UYVY) are laid over the primary as it's presented, as the hardware showed them without touching its pixels: stretched or shrunk, mirrored, behind a destination colour key, with a source key, in their z-order. `UpdateOverlay`, the position and z-order methods and overlay flip chains follow `ddraw.dll`'s checks. Windowed programs are told there's no overlay hardware and blit instead. `videooverlay=off` reports none in exclusive mode either.
+- **Overlays:** overlay surfaces (RGB, YUY2, UYVY or YV12) are laid over the primary as it's presented, as the hardware showed them without touching its pixels: stretched or shrunk, mirrored, behind a destination colour key, with a source key, in their z-order. `UpdateOverlay`, the position and z-order methods and overlay flip chains follow `ddraw.dll`'s checks. A windowed program paints the destination key into its window with GDI, so dd2d9 also looks for the key in what that window draws; in a window, only the part of an overlay over the program's own window shows. `videooverlay=off` reports no overlay hardware.
 
 ### Direct3D
 
@@ -85,7 +85,9 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **2D over 3D works:** textures, render targets and Z buffers get a GPU copy, and what Direct3D drew is read back before DirectDraw touches the pixels, so HUDs and menus drawn over a 3D frame show.
 - **Z buffers can be locked and blitted** by DirectDraw like any surface, where the GPU samples `INTZ` depth textures (nearly all do, DXVK too), antialiasing is off and `zaccess` isn't `off`. Each lock waits for the GPU and copies the buffer back; a lock of at most 64×64 pixels (a lens flare's occlusion test) copies only its rectangle.
 - **Cube maps** become Direct3D 9 cube textures, their faces drawn into read back as other render targets are.
-- **Clip status and picking:** Direct3D 7's `GetClipStatus` follows what's drawn (the clip codes of untransformed vertices, and their extents with `D3DRENDERSTATE_EXTENTS`). Direct3D 3–6's `Pick` finds the triangles under the point with their depth, `D3DOP_SPAN` is drawn (as points, as XP's driver path did), and Ramp devices light in shades of the material's colour, as the monochromatic Ramp model did.
+- **Bump maps** (`DDPF_BUMPDUDV`: U8V8, U5V5L6, U8V8L8) are listed and drawn where the GPU has environment-mapped bump mapping.
+- **Textures Direct3D drew into** are copied on the GPU when used, mipmapped or colour-keyed ones too (the key made transparent by a pixel shader); palettized ones go through the CPU.
+- **Clip status and picking:** Direct3D 7's `GetClipStatus` follows what's drawn (the clip codes of untransformed vertices, with vertex blending and the user clip planes, and their extents with `D3DRENDERSTATE_EXTENTS`). Direct3D 3–6's `Pick` finds the triangles under the point with their depth (the visible part of one the clip volume cuts), `D3DOP_SPAN` is drawn (as points, as XP's driver path did), and Ramp devices light in shades of the material's colour, as the monochromatic Ramp model did.
 - **What Direct3D 9 lacks is emulated:** 8-bit palettized textures, and the software devices rendering to 8-bit surfaces as XP's RGB and Ramp rasterizers did.
 - **The gamma ramp** applies to 3D frames too.
 
@@ -105,6 +107,8 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **Fullscreen windows:** dd2d9 keeps the window's style, as `ddraw.dll` does, but presents into the client area, so it makes the window slightly larger than the screen with its frame just off it.
 - **8-bit to RGB blits use the palette** (`ddraw.dll` copies the index as grey).
 - **`display=window` doesn't lose surfaces on focus loss:** the game keeps running.
+- **`display=borderless` (and `window`) don't lose surfaces across Alt+Tab:** they report lost in the background, but back in front nothing is lost, as the display never left the game's mode (`display=switch` still loses them, as `ddraw.dll` did). Need for Speed: High Stakes never restores its flip chain and quit at the first failed Flip.
+- **Surface memory has slack around it:** games that clip sprites loosely write a few rows past the bottom or above the top of their buffers, which XP's video memory and heap took without a crash.
 - **Back from Alt+Tab, surfaces outside the primary's flip chain can still be drawn with.** They report lost as in `ddraw.dll`, but keep their pixels, so games that don't restore all of theirs keep working (Captain Claw). In the background, lost surfaces can still be locked, for the same game.
 - **Surfaces of a complex surface that outlive it stay usable** (Jazz Jackrabbit 2 keeps drawing to its old back buffer).
 - **No reference leak** when a DirectDraw 1 flip chain shrinks (`ddraw.dll` leaks one).
@@ -115,13 +119,12 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 ### Not implemented (yet)
 
 - **`BltBatch`** checks its arguments and fails with `DDERR_UNSUPPORTED`, as in `ddraw.dll`.
-- **FourCC surfaces** are limited to DXT1–5, YUY2 and UYVY (what `GetFourCCCodes` lists). They blit to and from any surface through a decoding to 32-bit colour, encoded again when written (YUY2 and UYVY as BT.601 video levels); their colour keys are compared as the colour they decode to.
-- **Overlays** only in exclusive mode; no colour-key ranges, alpha, bob or interleaving, and no video ports.
-- **`DDSCL_CREATEDEVICEWINDOW`** makes its `DirectDrawDeviceWnd` window, but hidden: the picture still goes to the focus window.
+- **FourCC surfaces** are limited to DXT1–5, YUY2, UYVY and YV12 (what `GetFourCCCodes` lists), plus I420/IYUV. They blit to and from any surface through a decoding to 32-bit colour, encoded again when written (YUV as BT.601 video levels); their colour keys are compared as the colour they decode to. YV12 and I420 can't be colour-filled or used as textures.
+- **Overlays** have no colour-key ranges, alpha, bob or interleaving, and no video ports.
+- **`DDSCL_CREATEDEVICEWINDOW`**'s `DirectDrawDeviceWnd` window covers the screen in exclusive mode and shows the picture, as `ddraw.dll`'s; mouse messages over it go on to the focus window (`ddraw.dll` left them with the device window).
 - **Direct3D:**
-  - mipmapped or colour-keyed render-target textures still go through the CPU;
-  - without `INTZ` support, with antialiasing on or with `zaccess=off`, Z buffers can only be cleared by DirectDraw (`DDBLT_DEPTHFILL`), not read or copied;
-  - Direct3D 7's `GetClipStatus` leaves out vertex blending and user clip planes.
+  - palettized textures Direct3D drew into still go through the CPU;
+  - without `INTZ` support, with antialiasing on or with `zaccess=off`, Z buffers can only be cleared by DirectDraw (`DDBLT_DEPTHFILL`), not read or copied.
 
 ---
 
@@ -163,7 +166,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth |
 | `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside what it locked |
 | `zaccess` | `on`: Z buffers can be locked and blitted by DirectDraw where the GPU allows it; `off`: on the GPU only, for a driver that misbehaves with it |
-| `videooverlay` | `on`: overlay surfaces offered in exclusive mode and laid over the primary when shown (windowed programs get none); `off`: no overlay hardware, so games blit instead |
+| `videooverlay` | `on`: overlay surfaces offered and laid over the primary when shown; `off`: no overlay hardware, so games blit instead |
 | `log` | `0`; `1` (info); `2` (every blit, lock, flip, palette change, Direct3D 3 execute buffer, window message and failed call) |
 | `drawtrace` | `off`; `on`: one frame's Direct3D draws logged every 600 scenes (about 10 s) |
 | `logfile` | a path; by default `dd2d9.log` next to the game's exe |
@@ -229,6 +232,8 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 All checks pass under Wine 11 (wined3d, Xvfb).
 
 `tests/wine/` runs Wine's own ddraw tests (expectations confirmed on Windows) against a build and compares the result with a baseline; see `tests/wine/README.md`.
+
+`tests/sdk/` runs the DirectX 7 SDK's samples with dd2d9 and with Wine's own ddraw and compares screenshots of the two (`run.sh`, then `compare.py`; the samples' locations are set in `run.sh`).
 
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small updates to a windowed primary), `ddbench zlock [w h]` (Direct3D frames with small and whole locks of the Z buffer). With `log=1`, the presenter logs every 10 seconds how much of the frame it converted and how long the game waited for it.
 

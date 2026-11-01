@@ -13,7 +13,7 @@ CRITICAL_SECTION g_displayLock;
 
 static FILE* g_logFile = nullptr;
 static CRITICAL_SECTION g_logLock;
-static int g_logLevel = 0;  // effective level (0 when no file could be opened)
+int g_logLevel = 0;  // effective level (0 when no file could be opened)
 
 // Paths are handled as UTF-16 throughout: the ANSI APIs mangle folder names
 // with characters outside the current code page (accents, CJK, ...).
@@ -261,8 +261,9 @@ static bool LoadIni(const std::wstring& path, const std::string& exeName, bool g
             continue;
         }
         std::string val = Trim(line.substr(eq + 1));
-        for (size_t i = 1; i < val.size(); i++)  // "key=value ; comment" (a space or tab before the ;)
-            if (val[i] == ';' && (val[i - 1] == ' ' || val[i - 1] == '\t')) {
+        // "key=value ; comment" (a space or tab before the ;), "key= ; comment" (no value).
+        for (size_t i = 0; i < val.size(); i++)
+            if (val[i] == ';' && (i == 0 || val[i - 1] == ' ' || val[i - 1] == '\t')) {
                 val = Trim(val.substr(0, i));
                 break;
             }
@@ -427,9 +428,11 @@ void RunDeferred() {
         InterlockedDecrement(&g_deferredCount);
         d.fn(d.arg);
     }
+    if (t_deferred && t_deferred->empty()) {  // (a thread's list goes when it has nothing left: none leaks with the thread)
+        delete t_deferred;
+        t_deferred = nullptr;
+    }
 }
-
-int LogLevel() { return g_logLevel; }
 
 // The module whose image (past its headers) contains `addr`, or null.
 static HMODULE ModuleAt(const void* addr) {
@@ -594,6 +597,9 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         case MAKEFOURCC('Y', 'U', 'Y', '2'): case MAKEFOURCC('U', 'Y', 'V', 'Y'):
             f.bpp = 16;  // packed 4:2:2, two bytes per pixel
             break;
+        case MAKEFOURCC('Y', 'V', '1', '2'): case MAKEFOURCC('I', '4', '2', '0'): case MAKEFOURCC('I', 'Y', 'U', 'V'):
+            f.bpp = 12;  // planar 4:2:0 (see Planar)
+            break;
         default:
             return false;
         }
@@ -606,6 +612,18 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         const DWORD all = f.bpp >= 32 ? 0xFFFFFFFFu : ((1u << f.bpp) - 1);
         if ((pf.dwFlags & DDPF_STENCILBUFFER) && pf.dwStencilBitMask) f.a = pf.dwStencilBitMask;
         if (pf.dwZBitMask && (pf.dwZBitMask != all || f.a)) f.r = pf.dwZBitMask;
+    } else if (pf.dwFlags & DDPF_BUMPDUDV) {
+        // The layouts Direct3D 9 has for fixed-function bump mapping (U8V8L8 widened on the
+        // way to the GPU).
+        f.bump = true;
+        f.bpp = pf.dwBumpBitCount;
+        f.r = pf.dwBumpDuBitMask;
+        f.g = pf.dwBumpDvBitMask;
+        f.b = (pf.dwFlags & DDPF_BUMPLUMINANCE) ? pf.dwBumpLuminanceBitMask : 0;
+        const bool u8v8 = f.bpp == 16 && f.r == 0xFF && f.g == 0xFF00 && !f.b;
+        const bool u5v5l6 = f.bpp == 16 && f.r == 0x1F && f.g == 0x3E0 && f.b == 0xFC00;
+        const bool u8v8l8 = f.bpp == 24 && f.r == 0xFF && f.g == 0xFF00 && f.b == 0xFF0000;
+        if (!u8v8 && !u5v5l6 && !u8v8l8) return false;
     } else if (pf.dwFlags & DDPF_PALETTEINDEXED8) {
         f.pal8 = true;
         f.bpp = 8;
@@ -632,6 +650,12 @@ void Format::ToDDPF(DDPIXELFORMAT* pf) const {
     if (fourcc) {
         pf->dwFlags = DDPF_FOURCC;
         pf->dwFourCC = fourCC;
+    } else if (bump) {
+        pf->dwFlags = DDPF_BUMPDUDV | (b ? DDPF_BUMPLUMINANCE : 0);
+        pf->dwBumpBitCount = bpp;
+        pf->dwBumpDuBitMask = r;
+        pf->dwBumpDvBitMask = g;
+        pf->dwBumpLuminanceBitMask = b;
     } else if (zbuf) {
         pf->dwFlags = DDPF_ZBUFFER;
         pf->dwZBufferBitDepth = bpp;

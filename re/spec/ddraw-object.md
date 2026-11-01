@@ -531,7 +531,9 @@ dd2d9 (`DDraw::SetCooperativeLevel`, ddraw.cpp:694-796; window handling `ApplyWi
 434-554):
 - the same validation for flags 1-6;
 - CREATEDEVICEWINDOW makes the DirectDrawDeviceWnd window (same class, window procedure and focus/window
-  bookkeeping: `lclWnd_`, `focusWnd_`, `deviceWnd_`) but hidden; dd2d9 presents into the focus window (1.0.3);
+  bookkeeping: `lclWnd_`, `focusWnd_`, `deviceWnd_`); since 1.2.0 it covers the monitor in exclusive mode while the
+  game is in front (`UpdateDeviceWindow`) and the picture is presented into it; its mouse messages are passed on to
+  the focus window (1.0.3: hidden, the picture in the focus window);
 - DirectDraw 1 mode retention (`ddraw1Coop_`), as XP's V1SCLBEHAVIOUR;
 - non-topmost on leaving;
 - **a second object takes exclusive mode over** (`TakeOverExclusive`, 898);

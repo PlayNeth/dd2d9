@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.1.0"
+#define DD2D9_VERSION "1.2.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -45,11 +45,11 @@ struct Config {
     int msaa = 0;                  // antialiasing: samples per pixel (2-16); 0/1 off
     bool aa2d = false;             // antialias2d=on: 2D draws (HUDs) antialiased too; off: drawn single-sampled
     bool render32 = false;         // 16-bit render targets drawn in 32 bits on the GPU
-    bool depth24 = false;
+    bool depth24 = false;          // 16-bit Z buffers made 24-bit on the GPU
     bool overlays = true;          // videooverlay=on: overlay surfaces offered (emulated: laid over the primary when shown)
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s
     int overlayBias = 1;           // passes laid on drawn surfaces pulled forward N 16-bit depth steps (gpures.cpp)
-    int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too          // 16-bit Z buffers made 24-bit on the GPU
+    int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too
     bool mipmaps = false;          // the GPU makes smaller levels for textures the game gave none
     int anisotropy = 0;            // anisotropic filtering forced on smooth (linear) textures: 2-16; 0/1 off
     bool pixelCenter = false;      // alternatepixelcenter: Direct3D drawn half a pixel up and left
@@ -63,7 +63,8 @@ bool LoadedBehindWrapper();
 
 // ---------------------------------------------------------------- logging
 void LogInit();
-int LogLevel();
+extern int g_logLevel;  // (util.cpp) read at every log and trace site: inline
+inline int LogLevel() { return g_logLevel; }
 void Log(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void LogFlush(bool processExit);
 void CrashLoggerRemove();  // before the DLL is unloaded (FreeLibrary)
@@ -157,19 +158,26 @@ struct Format {
     bool zbuf = false;
     bool fourcc = false;
     DWORD fourCC = 0;
+    // A bump map (DDPF_BUMPDUDV, environment-mapped bump mapping): r = the du mask, g = dv,
+    // b = luminance (0 without). U8V8 and U5V5L6 (16 bits) and U8V8L8 (24).
+    bool bump = false;
 
-    DWORD Bytes() const { return (bpp + 7) / 8; }
+    // Bytes a pixel takes in a row (a planar format: its luma plane's one).
+    DWORD Bytes() const { return bpp == 12 && fourcc ? 1 : (bpp + 7) / 8; }
     DWORD ValueMask() const { return bpp >= 32 ? 0xFFFFFFFFu : ((1u << bpp) - 1); }
     // Bits that take part in color-key comparisons (ignore X / alpha bits).
-    DWORD KeyMask() const { return (pal8 || zbuf || fourcc) ? ValueMask() : (r | g | b); }
+    DWORD KeyMask() const { return (pal8 || zbuf || fourcc || bump) ? ValueMask() : (r | g | b); }
     // DXT1-5: memory is described by a linear size instead of a pitch.
     bool BlockCompressed() const { return fourcc && bpp == 8; }
     // YUY2, UYVY: packed 4:2:2, two pixels in four bytes sharing their chroma.
     bool Yuv() const { return fourcc && bpp == 16; }
+    // YV12, I420 (IYUV): planar 4:2:0, a byte of luma a pixel, then two chroma planes of half
+    // the width and height (half the pitch), each a byte per 2x2 block.
+    bool Planar() const { return fourcc && bpp == 12; }
     bool IsStandardX8R8G8B8() const { return bpp == 32 && r == 0xFF0000 && g == 0xFF00 && b == 0xFF; }
     bool operator==(const Format& o) const {
         return bpp == o.bpp && r == o.r && g == o.g && b == o.b && a == o.a && pal8 == o.pal8 &&
-               zbuf == o.zbuf && fourcc == o.fourcc && fourCC == o.fourCC;
+               zbuf == o.zbuf && fourcc == o.fourcc && fourCC == o.fourCC && bump == o.bump;
     }
     bool operator!=(const Format& o) const { return !(*this == o); }
 
@@ -200,6 +208,8 @@ void InstallMouseHooks();
 // ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
 // sets the affinity too) and again for each new DirectDraw object (DLLs loaded since).
 void InstallCompatHooks(bool inLoaderLock);
+// Whether a DirectDraw object's primary is shown in `hwnd` (ddraw.cpp). Any thread.
+bool PresentsOnWindow(HWND hwnd);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.
 void LimitFrame();
@@ -207,11 +217,12 @@ void LimitFrame();
 bool MouseToGame(POINT* p, bool wait = true);
 bool MouseFromGame(POINT* p);
 // Where the game's display mode is on the real screen, and the window showing it; false
-// when 1:1 (or mapping is off).
+// when the screen is the mode (a real mode switch), or mapping is off.
 bool GameImage(RECT* image, SIZE* mode, HWND* window = nullptr, bool wait = true);
 // Something GameImage's result depends on changed (display state, the game window's place).
 void GameImageChanged();
 // desktopbpp=: the colour depth the game is told the screen has (its mode's, or desktopbpp=).
 int ShownDisplayBpp();
+bool ShownDisplaySize(int* w, int* h);  // a display mode of dd2d9's own (ddraw.cpp)
 
 }  // namespace dd2d9

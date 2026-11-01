@@ -212,8 +212,6 @@ public:
     // IDirectDrawSurface7
     // Managed textures only. The checks come before the pointer is used, as in ddraw.dll
     // (where a NULL one faults into DDERR_INVALIDPARAMS).
-    // Managed textures only. The checks come before the pointer is used, as in ddraw.dll
-    // (where a NULL one faults into DDERR_INVALIDPARAMS).
     STDMETHOD(SetPriority)(DWORD p) { return SetManaged(&s->priority, p); }
     STDMETHOD(GetPriority)(LPDWORD p) { return GetManaged(s->priority, p); }
     STDMETHOD(SetLOD)(DWORD v) { return SetManaged(&s->lod, v); }
@@ -296,7 +294,7 @@ public:
         static const DWORD kCodes[] = {MAKEFOURCC('Y', 'U', 'Y', '2'), MAKEFOURCC('U', 'Y', 'V', 'Y'),
                                        MAKEFOURCC('D', 'X', 'T', '1'), MAKEFOURCC('D', 'X', 'T', '2'),
                                        MAKEFOURCC('D', 'X', 'T', '3'), MAKEFOURCC('D', 'X', 'T', '4'),
-                                       MAKEFOURCC('D', 'X', 'T', '5')};
+                                       MAKEFOURCC('D', 'X', 'T', '5'), MAKEFOURCC('Y', 'V', '1', '2')};
         const DWORD total = DWORD(sizeof(kCodes) / sizeof(kCodes[0]));
         if (codes) {
             *n = *n < total ? *n : total;

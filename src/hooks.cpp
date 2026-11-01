@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <cwchar>
+#include <string>
 #include <vector>
 
 namespace dd2d9 {
@@ -19,6 +20,15 @@ struct Patched {
 };
 SRWLOCK g_hookLock = SRWLOCK_INIT;
 std::vector<Patched>* g_patched;  // g_hookLock
+// The modules a hook table was applied to (g_hookLock): not walked again for it (a game
+// creating DirectDraw objects over and over would have every module's imports walked each
+// time); a module loaded since, or another at the same address, is.
+struct Scanned {
+    const ImportHook* hooks;
+    HMODULE module;
+    std::wstring path;
+};
+std::vector<Scanned>* g_scanned;
 
 bool WriteSlot(void** slot, void* value) {
     DWORD old;
@@ -54,15 +64,19 @@ unsigned PatchModule(HMODULE m, const ImportHook* hooks, size_t n) {
         (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
         return 0;
     unsigned count = 0;
+    std::vector<const ImportHook*> mine;  // the hooks for the DLL a descriptor imports from
     for (auto* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; d++) {
         const char* dllName = reinterpret_cast<const char*>(base + d->Name);
+        mine.clear();
+        for (size_t h = 0; h < n; h++)
+            if (*hooks[h].original && DllIs(dllName, hooks[h].dll)) mine.push_back(&hooks[h]);
+        if (mine.empty()) continue;
         auto* iat = reinterpret_cast<void**>(base + d->FirstThunk);
         const bool named = d->OriginalFirstThunk != 0;
         const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA*>(base + (named ? d->OriginalFirstThunk : d->FirstThunk));
         for (size_t i = 0; names[i].u1.AddressOfData; i++) {
-            for (size_t h = 0; h < n; h++) {
-                const ImportHook& k = hooks[h];
-                if (!*k.original || !DllIs(dllName, k.dll)) continue;
+            for (const ImportHook* hp : mine) {
+                const ImportHook& k = *hp;
                 bool match;
                 if (named && !IMAGE_SNAP_BY_ORDINAL(names[i].u1.Ordinal)) {
                     const auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names[i].u1.AddressOfData);
@@ -87,8 +101,14 @@ unsigned PatchModule(HMODULE m, const ImportHook* hooks, size_t n) {
 bool LeaveAlone(const wchar_t* path) {
     const wchar_t* name = wcsrchr(path, L'\\');
     name = name ? name + 1 : path;
-    wchar_t sys[MAX_PATH], win[MAX_PATH];
-    const UINT ns = GetSystemDirectoryW(sys, MAX_PATH), nw = GetWindowsDirectoryW(win, MAX_PATH);
+    static wchar_t sys[MAX_PATH], win[MAX_PATH];  // (g_hookLock)
+    static UINT ns, nw;
+    static bool known;
+    if (!known) {
+        ns = GetSystemDirectoryW(sys, MAX_PATH);
+        nw = GetWindowsDirectoryW(win, MAX_PATH);
+        known = true;
+    }
     // (A whole folder: C:\Windows matches C:\Windows\..., not C:\WindowsGames\...)
     auto under = [&](const wchar_t* dir, UINT n) {
         return n && n < MAX_PATH && _wcsnicmp(path, dir, n) == 0 && (path[n] == L'\\' || dir[n - 1] == L'\\');
@@ -151,9 +171,14 @@ unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) 
     unsigned count = 0;
     AcquireSRWLockExclusive(&g_hookLock);
     if (!g_patched) g_patched = new std::vector<Patched>;
+    if (!g_scanned) g_scanned = new std::vector<Scanned>;
     for (const auto& [m, path] : modules) {
         if (m == self || LeaveAlone(path.c_str())) continue;
+        bool seen = false;
+        for (const Scanned& sc : *g_scanned) seen |= sc.hooks == hooks && sc.module == m && sc.path == path;
+        if (seen) continue;
         count += PatchModule(m, hooks, n);
+        g_scanned->push_back({hooks, m, path});
     }
     ReleaseSRWLockExclusive(&g_hookLock);
     return count;
@@ -171,6 +196,7 @@ void UnpatchAll() {
         }
         g_patched->clear();
     }
+    if (g_scanned) g_scanned->clear();
     ReleaseSRWLockExclusive(&g_hookLock);
 }
 
