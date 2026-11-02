@@ -25,6 +25,7 @@ dd2d9 is a reimplementation of Windows XP SP3's `ddraw.dll`: DirectDraw 1–7 an
 
 - A **32-bit game** that uses DirectDraw (DirectX 1–7), with or without Direct3D 3–7.
 - **Windows** with Direct3D 9, or **Linux** with Wine or Proton. Under Wine, dd2d9 presents through the prefix's Direct3D 9: Wine's own (wined3d), or DXVK if it's installed in the prefix.
+- **For games that also use 3dfx Glide** (Need for Speed III, High Stakes, NFS4 and others of the Voodoo era): [gl2d9](https://github.com/PlayNeth/gl2d9) for the Glide part. Its README's [Using gl2d9 with dd2d9](https://github.com/PlayNeth/gl2d9#using-gl2d9-with-dd2d9) has the recommended settings for running both.
 
 ## Installing
 
