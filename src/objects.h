@@ -560,9 +560,12 @@ public:
     Presenter* GetPresenter() { return presenter_; }
     Gpu& GetGpu() { return *gpu_; }
     void OnActivate(bool active, DWORD thread);  // WM_ACTIVATEAPP while exclusive (thread: its lParam)
+    void MinimizeGameWindow();  // on focus loss (OnActivate)
     void KeepTopmost();  // the 1.5 s timer while exclusive: topmost again if that was taken away
+    bool WindowChanges() const;  // dd2d9 may move, size and restack the window (see ddraw.cpp)
     void OnDisplayChange();        // WM_DISPLAYCHANGE while exclusive
     void CheckCover(HWND h, bool moved);  // the window's frame changed (or it moved) in exclusive mode; g_displayLock held
+    bool FitCover(HWND h, WINDOWPOS* wp);  // WM_WINDOWPOSCHANGING: the game sizing its covering window back; g_displayLock held
     void OnPrimaryReleased();
     // The primary's gamma ramp while this object is exclusive, as ddraw.dll applies it;
     // the identity otherwise. g_lock held.
@@ -595,6 +598,7 @@ public:
     bool KeepsSurfacesOnFocus() const;
     HMONITOR GameMonitor(HWND h) const;  // where the game's screen is (see ddraw.cpp)
     bool EmulatedMode() const;  // exclusive, in a mode set but not switched to (scaled or windowed)
+    bool ShowsMode() const;     // the display is in its mode, as far as anyone can see (see ddraw.cpp)
     bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
     bool QuietMove() const { return quietMove_; }  // CheckCover's move: hidden from the game
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
@@ -668,6 +672,9 @@ private:
     bool ddraw1Coop_ = false;   // a SetCooperativeLevel through IDirectDraw succeeded (g_displayLock)
     bool suspended_ = false;    // display setup undone because the game lost focus
     bool backgrounded_ = false;  // lost focus at some point during this exclusive mode
+    bool hiddenWithOwner_ = false;  // hidden on focus loss, its owner minimized (MinimizeGameWindow)
+    bool taskbarExChanged_ = false;  // given a taskbar button in the background (MinimizeGameWindow)
+    LONG taskbarEx_ = 0;             // ...its own WS_EX_TOOLWINDOW / NOACTIVATE / APPWINDOW bits
     HWND coverHwnd_ = nullptr;   // window CoverMonitor grew past the screen (and gave a region)
     ULONG expectedMode_ = 0;  // NoteDisplayMode
     DWORD recoverStart_ = 0;       // CheckCover: when its count started
@@ -675,6 +682,8 @@ private:
     bool cursorConfined_ = false;  // ConfineCursor
     bool foregroundLocked_ = false;  // ConfineCursor: LockSetForegroundWindow
     SIZE coverSize_ = {};        // its size, frame included
+    POINT coverPos_ = {};        // and where it is (its frame's top left)
+    bool covering_ = false;      // CoverMonitor moving it (FitCover leaves dd2d9's own moves alone)
     volatile bool quietMove_ = false;  // inside CheckCover's CoverMonitor
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
     bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)

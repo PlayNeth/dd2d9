@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <ddraw.h>
 #include <mmsystem.h>
+#include <digitalv.h>
 #include <vfw.h>
 #include <d3d.h>
 
@@ -40,13 +41,27 @@ static int g_userMsgs, g_screensaverMsgs;
 
 static LPARAM g_lastMouseMove = -1;
 static LPARAM g_lastSize = -1;  // WM_SIZE (restored or maximized)
+static RECT g_lastPaint = {-1, -1, -1, -1};  // WM_PAINT's rectangle (BeginPaint, as Road Rash asks)
+
+// A game that keeps its window the mode's size from its own window procedure: any other size
+// is set back, at once, from WM_SIZE (Hydro Thunder, as its logs show it: 0 = off).
+static int g_keepW, g_keepH;
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_SIZE && g_keepW && (LOWORD(l) != g_keepW || HIWORD(l) != g_keepH))
+        SetWindowPos(h, nullptr, 0, 0, g_keepW, g_keepH, SWP_NOZORDER | SWP_NOACTIVATE);
     if (m == WM_USER + 1) g_userMsgs++;
     if (m == WM_MOUSEMOVE) g_lastMouseMove = l;
     if (m == WM_SIZE && (w == SIZE_RESTORED || w == SIZE_MAXIMIZED)) g_lastSize = l;
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_SCREENSAVE) {
         g_screensaverMsgs++;
+        return 0;
+    }
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        BeginPaint(h, &ps);
+        g_lastPaint = ps.rcPaint;
+        EndPaint(h, &ps);
         return 0;
     }
     if (m == WM_DESTROY) PostQuitMessage(0);
@@ -121,6 +136,23 @@ static HRESULT WINAPI CountModes(LPDDSURFACEDESC2, LPVOID ctx) {
     return DDENUMRET_OK;
 }
 
+struct EnumEntry {
+    bool hasGuid;
+    GUID guid;
+    char name[64];
+    HMONITOR monitor;
+};
+
+static BOOL WINAPI CollectDevice(GUID* guid, LPSTR, LPSTR name, LPVOID ctx, HMONITOR monitor) {
+    EnumEntry e = {};
+    e.hasGuid = guid != nullptr;
+    if (guid) e.guid = *guid;
+    lstrcpynA(e.name, name ? name : "", sizeof(e.name));
+    e.monitor = monitor;
+    static_cast<std::vector<EnumEntry>*>(ctx)->push_back(e);
+    return TRUE;
+}
+
 static int RunUnit() {
     IDirectDraw7* dd = nullptr;
     HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
@@ -128,6 +160,50 @@ static int RunUnit() {
     if (!dd) return 1;
     HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
     CHECK(SUCCEEDED(dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL)), "SetCooperativeLevel(NORMAL)");
+
+    {
+        // DirectDrawEnumerateEx lists the primary display driver, then with
+        // DDENUM_ATTACHEDSECONDARYDEVICES each display by GUID, \\.\DISPLAYn and monitor,
+        // as ddraw.dll does (the Video Mixing Renderer 7 lists its monitors from them).
+        std::vector<EnumEntry> plain, all;
+        DirectDrawEnumerateExA(CollectDevice, &plain, 0);
+        CHECK(plain.size() == 1 && !plain[0].hasGuid && !plain[0].monitor && !strcmp(plain[0].name, "display"),
+              "DirectDrawEnumerateEx(0): the primary display driver alone (got %u)", unsigned(plain.size()));
+        DirectDrawEnumerateExA(CollectDevice, &all, DDENUM_ATTACHEDSECONDARYDEVICES);
+        const HMONITOR mine = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        bool named = all.size() >= 2 && !all[0].hasGuid, found = false;
+        for (size_t i = 1; i < all.size(); i++) {
+            named = named && all[i].hasGuid && all[i].monitor && !strncmp(all[i].name, "\\\\.\\DISPLAY", 11);
+            found = found || all[i].monitor == mine;
+        }
+        CHECK(named && found, "DirectDrawEnumerateEx(ATTACHEDSECONDARYDEVICES): %u devices, each display named, "
+              "the window's monitor among them", unsigned(all.size()));
+        if (all.size() >= 2) {
+            IDirectDraw7* other = nullptr;
+            hr = DirectDrawCreateEx(&all[1].guid, reinterpret_cast<void**>(&other), IID_IDirectDraw7, nullptr);
+            CHECK(SUCCEEDED(hr) && other, "DirectDrawCreateEx(a display's GUID) -> 0x%08lx", hr);
+            if (other) other->Release();
+        }
+    }
+
+    {
+        // Process heap memory comes zeroed, as fresh memory did on Windows 9x (Daytona USA
+        // Deluxe released "textures" from a table it hadn't cleared yet): a block freed full of
+        // data, allocated again without HEAP_ZERO_MEMORY.
+        const SIZE_T n = 0x12800;
+        bool zero = true;
+        for (int round = 0; round < 4 && zero; round++) {
+            BYTE* a = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), 0, n));
+            if (!a) break;
+            memset(a, 0xCD, n);
+            HeapFree(GetProcessHeap(), 0, a);
+            const BYTE* b = static_cast<const BYTE*>(HeapAlloc(GetProcessHeap(), 0, n));
+            if (!b) break;
+            for (SIZE_T i = 0; i < n && zero; i++) zero = b[i] == 0;
+            HeapFree(GetProcessHeap(), 0, const_cast<BYTE*>(b));
+        }
+        CHECK(zero, "HeapAlloc: the game's memory comes zeroed");
+    }
 
     {
         // A DirectDrawCreateEx object offers dd2d9's Direct3D 7: 3D is reported.
@@ -462,6 +538,14 @@ static int RunUnit() {
                 v[0] = 128, v[1] = 240, u[0] = 128, u[1] = 90;
                 yv->Unlock(nullptr);
                 CHECK(!(pitch & 0xFF) && (l.dwFlags & DDSD_PITCH), "YV12: a byte of luma per pixel, pitch %ld", pitch);
+                // Its bits per pixel described, as drivers do: VMR-7 sizes its frames by them
+                // and showed none without (Romance of the Three Kingdoms VII's intro).
+                DDSURFACEDESC2 g = {};
+                g.dwSize = sizeof(g);
+                yv->GetSurfaceDesc(&g);
+                CHECK(l.ddpfPixelFormat.dwYUVBitCount == 12 && g.ddpfPixelFormat.dwYUVBitCount == 12,
+                      "YV12: 12 bits per pixel described (Lock %lu, GetSurfaceDesc %lu)", l.ddpfPixelFormat.dwYUVBitCount,
+                      g.ddpfPixelFormat.dwYUVBitCount);
                 auto nearRgb = [](DWORD a, DWORD c) {
                     for (int sh = 0; sh < 24; sh += 8)
                         if (abs(int((a >> sh) & 255) - int((c >> sh) & 255)) > 2) return false;
@@ -579,6 +663,17 @@ static int RunUnit() {
         IDirectDrawSurface4* got = nullptr;
         hr = m[0]->GetAttachedSurface(&want, &got);
         CHECK(hr == DD_OK && got == m[2], "GetAttachedSurface(BACKBUFFER) finds it (0x%08lx)", hr);
+        if (got) got->Release();
+        // Rockman X5: dwCaps set, the other words left as they were on the stack.
+        DDSCAPS2 junk = {DDSCAPS_BACKBUFFER, 0x0019F7B4, 0x00402A10, 0x7FFDF000};
+        got = nullptr;
+        hr = m[0]->GetAttachedSurface(&junk, &got);
+        CHECK(hr == DD_OK && got == m[2], "GetAttachedSurface(BACKBUFFER) with leftovers in the other caps words (0x%08lx)", hr);
+        if (got) got->Release();
+        DDSCAPS2 face = {DDSCAPS_BACKBUFFER, DDSCAPS2_CUBEMAP_NEGATIVEZ};
+        got = nullptr;
+        hr = m[0]->GetAttachedSurface(&face, &got);
+        CHECK(hr == DDERR_NOTFOUND, "... but a real dwCaps2 nothing has -> DDERR_NOTFOUND (0x%08lx)", hr);
         if (got) got->Release();
         DDSCAPS2 none = {};
         hr = m[0]->GetAttachedSurface(&none, &got);
@@ -776,9 +871,12 @@ static int RunFullscreen8(int modeW, int modeH) {
         RECT cr;
         realClientRect(hwnd, &cr);
         realMap(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
+        // (The real monitor too: dd2d9 shows the game its mode as the monitor.)
+        using MonFn = BOOL(WINAPI*)(HMONITOR, MONITORINFO*);
+        const auto realMonitorInfo = reinterpret_cast<MonFn>(reinterpret_cast<void*>(GetProcAddress(user32, "GetMonitorInfoA")));
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
-        GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+        realMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
         CHECK(EqualRect(&cr, &mi.rcMonitor), "client area covers the screen after a frame change (%ld,%ld-%ld,%ld)",
               cr.left, cr.top, cr.right, cr.bottom);
     }
@@ -825,6 +923,34 @@ static int RunFullscreen8(int modeW, int modeH) {
     sprite->Unlock(nullptr);
     DDCOLORKEY key = {0, 0};
     sprite->SetColorKey(DDCKEY_SRCBLT, &key);
+    {
+        // A DC out on an 8-bit surface drawing with the display's palette follows a change to
+        // it, as GDI on a palettized display did (Pal95: entry 1 made white, then its text
+        // drawn white, with the DC out).
+        IDirectDrawSurface7* strip = nullptr;
+        DDSURFACEDESC2 sd = {};
+        sd.dwSize = sizeof(sd);
+        sd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        sd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+        sd.dwWidth = 8;
+        sd.dwHeight = 2;
+        dd->CreateSurface(&sd, &strip, nullptr);
+        HDC dc = nullptr;
+        if (strip && SUCCEEDED(strip->GetDC(&dc))) {
+            PALETTEENTRY c = {10, 200, 30, 0}, old = pe[1];
+            pal->SetEntries(0, 1, 1, &c);
+            SetPixel(dc, 0, 0, RGB(10, 200, 30));
+            strip->ReleaseDC(dc);
+            pal->SetEntries(0, 1, 1, &old);
+            sd = {};
+            sd.dwSize = sizeof(sd);
+            strip->Lock(nullptr, &sd, DDLOCK_WAIT, nullptr);
+            const BYTE got = static_cast<const BYTE*>(sd.lpSurface)[0];
+            strip->Unlock(nullptr);
+            CHECK(got == 1, "8-bit DC: a colour drawn after the palette set it is its index (%u, want 1)", got);
+        }
+        if (strip) strip->Release();
+    }
 
     // Frame (1st Flip) is checked against the pacing target.
     const int frames = 180;
@@ -977,6 +1103,49 @@ static int RunWindowed() {
         RECT dst = {cr.left + 20 + (i % 200), cr.top + 40, cr.left + 20 + (i % 200) + 128, cr.top + 40 + 128};
         prim->Blt(&dst, img, nullptr, DDBLT_WAIT, nullptr);
         dd->WaitForVerticalBlank(DDWAITVB_BLOCKBEGIN, nullptr);
+    }
+    {
+        // A second object in normal mode drawing into the same window, as a video renderer
+        // does beside the game: its frame stays, the game's last one isn't shown again over
+        // it (Romance of the Three Kingdoms VII's intro flickered).
+        IDirectDraw7* dd2 = nullptr;
+        DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd2), IID_IDirectDraw7, nullptr);
+        dd2->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+        d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS;
+        d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+        IDirectDrawSurface7* prim2 = nullptr;
+        dd2->CreateSurface(&d, &prim2, nullptr);
+        IDirectDrawClipper* clip2 = nullptr;
+        dd2->CreateClipper(0, &clip2, nullptr);
+        clip2->SetHWnd(0, hwnd);
+        prim2->SetClipper(clip2);
+        d = {};
+        d.dwSize = sizeof(d);
+        prim2->GetSurfaceDesc(&d);
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
+        DDBLTFX fx = {};
+        fx.dwSize = sizeof(fx);
+        fx.dwFillColor = d.ddpfPixelFormat.dwBBitMask;
+        const HRESULT hr = prim2->Blt(&cr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+        int blue = 0, other = 0;
+        for (int i = 0; i < 60; i++) {
+            Pump();
+            Sleep(25);
+            if (i < 10) continue;  // (shown by then)
+            HDC sdc = GetDC(nullptr);
+            const COLORREF c = GetPixel(sdc, (cr.left + cr.right) / 2, (cr.top + cr.bottom) / 2) & 0xFFFFFF;
+            ReleaseDC(nullptr, sdc);
+            (c == 0xFF0000 ? blue : other)++;
+        }
+        CHECK(SUCCEEDED(hr) && blue == 50 && !other,
+              "two objects' primaries in one window: the newer frame stays (blue %d, other %d)", blue, other);
+        clip2->Release();
+        prim2->Release();
+        dd2->Release();
     }
     img->Release();
     clip->Release();
@@ -1388,6 +1557,72 @@ static int RunCoopModes() {
         CHECK(hr == DD_OK, "...with its own display mode (0x%08lx)", hr);
         b->Release();
     }
+    {
+        // An owned fullscreen window (a Visual Basic form can be owned by its hidden main
+        // window, which has the taskbar button): on focus loss its owner is minimized, hiding
+        // it, and both come back with the focus (minimized itself, it couldn't be reached).
+        HWND owner = CreateWindowExA(0, "ddtest", "owner", WS_POPUP | WS_VISIBLE, -100, -100, 0, 0, nullptr, nullptr,
+                                     GetModuleHandleA(nullptr), nullptr);
+        HWND form = CreateWindowExA(0, "ddtest", "form", WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, owner, nullptr,
+                                    GetModuleHandleA(nullptr), nullptr);
+        IDirectDraw7* dd = nullptr;
+        DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+        if (!dd) return 1;
+        SetForegroundWindow(form);
+        dd->SetCooperativeLevel(form, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        Pump();
+        SendMessageA(form, WM_ACTIVATEAPP, FALSE, 0);
+        Pump();
+        const bool ownerMin = IsIconic(owner) != FALSE, formMin = IsIconic(form) != FALSE,
+                   formShown = IsWindowVisible(form) != FALSE;
+        // (display=window minimizes nothing: an ordinary window.)
+        char display[32] = "";
+        GetPrivateProfileStringA("dd2d9", "display", "", display, sizeof(display), ".\\dd2d9.ini");
+        const bool windowMode = !strcmp(display, "window");
+        CHECK(windowMode ? !ownerMin && !formMin && formShown : ownerMin && !formMin && !formShown,
+              "owned exclusive window, focus lost: its owner minimized (%d), it hidden with it (minimized %d, shown %d)",
+              ownerMin, formMin, formShown);
+        SendMessageA(form, WM_ACTIVATEAPP, TRUE, 0);
+        Pump();
+        CHECK(!IsIconic(owner) && IsWindowVisible(form) && !IsIconic(form),
+              "...and both back with the focus (owner minimized %d, form shown %d)", IsIconic(owner) != FALSE,
+              IsWindowVisible(form) != FALSE);
+        dd->Release();
+        DestroyWindow(form);
+        DestroyWindow(owner);
+    }
+    {
+        // A tool window (no taskbar button, no place in Alt+Tab): minimized with a taskbar
+        // button given to it, and its own style back with the focus. (Pal95's window, which
+        // the taskbar had no button for, Windows minimized onto the desktop: Wine doesn't
+        // place minimized windows so, the same repair confirmed in the game.)
+        HWND tool = CreateWindowExA(WS_EX_TOOLWINDOW, "ddtest", "tool", WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, nullptr,
+                                    nullptr, GetModuleHandleA(nullptr), nullptr);
+        IDirectDraw7* dd = nullptr;
+        DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+        if (!dd) return 1;
+        SetForegroundWindow(tool);
+        dd->SetCooperativeLevel(tool, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        Pump();
+        SendMessageA(tool, WM_ACTIVATEAPP, FALSE, 0);
+        Pump();
+        char display[32] = "";
+        GetPrivateProfileStringA("dd2d9", "display", "", display, sizeof(display), ".\\dd2d9.ini");
+        const bool windowMode = !strcmp(display, "window");
+        const LONG bg = GetWindowLongA(tool, GWL_EXSTYLE);
+        const bool min = IsIconic(tool) != FALSE;
+        CHECK(windowMode ? !min && (bg & WS_EX_TOOLWINDOW) : min && (bg & WS_EX_APPWINDOW) && !(bg & WS_EX_TOOLWINDOW),
+              "tool window, focus lost: minimized (%d) with a taskbar button (ex style 0x%lx)", min, bg);
+        SendMessageA(tool, WM_ACTIVATEAPP, TRUE, 0);
+        Pump();
+        const LONG fg = GetWindowLongA(tool, GWL_EXSTYLE);
+        CHECK(!IsIconic(tool) && (fg & WS_EX_TOOLWINDOW) && !(fg & WS_EX_APPWINDOW),
+              "...and back with the focus, its own style again (ex style 0x%lx)", fg);
+        dd->Release();
+        DestroyWindow(tool);
+    }
     DestroyWindow(hwnd);
     return 0;
 }
@@ -1639,9 +1874,29 @@ static int RunMouse() {
     if (!dd) return 1;
     hr = dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
     CHECK(SUCCEEDED(hr), "exclusive mode (0x%08lx)", hr);
+    g_lastSize = -1;
     hr = dd->SetDisplayMode(640, 480, 32, 0, 0);
     CHECK(SUCCEEDED(hr), "SetDisplayMode 640x480 (0x%08lx)", hr);
     Pump();
+    // A window already covering the screen isn't resized: told the mode's size all the same, as
+    // a window sized to the switched mode is (Sango 4 blitted to the size it was last told).
+    CHECK(g_lastSize == MAKELPARAM(640, 480), "WM_SIZE: the window told the mode's size (%dx%d)", LOWORD(g_lastSize),
+          HIWORD(g_lastSize));
+    {
+        // A second DirectDraw object of the process (DirectShow's, for KOF 99's intro): the
+        // display is in the game's mode, as after a real switch.
+        IDirectDraw7* other = nullptr;
+        if (SUCCEEDED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&other), IID_IDirectDraw7, nullptr)) && other) {
+            other->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+            DDSURFACEDESC2 md = {};
+            md.dwSize = sizeof(md);
+            other->GetDisplayMode(&md);
+            CHECK(md.dwWidth == 640 && md.dwHeight == 480 && md.ddpfPixelFormat.dwRGBBitCount == 32,
+                  "another object's GetDisplayMode: the game's mode (%lux%lu, %lu bpp)", md.dwWidth, md.dwHeight,
+                  md.ddpfPixelFormat.dwRGBBitCount);
+            other->Release();
+        }
+    }
     CHECK(ScreenMetric(SM_CXSCREEN) == 640 && ScreenMetric(SM_CYSCREEN) == 480, "the screen is the game's mode (%d x %d)",
           ScreenMetric(SM_CXSCREEN), ScreenMetric(SM_CYSCREEN));
     RECT cr = {};
@@ -1672,6 +1927,24 @@ static int RunMouse() {
     SendMessageA(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(sw / 2, sh / 2));
     CHECK(LOWORD(g_lastMouseMove) == 320 && HIWORD(g_lastMouseMove) == 240, "WM_MOUSEMOVE in the mode's coordinates (%d,%d)",
           LOWORD(g_lastMouseMove), HIWORD(g_lastMouseMove));
+    {
+        // Repainting the window: the area in the mode's coordinates (Road Rash blits it from
+        // its 640x480 buffer), and an area the game invalidates mapped where the image is.
+        Pump();
+        g_lastPaint = RECT{-1, -1, -1, -1};
+        InvalidateRect(hwnd, nullptr, FALSE);
+        UpdateWindow(hwnd);
+        CHECK(g_lastPaint.left == 0 && g_lastPaint.top == 0 && g_lastPaint.right == 640 && g_lastPaint.bottom == 480,
+              "WM_PAINT: the whole window is the mode (%ld,%ld-%ld,%ld)", g_lastPaint.left, g_lastPaint.top, g_lastPaint.right,
+              g_lastPaint.bottom);
+        RECT part = {100, 50, 300, 150};
+        InvalidateRect(hwnd, &part, FALSE);
+        UpdateWindow(hwnd);
+        CHECK(labs(g_lastPaint.left - 100) <= 1 && labs(g_lastPaint.top - 50) <= 1 && labs(g_lastPaint.right - 300) <= 1 &&
+                  labs(g_lastPaint.bottom - 150) <= 1,
+              "WM_PAINT: an invalidated part comes back as given (%ld,%ld-%ld,%ld)", g_lastPaint.left, g_lastPaint.top,
+              g_lastPaint.right, g_lastPaint.bottom);
+    }
     if (WriteTinyAvi("dd2d9test.avi")) {
         // A video Windows' player draws into the window (Street Fighter Zero's movies): the
         // destination the game gives in its mode's coordinates is put where the image is, and
@@ -1694,7 +1967,7 @@ static int RunMouse() {
             mciSendStringA("open dd2d9test.avi type avivideo alias w", nullptr, 0, nullptr);
             snprintf(cmd, sizeof(cmd), "window w handle %lu", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(hwnd)));
             mciSendStringA(cmd, nullptr, 0, nullptr);
-            mciSendStringA("play w wait", nullptr, 0, nullptr);
+            mciSendStringA("play w window wait", nullptr, 0, nullptr);  // (Richman 4 plays with "window")
             out[0] = 0;
             mciSendStringA("where w destination", out, sizeof(out), nullptr);
             sscanf(out, "%ld %ld %ld %ld", &r[0], &r[1], &r[2], &r[3]);
@@ -1730,6 +2003,98 @@ static int RunMouse() {
                           labs(got.bottom - long(210 * scale)) <= 1,
                       "MCIWnd picture placed in the window scaled (%ld,%ld-%ld,%ld)", got.left, got.top, got.right, got.bottom);
                 MCIWndDestroy(mw);
+            }
+            // The command interface (Road Rash): the player's own child window of the game's
+            // (opened with it as parent), the picture put in it in the mode's coordinates: the
+            // window over the image, the picture scaled in it.
+            MCI_DGV_OPEN_PARMSA op = {};
+            char aviName[] = "dd2d9test.avi";
+            op.lpstrElementName = aviName;
+            op.dwStyle = WS_CHILD;
+            op.hWndParent = hwnd;
+            if (mciSendCommandA(0, MCI_OPEN, MCI_OPEN_ELEMENT | MCI_DGV_OPEN_PARENT | MCI_DGV_OPEN_WS,
+                                reinterpret_cast<DWORD_PTR>(&op)) == 0) {
+                const MCIDEVICEID id = op.wDeviceID;
+                MCI_DGV_WINDOW_PARMSA wp = {};
+                wp.nCmdShow = SW_SHOW;
+                mciSendCommandA(id, MCI_WINDOW, MCI_DGV_WINDOW_STATE, reinterpret_cast<DWORD_PTR>(&wp));
+                MCI_DGV_PUT_PARMS pp = {};
+                pp.rc = RECT{0, 20, 640, 440};  // (x, y, width, height)
+                mciSendCommandA(id, MCI_PUT, MCI_DGV_PUT_DESTINATION | MCI_DGV_RECT, reinterpret_cast<DWORD_PTR>(&pp));
+                MCI_DGV_RECT_PARMS wr2 = {};
+                mciSendCommandA(id, MCI_WHERE, MCI_DGV_WHERE_DESTINATION, reinterpret_cast<DWORD_PTR>(&wr2));
+                CHECK(wr2.rc.left == 0 && wr2.rc.top == 0 && labs(wr2.rc.right - long(640 * scale)) <= 1 &&
+                          labs(wr2.rc.bottom - long(440 * scale)) <= 1,
+                      "MCI command: the picture fills the player's window, scaled (%ld,%ld %ldx%ld)", wr2.rc.left,
+                      wr2.rc.top, wr2.rc.right, wr2.rc.bottom);
+                MCI_DGV_STATUS_PARMSA sp = {};
+                sp.dwItem = MCI_DGV_STATUS_HWND;
+                mciSendCommandA(id, MCI_STATUS, MCI_STATUS_ITEM, reinterpret_cast<DWORD_PTR>(&sp));
+                RECT cw = {};
+                if (HWND child = reinterpret_cast<HWND>(sp.dwReturn)) {
+                    using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+                    const auto realWindowRect = reinterpret_cast<RectFn>(
+                        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+                    realWindowRect(child, &cw);
+                }
+                // (Only where the picture goes: the rest of the game's window stays the game's.)
+                CHECK(labs(cw.left - ix) <= 1 && labs(cw.top - (iy + long(20 * scale))) <= 1 &&
+                          labs(cw.right - cw.left - long(640 * scale)) <= 1 && labs(cw.bottom - cw.top - long(440 * scale)) <= 1,
+                      "MCI command: the player's window where the picture goes (%ld,%ld-%ld,%ld)", cw.left, cw.top, cw.right,
+                      cw.bottom);
+                mciSendCommandA(id, MCI_CLOSE, 0, 0);
+            }
+            // Road Rash's way: a topmost 640x480 popup at 0,0 of its screen, the player's window
+            // in it: the popup over the image, the movie scaled in it.
+            WNDCLASSA pc = {};  // (as Road Rash's: no background brush)
+            pc.lpfnWndProc = DefWindowProcA;
+            pc.hInstance = GetModuleHandleA(nullptr);
+            pc.lpszClassName = "dd2d9popup";
+            RegisterClassA(&pc);
+            HWND popup = CreateWindowExA(WS_EX_TOPMOST, "dd2d9popup", "AVI Window", WS_POPUP, 0, 0, 640, 480, nullptr,
+                                         nullptr, GetModuleHandleA(nullptr), nullptr);
+            if (popup) {
+                CHECK(ULONG_PTR(GetClassLongPtrA(popup, GCLP_HBRBACKGROUND)) == reinterpret_cast<ULONG_PTR>(GetStockObject(BLACK_BRUSH)),
+                      "the popup is black where nothing paints it (the menu showed around Road Rash's race intros)");
+                ShowWindow(popup, SW_SHOW);
+                using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+                const auto realWindowRect = reinterpret_cast<RectFn>(
+                    reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+                RECT pr = {};
+                realWindowRect(popup, &pr);
+                CHECK(labs(pr.left - ix) <= 1 && labs(pr.top - iy) <= 1 && labs(pr.right - pr.left - long(640 * scale)) <= 1 &&
+                          labs(pr.bottom - pr.top - long(480 * scale)) <= 1,
+                      "a popup at the game's 0,0, the mode's size: over the image (%ld,%ld-%ld,%ld)", pr.left, pr.top,
+                      pr.right, pr.bottom);
+                MCI_DGV_OPEN_PARMSA po = {};
+                char aviName2[] = "dd2d9test.avi";
+                po.lpstrElementName = aviName2;
+                po.dwStyle = WS_CHILD;
+                po.hWndParent = popup;
+                if (mciSendCommandA(0, MCI_OPEN, MCI_OPEN_ELEMENT | MCI_DGV_OPEN_PARENT | MCI_DGV_OPEN_WS,
+                                    reinterpret_cast<DWORD_PTR>(&po)) == 0) {
+                    MCI_DGV_PUT_PARMS pp2 = {};
+                    pp2.rc = RECT{0, 20, 640, 440};
+                    mciSendCommandA(po.wDeviceID, MCI_PUT, MCI_DGV_PUT_DESTINATION | MCI_DGV_RECT,
+                                    reinterpret_cast<DWORD_PTR>(&pp2));
+                    MCI_DGV_RECT_PARMS w3 = {};
+                    mciSendCommandA(po.wDeviceID, MCI_WHERE, MCI_DGV_WHERE_DESTINATION, reinterpret_cast<DWORD_PTR>(&w3));
+                    MCI_DGV_STATUS_PARMSA sp2 = {};
+                    sp2.dwItem = MCI_DGV_STATUS_HWND;
+                    mciSendCommandA(po.wDeviceID, MCI_STATUS, MCI_STATUS_ITEM, reinterpret_cast<DWORD_PTR>(&sp2));
+                    RECT cw2 = {};
+                    if (HWND child = reinterpret_cast<HWND>(sp2.dwReturn)) realWindowRect(child, &cw2);
+                    // Race intros (Road Rash): the picture's window from 20 rows down, the rest of
+                    // the popup its own (black), not the menu behind.
+                    CHECK(w3.rc.left == 0 && w3.rc.top == 0 && labs(w3.rc.right - long(640 * scale)) <= 1 &&
+                              labs(w3.rc.bottom - long(440 * scale)) <= 1 && labs(cw2.left - pr.left) <= 1 &&
+                              labs(cw2.top - (pr.top + long(20 * scale))) <= 1,
+                          "MCI command in the game's popup: the player's window where the picture goes (%ld,%ld; picture "
+                          "%ld,%ld %ldx%ld)",
+                          cw2.left, cw2.top, w3.rc.left, w3.rc.top, w3.rc.right, w3.rc.bottom);
+                    mciSendCommandA(po.wDeviceID, MCI_CLOSE, 0, 0);
+                }
+                DestroyWindow(popup);
             }
         } else {
             printf("SKIP MCI video: no AVI player (%lu)\n", static_cast<unsigned long>(e));
@@ -1968,6 +2333,292 @@ static int RunDeviceWindow() {
     return 0;
 }
 
+// DDSCL_NOWINDOWCHANGES with the mode shown scaled (run with display=borderless): Hydro
+// Thunder takes exclusive mode with 0x55 and its 640x480 window. ddraw.dll leaves the window
+// alone, the switched 640x480 mode filling the screen with it; borderless switches nothing,
+// so the window covers the screen instead. Back in normal mode (0xC) it isn't topmost.
+static int RunNoWindowChanges() {
+    // The real functions: dd2d9 shows the game its mode's coordinates through the imports.
+    HMODULE u32 = GetModuleHandleA("user32.dll");
+    using MetricsFn = int(WINAPI*)(int);
+    using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+    const auto realMetrics = reinterpret_cast<MetricsFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetSystemMetrics")));
+    const auto realWindowRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetWindowRect")));
+    const int sw = realMetrics(SM_CXSCREEN), sh = realMetrics(SM_CYSCREEN);
+    HWND hwnd = MakeWindow(WS_POPUP, 640, 480);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    const DWORD coop = DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES | DDSCL_EXCLUSIVE | DDSCL_ALLOWMODEX;  // 0x55
+    HRESULT hr = dd->SetCooperativeLevel(hwnd, coop);
+    HRESULT hr2 = dd->SetDisplayMode(640, 480, 16, 0, 0);
+    for (int i = 0; i < 10; i++) {
+        Pump();
+        Sleep(20);
+    }
+    RECT c = {};  // (a popup: its window rectangle is its client area)
+    realWindowRect(hwnd, &c);
+    CHECK(SUCCEEDED(hr) && SUCCEEDED(hr2) && c.left == 0 && c.top == 0 && c.right == sw && c.bottom == sh,
+          "no window changes, borderless: the window covers the screen (0x%08lx, 0x%08lx; %ld,%ld-%ld,%ld)", hr, hr2,
+          c.left, c.top, c.right, c.bottom);
+    // Hydro Thunder then sizes its window to the mode at 0,0 and loads for two seconds
+    // without reading its messages: still covering, without a message pumped.
+    SetWindowPos(hwnd, nullptr, 0, 0, 640, 480, SWP_NOZORDER | SWP_NOACTIVATE);
+    realWindowRect(hwnd, &c);
+    CHECK(c.left == 0 && c.top == 0 && c.right == sw && c.bottom == sh,
+          "borderless: the game sizing its window to the mode keeps it covering, messages unread (%ld,%ld-%ld,%ld)", c.left,
+          c.top, c.right, c.bottom);
+    // The same with its style set again and SWP_FRAMECHANGED, as games set their window up:
+    // still covering, no message read.
+    SetWindowLongA(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+    SetWindowPos(hwnd, nullptr, 0, 0, 640, 480, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    realWindowRect(hwnd, &c);
+    CHECK(c.left == 0 && c.top == 0 && c.right == sw && c.bottom == sh,
+          "borderless: the same with a frame change (SWP_FRAMECHANGED) keeps it covering (%ld,%ld-%ld,%ld)", c.left, c.top,
+          c.right, c.bottom);
+    for (int i = 0; i < 5; i++) {  // (the check dd2d9 posts after a frame change, done)
+        Pump();
+        Sleep(20);
+    }
+    // A smaller window (the game going windowed) is the game's.
+    SetWindowPos(hwnd, nullptr, 100, 100, 400, 300, SWP_NOZORDER | SWP_NOACTIVATE);
+    for (int i = 0; i < 5; i++) {
+        Pump();
+        Sleep(20);
+    }
+    realWindowRect(hwnd, &c);
+    CHECK(c.left == 100 && c.top == 100 && c.right == 500 && c.bottom == 400,
+          "borderless: a smaller window stays as the game sized it (%ld,%ld-%ld,%ld)", c.left, c.top, c.right, c.bottom);
+    // A game setting its window back to the mode's size from its window procedure, in the
+    // middle of dd2d9's own covering (Hydro Thunder: the check above didn't catch it).
+    g_keepW = 640, g_keepH = 480;
+    dd->SetDisplayMode(800, 600, 16, 0, 0);  // (dd2d9 covers again, the game answers)
+    dd->SetDisplayMode(640, 480, 16, 0, 0);
+    realWindowRect(hwnd, &c);
+    g_keepW = g_keepH = 0;
+    CHECK(c.left == 0 && c.top == 0 && c.right == sw && c.bottom == sh,
+          "borderless: a game sizing its window back from its window procedure keeps it covering (%ld,%ld-%ld,%ld)",
+          c.left, c.top, c.right, c.bottom);
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL | DDSCL_NOWINDOWCHANGES);  // 0xC
+    Pump();
+    CHECK(!(GetWindowLongA(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST), "no window changes, borderless: not topmost in normal mode");
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// ---- audit: how the game's picture lands on the real screen, scenario by scenario, under
+// the display setting the run has (borderless: covering the screen, scaled; window: a
+// centered window of the mode's size). Each scenario fills the primary green and looks at
+// the real screen (the real functions: dd2d9 shows the game its mode's coordinates).
+namespace audit {
+using MetricsFn = int(WINAPI*)(int);
+using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+MetricsFn realMetrics;
+RectFn realWindowRect, realClientRect;
+int sw, sh;
+bool borderless;
+
+void Init(bool isBorderless) {
+    HMODULE u32 = GetModuleHandleA("user32.dll");
+    realMetrics = reinterpret_cast<MetricsFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetSystemMetrics")));
+    realWindowRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetWindowRect")));
+    realClientRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetClientRect")));
+    sw = realMetrics(SM_CXSCREEN);
+    sh = realMetrics(SM_CYSCREEN);
+    borderless = isBorderless;
+}
+void Settle(int n = 10) {
+    for (int i = 0; i < n; i++) {
+        Pump();
+        Sleep(30);
+    }
+}
+COLORREF Screen(int x, int y) {
+    HDC dc = GetDC(nullptr);
+    const COLORREF c = GetPixel(dc, x, y) & 0xFFFFFF;
+    ReleaseDC(nullptr, dc);
+    return c;
+}
+void FillGreen(IDirectDraw7* dd, IDirectDrawSurface7** keep) {
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    *keep = nullptr;
+    if (FAILED(dd->CreateSurface(&d, keep, nullptr)) || !*keep) return;
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0x07E0;  // green in 565, and enough of it in 8888 too
+    (*keep)->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+}
+// The picture where the setting puts it: borderless, the screen's middle and the middle of its
+// bottom edge (scaled to the full height, not the mode's 480 lines in the corner); window, the
+// middle of a centered window whose client area is the mode's size.
+void Expect(HWND hwnd, int mw, int mh, const char* what) {
+    Settle();
+    if (borderless) {
+        const COLORREF mid = Screen(sw / 2, sh / 2), low = Screen(sw / 2, sh - 4);
+        CHECK(mid & 0xFF00 && low & 0xFF00, "audit %s: the picture covers the screen (middle %06lx, bottom %06lx)", what,
+              mid, low);
+    } else {
+        RECT c = {};
+        realClientRect(hwnd, &c);
+        RECT w = {};
+        realWindowRect(hwnd, &w);
+        CHECK(c.right == mw && c.bottom == mh, "audit %s: a window of the mode's size (%ldx%ld at %ld,%ld)", what, c.right,
+              c.bottom, w.left, w.top);
+    }
+}
+IDirectDraw7* Make() {
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    return dd;
+}
+void Done(IDirectDraw7* dd, IDirectDrawSurface7* prim, HWND hwnd, HWND coopWnd = nullptr) {
+    if (prim) prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(coopWnd ? coopWnd : hwnd, DDSCL_NORMAL);
+    dd->Release();
+    if (hwnd) DestroyWindow(hwnd);
+    Settle(3);
+}
+}  // namespace audit
+
+static int RunAudit(bool borderless) {
+    using namespace audit;
+    Init(borderless);
+    const DWORD fs = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+    IDirectDrawSurface7* prim = nullptr;
+    {  // A. The usual: a popup the desktop's size.
+        HWND h = MakeWindow(WS_POPUP, sw, sh);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        Expect(h, 640, 480, "A usual");
+        Done(dd, prim, h);
+    }
+    {  // B. A popup the mode's size, NOWINDOWCHANGES (Hydro Thunder).
+        HWND h = MakeWindow(WS_POPUP, 640, 480);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs | DDSCL_NOWINDOWCHANGES | DDSCL_ALLOWMODEX);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        Expect(h, 640, 480, "B no window changes");
+        Done(dd, prim, h);
+    }
+    {  // C. An overlapped window with its frame, small, exclusive.
+        HWND h = MakeWindow(WS_OVERLAPPEDWINDOW, 400, 300);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        Expect(h, 640, 480, "C framed window");
+        Done(dd, prim, h);
+    }
+    {  // D. The mode changed while running: 640x480, 800x600, back.
+        HWND h = MakeWindow(WS_POPUP, sw, sh);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        dd->SetDisplayMode(800, 600, 16, 0, 0);
+        FillGreen(dd, &prim);
+        Expect(h, 800, 600, "D mode change 800x600");
+        if (prim) prim->Release();
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        Expect(h, 640, 480, "D mode change back to 640x480");
+        Done(dd, prim, h);
+    }
+    {  // E. The window hidden after the mode is set, shown again.
+        HWND h = MakeWindow(WS_POPUP, sw, sh);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        ShowWindow(h, SW_HIDE);
+        Settle(3);
+        ShowWindow(h, SW_SHOW);
+        FillGreen(dd, &prim);
+        Expect(h, 640, 480, "E hidden and shown");
+        Done(dd, prim, h);
+    }
+    {  // F. The game's own window sized to the mode at the centre of the desktop.
+        HWND h = MakeWindow(WS_POPUP, 640, 480);
+        SetWindowPos(h, nullptr, (sw - 640) / 2, (sh - 480) / 2, 640, 480, SWP_NOZORDER);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        Expect(h, 640, 480, "F centered mode-size window");
+        Done(dd, prim, h);
+    }
+    {  // G. Focus and device windows (SETFOCUSWINDOW, then CREATEDEVICEWINDOW).
+        HWND focus = MakeWindow(WS_POPUP, 100, 100);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(focus, DDSCL_SETFOCUSWINDOW);
+        dd->SetCooperativeLevel(nullptr, DDSCL_CREATEDEVICEWINDOW | fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        // (Borderless: the device window covers the screen. Window: the game's focus window is
+        // the centered window, the device window hidden.)
+        Expect(focus, 640, 480, "G device window");
+        if (prim) prim->Release();
+        dd->RestoreDisplayMode();
+        dd->SetCooperativeLevel(focus, DDSCL_NORMAL);
+        dd->Release();
+        DestroyWindow(focus);
+        Settle(3);
+    }
+    {  // H. Normal mode with SetDisplayMode, a mode-size popup at 0,0 drawn into (ddraw.dll
+       //    changes the real mode in normal mode too: the window then fills the screen).
+        HWND h = MakeWindow(WS_POPUP, 640, 480);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, DDSCL_NORMAL);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        FillGreen(dd, &prim);
+        // Known: borderless shows this in the corner (the window, normal mode, is the game's:
+        // nothing covers). No game is known to do it; recorded, not checked.
+        Settle();
+        fprintf(g_out, "INFO audit H normal mode with a display mode (%s): screen middle %06lx\n",
+                borderless ? "borderless" : "window", Screen(sw / 2, sh / 2));
+        Done(dd, prim, h);
+    }
+    {  // I. What the game reads of the screen after SetDisplayMode, by the ways it may ask.
+        HWND h = MakeWindow(WS_POPUP, sw, sh);
+        IDirectDraw7* dd = Make();
+        dd->SetCooperativeLevel(h, fs);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        Settle(3);
+        RECT desk = {};
+        GetWindowRect(GetDesktopWindow(), &desk);
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi);
+        DEVMODEA dm = {};
+        dm.dmSize = sizeof(dm);
+        EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &dm);
+        HDC dc = GetDC(nullptr);
+        const int hres = GetDeviceCaps(dc, HORZRES);
+        ReleaseDC(nullptr, dc);
+        const int cx = GetSystemMetrics(SM_CXSCREEN);
+        CHECK(cx == 640 && hres == 640 && desk.right - desk.left == 640 && mi.rcMonitor.right - mi.rcMonitor.left == 640 &&
+                  dm.dmPelsWidth == 640 && dm.dmPelsHeight == 480,
+              "audit I: every way of asking says the mode's 640 (SM_CXSCREEN %d, HORZRES %d, desktop window %ld, monitor "
+              "%ld, current mode %lux%lu)",
+              cx, hres, desk.right - desk.left, mi.rcMonitor.right - mi.rcMonitor.left, dm.dmPelsWidth, dm.dmPelsHeight);
+        // J. The game putting the "current" mode it read back with ChangeDisplaySettings: done,
+        //    the real display untouched.
+        const LONG cr = ChangeDisplaySettingsA(&dm, CDS_FULLSCREEN);
+        Settle(3);
+        CHECK(cr == DISP_CHANGE_SUCCESSFUL && realMetrics(SM_CXSCREEN) == sw,
+              "audit J: ChangeDisplaySettings to the mode shown: succeeds, the real display stays (%ld, %d wide)", cr,
+              realMetrics(SM_CXSCREEN));
+        Done(dd, nullptr, h);
+    }
+    return 0;
+}
+
 static int RunOverlay() {
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
@@ -2152,7 +2803,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
         sscanf(strstr(cmd, "fs8") + 3, "%d %d", &w, &h);
         r = RunFullscreen8(w, h);
     }
-    else if (strstr(cmd, "mouse")) r = RunMouse();
+    else if (strstr(cmd, "mouse")) r = RunMouse() | RunNoWindowChanges();
+    else if (strstr(cmd, "audit")) r = RunAudit(strstr(cmd, "borderless") != nullptr);
     else if (strstr(cmd, "overlay")) r = RunOverlay() | RunOverlayWindowed() | RunDeviceWindow();
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();

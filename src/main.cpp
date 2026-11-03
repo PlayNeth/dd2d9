@@ -1,6 +1,9 @@
 // DLL entry point, exported functions and COM class factory.
+#include "gpu.h"
 #include "hooks.h"
 #include "objects.h"
+
+#include <d3d9.h>
 
 using namespace dd2d9;
 
@@ -124,13 +127,59 @@ HRESULT WINAPI DD2D9_DirectDrawEnumerateW(LPDDENUMCALLBACKW cb, LPVOID) {
     return cb ? DDERR_UNSUPPORTED : DDERR_INVALIDPARAMS;
 }
 
+namespace {
+
+// One display on the desktop, as DirectDrawEnumerateEx lists it. Kept in static storage,
+// as ddraw.dll's own: a caller may hold on to the pointers it was given.
+struct Display {
+    GUID guid;
+    char description[MAX_DEVICE_IDENTIFIER_STRING];
+    char name[32];
+    HMONITOR monitor;
+};
+Display g_displays[16];
+SRWLOCK g_displaysLock = SRWLOCK_INIT;
+
+// After the primary display driver, ddraw.dll lists each display on the desktop by its own
+// GUID, its \\.\DISPLAYn name and its monitor (DDENUM_ATTACHEDSECONDARYDEVICES), even with
+// one monitor (as Wine does too). DirectShow's Video Mixing Renderer 7 builds its list of
+// monitors from these and makes a DirectDraw object for each. The GUIDs are Direct3D 9's,
+// as GetDeviceIdentifier reports them; DirectDrawCreate takes any of them. The callbacks
+// run outside the lock: another thread enumerating at the same time writes the same entries.
+void EnumerateDisplays(LPDDENUMCALLBACKEXA cb, LPVOID ctx) {
+    IDirect3D9* d3d = CreateD3D9();
+    if (!d3d) return;
+    UINT n = 0;
+    AcquireSRWLockExclusive(&g_displaysLock);
+    const UINT adapters = d3d->GetAdapterCount();
+    for (UINT i = 0; i < adapters && n < sizeof(g_displays) / sizeof(g_displays[0]); i++) {
+        D3DADAPTER_IDENTIFIER9 id = {};
+        const HMONITOR monitor = d3d->GetAdapterMonitor(i);
+        if (!monitor || FAILED(d3d->GetAdapterIdentifier(i, 0, &id))) continue;
+        Display& d = g_displays[n++];
+        d.guid = id.DeviceIdentifier;
+        lstrcpynA(d.description, id.Description, sizeof(d.description));
+        lstrcpynA(d.name, id.DeviceName, sizeof(d.name));
+        d.monitor = monitor;
+    }
+    ReleaseSRWLockExclusive(&g_displaysLock);
+    d3d->Release();
+    for (UINT i = 0; i < n; i++) {
+        Display& d = g_displays[i];
+        DD2D9_LOG("  display %s (%s), monitor %p", d.name, d.description, static_cast<void*>(d.monitor));
+        if (!cb(&d.guid, d.description, d.name, ctx, d.monitor)) break;
+    }
+}
+
+}  // namespace
+
 HRESULT WINAPI DD2D9_DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb, LPVOID ctx, DWORD flags) {
     DD2D9_LOG("DirectDrawEnumerateExA(flags 0x%lx)", flags);
     if (!cb) return DDERR_INVALIDPARAMS;
     if (flags & ~DWORD(DDENUM_ATTACHEDSECONDARYDEVICES | DDENUM_DETACHEDSECONDARYDEVICES | DDENUM_NONDISPLAYDEVICES))
         return DDERR_INVALIDPARAMS;
     char desc[] = "Primary Display Driver", name[] = "display";
-    cb(nullptr, desc, name, ctx, nullptr);
+    if (cb(nullptr, desc, name, ctx, nullptr) && (flags & DDENUM_ATTACHEDSECONDARYDEVICES)) EnumerateDisplays(cb, ctx);
     return DD_OK;
 }
 

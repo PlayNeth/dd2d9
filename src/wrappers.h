@@ -124,8 +124,10 @@ public:
         if (V < 4) c.dwCaps2 = c.dwCaps3 = c.dwCaps4 = 0;  // IDirectDrawSurface 1-3: only dwCaps
         HRESULT hr = s->GetAttachedSurface(c, &a, Surface::HandedOut(V));
         if (hr != DDERR_INVALIDCAPS) *out = SUCCEEDED(hr) ? static_cast<I*>(a->Iface(Surface::HandedOut(V))) : nullptr;
-        DD2D9_TRACE("GetAttachedSurface %p (v%d) caps 0x%lx -> %p (0x%08lx)", static_cast<void*>(s), V,
-                    static_cast<unsigned long>(c.dwCaps), static_cast<void*>(a), static_cast<unsigned long>(hr));
+        DD2D9_TRACE("GetAttachedSurface %p (v%d) caps 0x%lx 0x%lx 0x%lx 0x%lx -> %p (0x%08lx)", static_cast<void*>(s), V,
+                    static_cast<unsigned long>(c.dwCaps), static_cast<unsigned long>(c.dwCaps2),
+                    static_cast<unsigned long>(c.dwCaps3), static_cast<unsigned long>(c.dwCaps4), static_cast<void*>(a),
+                    static_cast<unsigned long>(hr));
         return hr;
     }
     STDMETHOD(GetBltStatus)(DWORD f) {  // blits are done when Blt returns

@@ -38,13 +38,6 @@ vsync=auto
 ;   off  - no Direct3D at all: games use their 2D or software renderers
 d3d=auto
 
-; The mouse, when the game's display mode is shown scaled or in a window (display=borderless
-; or window, or a mode the monitor lacks):
-;   scale - the game sees the cursor in its own mode's coordinates, as if that mode filled the
-;           screen: its window is its screen, at 0,0 (default)
-;   raw   - the real screen's coordinates (clicks land in the wrong place when scaled)
-mouse=scale
-
 ; Which d3d9.dll dd2d9 draws and presents through:
 ;   system - Windows' own, even when the game folder holds another one (DXVK's).
 ;            Presenting through DXVK's Vulkan in a window that covers the screen

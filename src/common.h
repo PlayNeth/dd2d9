@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.2.2"
+#define DD2D9_VERSION "1.3.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -30,7 +30,6 @@ struct Config {
     int filter = 0;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear)
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
-    bool mouseScale = true;        // map the mouse to the game's display mode when it is scaled or windowed
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
     // Compatibility (compat.cpp): what the game is told about the machine.
     int ramMB = 1024;              // GlobalMemoryStatus(Ex) physical memory; 0: the real values
@@ -204,10 +203,13 @@ void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interfac
 // window. Installed in every module loaded so far (each time exclusive mode starts).
 void InstallMouseHooks();
 // Videos that Windows' player (MCI) draws into the game's window, placed where the image is
-// (video.cpp): installed with the mouse's, in a display mode of dd2d9's own (mouse=scale).
+// (video.cpp): installed with the mouse's, in a display mode of dd2d9's own.
 void InstallVideoHooks();
 // Whether such a video draws into `hwnd` now (an MCI device "window ... handle" of it).
 bool VideoOnWindow(HWND hwnd);
+// A top-level window the game made in its mode's coordinates (a popup over its screen), shown
+// scaled over the image (input.cpp): the scale from the game's coordinates to its real ones.
+bool ScaledPopup(HWND h, double* sx, double* sy);
 
 // ---------------------------------------------------------------- compatibility (compat.cpp)
 // ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
@@ -216,7 +218,7 @@ void InstallCompatHooks(bool inLoaderLock);
 // Whether a DirectDraw object's primary is shown in `hwnd` (ddraw.cpp). Any thread.
 bool PresentsOnWindow(HWND hwnd);
 // Where the exclusive object's display mode is shown on the real screen (screen
-// coordinates), its size and the window, whatever mouse= says; false after a real mode switch.
+// coordinates), its size and the window; false after a real mode switch.
 bool ShownImage(RECT* image, SIZE* mode, HWND* window);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.

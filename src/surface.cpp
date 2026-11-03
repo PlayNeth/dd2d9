@@ -750,6 +750,29 @@ HRESULT Surface::GetAttachedSurface(const DDSCAPS2& caps, Surface** out, int ver
             return DD_OK;
         }
     }
+    // A DDSCAPS2 with only dwCaps set and the rest left as it was on the stack (Rockman X5:
+    // DDSCAPS_BACKBUFFER through IDirectDrawSurface4, the other words not cleared; it stopped
+    // with "GetAttachSurface error"): matched on dwCaps alone, as the game expects, and logged.
+    // Only when the other words can't be meant: dwCaps3 or dwCaps4 set (reserved in DirectX 7),
+    // or dwCaps2 bits DirectX 7 doesn't define. (A real dwCaps2 that matches nothing, a cube
+    // map face that isn't there, stays DDERR_NOTFOUND.)
+    constexpr DWORD kCaps2Dx7 = 0x000FFF9E;
+    if (caps.dwCaps && ((caps.dwCaps2 & ~kCaps2Dx7) || caps.dwCaps3 || caps.dwCaps4)) {
+        for (const AttachEntry& e : AttachList()) {
+            if (!has(e.s->desc.ddsCaps.dwCaps, caps.dwCaps)) continue;
+            static bool logged;
+            if (!logged) {
+                logged = true;
+                DD2D9_LOG("GetAttachedSurface: caps 0x%lx with 0x%lx 0x%lx 0x%lx in the other words, no surface has those: "
+                          "matched on the first word alone",
+                          static_cast<unsigned long>(caps.dwCaps), static_cast<unsigned long>(caps.dwCaps2),
+                          static_cast<unsigned long>(caps.dwCaps3), static_cast<unsigned long>(caps.dwCaps4));
+            }
+            e.s->AddRef(SlotFor(version));
+            *out = e.s;
+            return DD_OK;
+        }
+    }
     return DDERR_NOTFOUND;
 }
 
@@ -1580,6 +1603,22 @@ HRESULT Palette::SetEntries(DWORD flags, DWORD start, DWORD count, LPPALETTEENTR
     DD2D9_TRACE("Palette %p SetEntries start=%lu count=%lu%s", static_cast<void*>(this), start, count,
                dd_ && dd_->primary && dd_->primary->ShownPalette() == this ? " (primary)" : "");
     if (dd_ && dd_->primary && dd_->primary->ShownPalette() == this) dd_->MarkDirty();
+    // A device context out on an 8-bit surface without a palette of its own (drawing with the
+    // display's, this one shown on the primary) follows the change, as GDI drawing on a
+    // palettized display followed the hardware palette. (A surface's own palette doesn't: its
+    // DC keeps the colours of its GetDC, as Wine's test_palette_gdi finds.) Pal95 draws its text
+    // white after setting entry 1 to white with the DC out: matched against the table taken
+    // at GetDC, white became another index (the transparent one), and its letters lost
+    // strokes.
+    if (dd_)
+        for (Surface* sf : dd_->surfaces)
+            if (sf->dcOut && !sf->palette && sf->buf && sf->buf->fmt.pal8 && sf->buf->dcPal == this) {
+                const PALETTEENTRY* e = sf->EffectivePalette();
+                RGBQUAD q[256];
+                for (int i = 0; i < 256; i++) q[i] = {e[i].peBlue, e[i].peGreen, e[i].peRed, 0};
+                SetDIBColorTable(sf->dcOut, 0, 256, q);
+                sf->buf->dcPalVersion = version;
+            }
     return DD_OK;
 }
 

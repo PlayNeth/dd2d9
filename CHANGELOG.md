@@ -3,6 +3,141 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.3.0
+Borderless and window mode, made to match what a game expects of a real mode switch. Fixes
+from Hydro Thunder, then an audit of the ways a game can take or check fullscreen (new
+`ddtest audit`, run with `display=borderless` and with `display=window`), then fixes from
+players' logs of Road Rash, Rockman X5, Sango 4, KOF 99, Daytona USA, Pal95 and Richman 4,
+and DirectShow's Video Mixing Renderer 7 (Romance of the Three Kingdoms VII's intro movie), and a minimized game that couldn't be
+brought back (Pal95).
+(Prepared as 1.2.3, never released: all of it is in 1.3.0.)
+
+- **`display=borderless` covers the screen for games that ask for their window to be left
+  alone.** Hydro Thunder takes exclusive mode with `DDSCL_NOWINDOWCHANGES` (0x55) and a
+  640x480 window: `ddraw.dll` leaves the window alone and the switched 640x480 mode fills
+  the screen with it, but borderless switches nothing, so the game sat in the corner of
+  the desktop. With borderless the window now covers the screen anyway (and is restacked,
+  minimized on Alt+Tab and put back on leaving exclusive mode as any covering window is);
+  `display=switch` and `window` still leave such a window alone, as `ddraw.dll` does.
+- **A game sizing its window back to its mode keeps covering the screen at once.** With
+  borderless, a window the game sizes to cover its own screen (at the monitor's corner, at
+  least the mode's size) is given the covering size before it changes
+  (`WM_WINDOWPOSCHANGING`). dd2d9 covered it again afterwards before, from a posted
+  message, which a game that doesn't read its messages while it loads sees late: Hydro
+  Thunder sizes its window to 640x480 right after `SetDisplayMode` and showed in the
+  corner for its first two seconds. Also when the game sets its style and resizes with a
+  frame change (`SWP_FRAMECHANGED`): the covering size is worked out for the new frame
+  there and then. A smaller window (the game going windowed) stays the game's. A resize
+  that comes while another thread has the display is logged (left to the later check).
+- **Every way of asking for the screen's size gives the game's mode** in borderless and
+  window mode, as after a real switch: besides `GetSystemMetrics` and `GetDeviceCaps`
+  (already so), the desktop window's rectangle, `GetMonitorInfo` (the monitor and its work
+  area) and `EnumDisplaySettings`' current mode. A game checking that its mode took, or
+  sizing or centering its window from the monitor, saw the real desktop. A
+  `ChangeDisplaySettings` to the mode the game is shown in does nothing (a game putting
+  back the "current" mode it read would have switched the display under the scaled
+  picture). The display-settings imports are therefore always patched, not only with
+  `desktopbpp`.
+- **`mouse=` is gone**: the game always sees its mode's coordinates when it is shown scaled
+  or in a window. `mouse=raw` only put clicks in the wrong place (and would now put the
+  screen's size at odds with the mouse's); an ini that still has it gets a note in the log.
+- **A game repainting its window gets the area in its mode's coordinates.** Road Rash draws
+  its menus on `WM_PAINT` by blitting the area to repaint from its 640x480 buffer to the
+  primary; with the window covering a 1920x1080 screen it was asked for 0,0-1920,480, an
+  invalid rectangle, and its menus never showed. The area (`BeginPaint`, `GetUpdateRect`,
+  `GetUpdateRgn`) is now where the image is, mapped to the mode's coordinates, and an area
+  the game invalidates (`InvalidateRect`) is mapped back there.
+- **Movies played through the video player's command interface are scaled too.** Road Rash
+  makes a topmost 640x480 popup at 0,0 (filling its switched screen), opens its movies with
+  `mciSendCommand` in a child window of it (`MCI_DGV_OPEN_PARENT`) and puts the picture at
+  twice its size (`MCI_PUT`): it played 640x480 in the corner of the screen. A popup the
+  game makes within its screen is now put over that part of the image, scaled, and the
+  player's window goes where the picture does, scaled, the picture filling it. Where a
+  popup without a background of its own isn't painted it is black, as the screen the game
+  blacked under it was (the menu showed through above and below the race intros). A movie played without a destination gets its natural size there, and one drawing
+  straight into the game's window (`MCI_WINDOW`) is placed as the image is.
+- **`GetAttachedSurface` with leftovers in the extra caps words.** Rockman X5 asks its
+  primary for the back buffer through `IDirectDrawSurface4` with `DDSCAPS_BACKBUFFER` in
+  `dwCaps` and the other three words of its `DDSCAPS2` not cleared: no surface had those
+  bits, and it stopped at start with "GetAttachSurface error". When the other words can't be
+  meant (`dwCaps3` or `dwCaps4` set, both reserved in DirectX 7, or `dwCaps2` bits DirectX 7
+  doesn't define) and nothing matches all four, the first surface matching `dwCaps` is
+  returned, once logged. A real `dwCaps2` that matches nothing (a missing cube map face)
+  still gets `DDERR_NOTFOUND`. The trace now shows all four words.
+- **The game's window hears of its mode's size.** With a real switch, Windows sizes the
+  fullscreen window to the new mode and the game gets `WM_SIZE`; a window already covering
+  the monitor doesn't change, so it heard nothing (or only the desktop's size, from taking
+  exclusive mode before setting its mode). Sango 4 blits its 800x600 frame to the size it
+  was last told: 0,0-1920,1080 of its 800x600 primary, its top left corner enlarged. When
+  the game's mode is shown and the window was last told another size, dd2d9 tells it the
+  mode's.
+- **A second DirectDraw object sees the display in the game's mode.** Another object of the
+  process (DirectShow's, playing a movie into the game's surfaces) was told the desktop's
+  1920x1080x32 by `GetDisplayMode` (and made its surfaces in that format) while the game's
+  object had the display in 640x480x16, as a real switch would have shown it: KOF 99's
+  intro movie stayed black. Now the exclusive object's mode is the display's for every
+  object.
+- **The game's heap memory comes zeroed**, as fresh memory did on Windows 9x. Daytona USA
+  Deluxe allocates its texture table with `HeapAlloc` and, before clearing it, releases
+  every texture it finds there: today's heap hands back blocks freed with their old
+  contents (Direct3D's and the driver's, as its 3D device comes up), and it called through
+  a stale pointer and crashed at once. The game's `HeapAlloc` now always zeroes.
+- **Text drawn with the display's palette follows palette changes.** A device context out
+  on an 8-bit surface without a palette of its own took the display's colours when it was
+  made, and kept them: Pal95 blanks its text strip to colour 255 (its transparent one), sets
+  entry 1 to white and draws its text white with the DC out; matched against the old
+  colours, white became 255 and its letters lost strokes. Such a DC now follows changes to
+  the palette shown, as GDI on a palettized display did (a surface's own palette still
+  doesn't change its DC: Wine's `test_palette_gdi`).
+- **"play ... window" stays in the game's window.** Richman 4 plays its movies with
+  `play vfw window from 0 notify` after giving the player its window: the old player played
+  there all the same, Windows 11's opened a player window of its own with its controls, the
+  movie at its size in the corner. For a device drawing in the game's window, the word is
+  left out (logged).
+- **Movies through DirectShow's Video Mixing Renderer 7 show.** Romance of the Three
+  Kingdoms VII plays its intro (WMV in an AVI) with Windows' default video renderer in
+  windowless mode: the screen stayed black while the decoder ran through every frame and
+  the game waited out the movie's length. dd2d9 described YV12 surfaces without their bits
+  per pixel (`dwYUVBitCount` 0); the renderer sizes its frames by that and showed none. YUV
+  pixel formats now carry it (16 for YUY2 and UYVY, 12 for YV12, I420 and IYUV), as drivers
+  report it. Reproduced with XP's `quartz.dll` under Wine: no frame drawn before, every
+  frame after.
+- **A window shared by two DirectDraw objects shows the newer frame.** Objects in normal mode
+  each have a primary of their own in dd2d9, where on Windows they share the one screen: the
+  video renderer's beside the game's, which stays alive under the movie. Each re-presents
+  its last frame four times a second, so the game's last screen flashed over the video. A
+  window now shows the object that last drew a changed frame into it; the others' unchanged
+  frames aren't presented over it (until it draws nothing any more).
+- **A game minimized on Alt+Tab can be brought back.** dd2d9 minimizes the exclusive window
+  on focus loss, as `ddraw.dll` does. Pal95's window (Visual Basic 4), unowned and of no
+  special style, had no taskbar button: Windows minimized it onto the desktop, a small title
+  bar in the corner behind the other windows, with no way back by the taskbar or Alt+Tab.
+  A window Windows minimizes onto the desktop (where it puts one it has no button for; with
+  a button, off the screen) is now hidden and shown minimized again with
+  `WS_EX_APPWINDOW`, which gives it the button; so is a tool window (`WS_EX_TOOLWINDOW`,
+  `WS_EX_NOACTIVATE`). Its own style comes back with the focus. A window with an owner
+  (whose button is the owner's) has the owner minimized instead, hidden with it and shown
+  again with it; with an owner that isn't visible it is left as it is.
+- **`DirectDrawEnumerateEx` lists each display.** With `DDENUM_ATTACHEDSECONDARYDEVICES`,
+  `ddraw.dll` lists every display on the desktop after the primary display driver, by GUID,
+  `\\.\DISPLAYn` name and monitor, even with one monitor (Wine does too); dd2d9 listed
+  the primary display driver alone. The video renderer builds its list of monitors from it.
+  The GUIDs are the ones `GetDeviceIdentifier` reports, and `DirectDrawCreate` takes them.
+- Known, not changed: a game that stays in normal mode and calls `SetDisplayMode`,
+  expecting its window to fill the screen, shows in the corner with borderless (no game is
+  known to do it; `ddtest audit` records it).
+- Tested: ddtest 360/360 (new checks for each fix, each failing before it), `ddtest audit`
+  10/10 with `display=borderless` and with `display=window`, d3d7test 40/40 (16 and 32
+  bpp; default settings, windowed, borderless, antialiasing, render32), Wine's 46
+  display-mode, cooperative-level and window-style sub-tests in all interface versions with
+  no regressions. In the game: Hydro Thunder filling the screen confirmed by the owner (with
+  the first fix alone; its first two seconds and the rest not yet). Road Rash's movies and
+  menus, Romance of the Three Kingdoms VII's intro (no flicker) and Pal95's Alt+Tab
+  confirmed by players. The Rockman X5, Sango 4, KOF 99, Daytona USA, Pal95 (text) and
+  Richman 4 fixes come from players' logs (and the Daytona USA, Pal95 and Richman 4
+  executables), each reproduced with a ddtest check of the same calls; not yet confirmed in
+  the games.
+
 ## 1.2.2
 - **Movies in the video player's window control (MCIWnd) are scaled with the game too.**
   Rockman X4 plays its movies in an MCIWnd window (msvfw32's `MCIWndCreate`), a child of

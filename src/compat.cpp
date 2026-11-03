@@ -417,6 +417,14 @@ void FixDepth(const Ch* device, DWORD mode, Dev* dm, BOOL ok) {
         if (!primary) return;
     }
     if (const int bpp = ShownBppOrZero()) dm->dmBitsPerPel = DWORD(bpp);
+    // The current mode the game's own while it is shown scaled or in a window (borderless,
+    // window), as after a real switch: a game checking that its mode took saw the desktop's.
+    RECT r;
+    SIZE m;
+    if (mode == ENUM_CURRENT_SETTINGS && GameImage(&r, &m)) {
+        dm->dmPelsWidth = DWORD(m.cx);
+        dm->dmPelsHeight = DWORD(m.cy);
+    }
 }
 
 BOOL WINAPI HookEnumDisplaySettingsA(LPCSTR device, DWORD mode, DEVMODEA* dm) {
@@ -460,20 +468,34 @@ ChangeDisplaySettingsWFn g_changeDisplaySettingsW;
 ChangeDisplaySettingsExAFn g_changeDisplaySettingsExA;
 ChangeDisplaySettingsExWFn g_changeDisplaySettingsExW;
 
+// The mode the game is shown in already (borderless, window: EnumDisplaySettings reports it
+// as current): a game putting it back, or asking for it again, would really switch the
+// display under the scaled picture. Nothing to do, as on a display in that mode.
+template <typename Dev> bool AlreadyShown(const Dev* dm) {
+    RECT r;
+    SIZE m;
+    return dm && (dm->dmFields & (DM_PELSWIDTH | DM_PELSHEIGHT)) == (DM_PELSWIDTH | DM_PELSHEIGHT) &&
+           GameImage(&r, &m) && dm->dmPelsWidth == DWORD(m.cx) && dm->dmPelsHeight == DWORD(m.cy);
+}
+
 LONG WINAPI HookChangeDisplaySettingsA(DEVMODEA* dm, DWORD flags) {
+    if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEA c;
     return g_changeDisplaySettingsA(const_cast<DEVMODEA*>(RealDepth(dm, &c)), flags);
 }
 LONG WINAPI HookChangeDisplaySettingsW(DEVMODEW* dm, DWORD flags) {
+    if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEW c;
     return g_changeDisplaySettingsW(const_cast<DEVMODEW*>(RealDepth(dm, &c)), flags);
 }
 // (A display named: only the primary's depth is made up; the name left to the system.)
 LONG WINAPI HookChangeDisplaySettingsExA(LPCSTR device, DEVMODEA* dm, HWND h, DWORD flags, LPVOID p) {
+    if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEA c;
     return g_changeDisplaySettingsExA(device, device && device[0] ? dm : const_cast<DEVMODEA*>(RealDepth(dm, &c)), h, flags, p);
 }
 LONG WINAPI HookChangeDisplaySettingsExW(LPCWSTR device, DEVMODEW* dm, HWND h, DWORD flags, LPVOID p) {
+    if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEW c;
     return g_changeDisplaySettingsExW(device, device && device[0] ? dm : const_cast<DEVMODEW*>(RealDepth(dm, &c)), h, flags, p);
 }
@@ -523,6 +545,24 @@ ImportHook kWindowHooks[] = {
     {"gdi32", "GetDeviceCaps", reinterpret_cast<void*>(HookGetDeviceCaps), reinterpret_cast<void**>(&g_getDeviceCaps)},
 };
 
+// Memory from the process heap comes zeroed, as fresh heap memory did on Windows 9x, where
+// games were tested: today's heap hands back blocks other code freed (Direct3D's, the
+// driver's) with their old contents. Daytona USA Deluxe allocates its texture table with
+// HeapAlloc and, before clearing it, releases every "texture" it finds in it: on a block
+// full of old data, it called through a stale pointer and crashed as its 3D device came up.
+// (Always on: zeroing is what HEAP_ZERO_MEMORY does anyway, and no working game depends on
+// garbage.)
+using HeapAllocFn = LPVOID(WINAPI*)(HANDLE, DWORD, SIZE_T);
+HeapAllocFn g_heapAlloc;
+
+LPVOID WINAPI HookHeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes) {
+    return g_heapAlloc(heap, flags | HEAP_ZERO_MEMORY, bytes);
+}
+
+ImportHook kHeapHooks[] = {
+    {"kernel32", "HeapAlloc", reinterpret_cast<void*>(HookHeapAlloc), reinterpret_cast<void**>(&g_heapAlloc)},
+};
+
 // Functions looked up at run time (games that also ran on Windows 95 find
 // GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's.
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
@@ -532,7 +572,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[5];
+HookTable g_tables[6];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = g_getProcAddress(m, name);
@@ -551,12 +591,14 @@ ImportHook kProcHooks[] = {
 
 void InstallCompatHooks(bool inLoaderLock) {
     if (inLoaderLock && g_config.cpus) SetAffinity();
-    const bool depth = g_config.desktopBpp != 32;
     g_tables[0] = {kMemoryHooks, sizeof(kMemoryHooks) / sizeof(kMemoryHooks[0]), g_config.ramMB != 0};
     g_tables[1] = {kCpuHooks, sizeof(kCpuHooks) / sizeof(kCpuHooks[0]), g_config.cpuMHz != 0};
     g_tables[2] = {kCpusHooks, sizeof(kCpusHooks) / sizeof(kCpusHooks[0]), g_affinity != 0};
-    g_tables[3] = {kDepthHooks, sizeof(kDepthHooks) / sizeof(kDepthHooks[0]), depth};
+    // (Always: besides desktopbpp's depth, the current mode is the game's while it is shown
+    // scaled or in a window, and a change to that mode does nothing; see FixDepth.)
+    g_tables[3] = {kDepthHooks, sizeof(kDepthHooks) / sizeof(kDepthHooks[0]), true};
     g_tables[4] = {kWindowHooks, sizeof(kWindowHooks) / sizeof(kWindowHooks[0]), true};
+    g_tables[5] = {kHeapHooks, sizeof(kHeapHooks) / sizeof(kHeapHooks[0]), true};
     // The tables switched on, and GetProcAddress with them, patched together (the modules
     // listed once): made once, the setting fixed for the process.
     static std::vector<ImportHook> all;

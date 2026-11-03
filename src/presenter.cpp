@@ -8,8 +8,57 @@
 #include "devstate.h"
 
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace dd2d9 {
+
+namespace {
+
+// Objects in normal mode each have a primary of their own, where on Windows they share the
+// one screen: a video renderer's beside the game's (VMR-7 makes one for the video and one
+// for each display). A window shows the presenter that last drew a changed frame into it:
+// the others' unchanged frames aren't presented again over it (the refresh four times a
+// second flashed the game's last screen over Romance of the Three Kingdoms VII's intro).
+SRWLOCK g_windowOwnersLock = SRWLOCK_INIT;
+std::vector<std::pair<HWND, const Presenter*>> g_windowOwners;
+
+void ClaimWindow(HWND h, const Presenter* p) {
+    AcquireSRWLockExclusive(&g_windowOwnersLock);
+    bool found = false;
+    for (auto it = g_windowOwners.begin(); it != g_windowOwners.end();) {
+        if (it->first == h) {
+            it->second = p;
+            found = true;
+        } else if (!IsWindow(it->first)) {
+            it = g_windowOwners.erase(it);
+            continue;
+        }
+        ++it;
+    }
+    if (!found) g_windowOwners.emplace_back(h, p);
+    ReleaseSRWLockExclusive(&g_windowOwnersLock);
+}
+
+bool OtherShowsWindow(HWND h, const Presenter* p) {
+    AcquireSRWLockShared(&g_windowOwnersLock);
+    bool other = false;
+    for (const auto& o : g_windowOwners)
+        if (o.first == h) other = o.second != p;
+    ReleaseSRWLockShared(&g_windowOwnersLock);
+    return other;
+}
+
+void ReleaseWindows(const Presenter* p) {
+    AcquireSRWLockExclusive(&g_windowOwnersLock);
+    for (auto it = g_windowOwners.begin(); it != g_windowOwners.end();) {
+        if (it->second == p) it = g_windowOwners.erase(it);
+        else ++it;
+    }
+    ReleaseSRWLockExclusive(&g_windowOwnersLock);
+}
+
+}  // namespace
 
 // The display adapter as Direct3D 9 describes it, for GetDeviceIdentifier (ddraw.dll
 // reports the real one too). Looked up once.
@@ -55,6 +104,7 @@ Presenter::Presenter(DDraw* dd) : ovGpu_(NewOverlayGpu()), dd_(dd) {
 
 Presenter::~Presenter() {
     Stop();
+    ReleaseWindows(this);
     DeleteOverlayGpu(ovGpu_);
     if (gdiDc_ && !gdiPending_) {
         SelectObject(gdiDc_, gdiOld_);
@@ -681,6 +731,7 @@ void Presenter::Loop() {
         }
         if (!havePrimary || !hwnd || !IsWindow(hwnd) || IsIconic(hwnd)) {
             if (superseded) LeaveGpu();  // the window belongs to the other object's device
+            ReleaseWindows(this);  // showing nothing: the others' frames refresh again
             active_ = false;
             stagingStale_ = true;  // the device may go meanwhile: start over with a full frame
             continue;
@@ -812,7 +863,8 @@ void Presenter::Loop() {
         if (!primaryExists) continue;
         // A video Windows' player draws into the window (video.cpp): an unchanged frame isn't
         // presented again over it (the refresh four times a second would blank it).
-        if (IsRectEmpty(&area) && !snap.buf && overlays.empty() && VideoOnWindow(hwnd)) {
+        // Nor is it over another object's newer frame in the same window (see ClaimWindow).
+        if (IsRectEmpty(&area) && !snap.buf && overlays.empty() && (VideoOnWindow(hwnd) || OtherShowsWindow(hwnd, this))) {
             AcquireSRWLockExclusive(&seqLock_);
             presentedSeq_ = seq;
             ReleaseSRWLockExclusive(&seqLock_);
@@ -971,6 +1023,7 @@ void Presenter::Loop() {
         gpu.Unlock();
         active_ = SUCCEEDED(hr);
         if (FAILED(hr)) DD2D9_LOG("Present failed: 0x%08lx", hr);
+        else if (!IsRectEmpty(&area)) ClaimWindow(hwnd, this);  // a changed frame: the window shows this one
 
         AcquireSRWLockExclusive(&seqLock_);
         presentedSeq_ = seq;

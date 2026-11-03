@@ -116,9 +116,10 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         else if (ParseBool(v, &b)) g_config.d3d = b ? kD3DOn : kD3DOff;
         else ok = false;
     } else if (key == "mouse") {
-        if (v == "scale" || v == "on" || v == "1") g_config.mouseScale = true;
-        else if (v == "raw" || v == "off" || v == "0") g_config.mouseScale = false;
-        else ok = false;
+        // Gone in 1.3.0: the game always sees its mode's coordinates when it is shown scaled or
+        // in a window (mouse=raw put clicks in the wrong place, and its screen size at odds
+        // with what it was told). Noted, not an error.
+        g_iniErrors.push_back(where + L": mouse= no longer exists (always scaled): ignored");
     } else if (key == "d3d9") {
         if (v == "system") g_config.systemD3D9 = true;
         else if (v == "game" || v == "local") g_config.systemD3D9 = false;
@@ -359,9 +360,9 @@ void LogInit() {
     for (const auto& e : g_iniErrors) Log(1, "config:  %s", Utf8(e).c_str());
     static const char* kD3D[] = {"auto", "on", "off"};
     static const char* kFilter[] = {"point", "linear", "sharp"};
-    Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s mouse=%s log=%d",
+    Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
-        g_config.systemD3D9 ? "system" : "game", g_config.mouseScale ? "scale" : "raw", g_config.log);
+        g_config.systemD3D9 ? "system" : "game", g_config.log);
     Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s zaccess=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d antialias2d=%s texfilter=%s wbuffer=%s overlaybias=%d videooverlay=%s", g_config.fpsLimit, g_config.ramMB,
         g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.desktopBpp, g_config.lockWhole ? "on" : "off", g_config.zAccess ? "on" : "off", g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
         g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa, g_config.aa2d ? "on" : "off",
@@ -650,6 +651,9 @@ void Format::ToDDPF(DDPIXELFORMAT* pf) const {
     if (fourcc) {
         pf->dwFlags = DDPF_FOURCC;
         pf->dwFourCC = fourCC;
+        // The bits per pixel of the YUV formats, as the drivers report them (and the video
+        // renderers read them: VMR-7 sizes its frames with them, and with none shows none).
+        if (Yuv() || Planar()) pf->dwYUVBitCount = bpp;
     } else if (bump) {
         pf->dwFlags = DDPF_BUMPDUDV | (b ? DDPF_BUMPLUMINANCE : 0);
         pf->dwBumpBitCount = bpp;

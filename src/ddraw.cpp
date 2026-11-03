@@ -170,6 +170,16 @@ void DDraw::DisplayMode(DWORD* w, DWORD* h, DWORD* bpp) const {
         *bpp = modeBpp_;
         return;
     }
+    // Another object (of this process) has put the display in its mode: that is the display's
+    // mode for this one too, as after a real switch. KOF 99's intro movie (DirectShow's
+    // multimedia streams, with an object of their own) was told the desktop's 1920x1080x32
+    // while the game drew in 640x480x16, and stayed black. (g_lock held by the callers.)
+    if (const DDraw* other = g_exclusiveDD; other && other != this && other->ShowsMode()) {
+        *w = other->modeW_;
+        *h = other->modeH_;
+        *bpp = other->modeBpp_;
+        return;
+    }
     *w = DWORD(GetSystemMetrics(SM_CXSCREEN));
     *h = DWORD(GetSystemMetrics(SM_CYSCREEN));
     *bpp = DWORD(g_config.desktopBpp);  // desktopbpp= (dd2d9 shows any depth on any desktop)
@@ -315,7 +325,6 @@ struct ImageChangedAtExit {
 }  // namespace
 
 bool GameImage(RECT* image, SIZE* mode, HWND* window, bool wait) {
-    if (!g_config.mouseScale) return false;
     const ULONGLONG now = GetTickCount64();
     const bool dirty = g_snapDirty.load();
     if (dirty || now - g_snapTime.load() > 250) {
@@ -503,6 +512,14 @@ void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 LONG_PTR GetProc(HWND h, bool unicode);
 LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc);
 
+// The size the game's window procedure was last told (WM_SIZE's lParam), and telling it the
+// mode's when that differs. With a real switch Windows sizes the fullscreen window to the new
+// mode and the game hears of it; a covering window already the monitor's size doesn't change,
+// so it heard nothing: Sango 4 (Romance of the Three Kingdoms IV), told 1920x1080 when it took
+// exclusive mode, blitted its 800x600 frame to 0,0-1920,1080 of its 800x600 primary, and
+// showed its top left corner, enlarged.
+volatile LONG g_toldSize = -1;
+
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
     switch (msg) {  // where the game's image is on the screen may have changed (GameImage)
@@ -574,6 +591,19 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             LeaveCriticalSection(&g_displayLock);
         }
+    } else if (msg == WM_WINDOWPOSCHANGING && lp && h == g_hook.hwnd && g_hook.owner && !g_hook.owner->QuietMove()) {
+        // The game sizing its covering window back (see FitCover): kept covering, before the
+        // game's own handling sees the position. (The display lock held by another thread:
+        // left to CheckCover, which waits for it; logged, to tell from a miss.)
+        if (TryEnterCriticalSection(&g_displayLock)) {
+            if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->FitCover(h, reinterpret_cast<WINDOWPOS*>(lp));
+            LeaveCriticalSection(&g_displayLock);
+        } else {
+            const auto* p = reinterpret_cast<const WINDOWPOS*>(lp);
+            if ((p->flags & (SWP_NOSIZE | SWP_NOMOVE)) != (SWP_NOSIZE | SWP_NOMOVE))
+                DD2D9_LOG("the game moves or sizes its window (%dx%d at %d,%d, flags 0x%x) while the display is busy",
+                          p->cx, p->cy, p->x, p->y, p->flags);
+        }
     } else if ((msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED || msg == WM_SIZE || msg == WM_MOVE) &&
                h == g_hook.hwnd && g_hook.owner && g_hook.owner->QuietMove()) {
         // dd2d9 covering the screen again behind the game's back (see CheckCover): the
@@ -617,6 +647,8 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         int mw, mh;
         if (ShownDisplaySize(&mw, &mh)) lp = msg == WM_SIZE ? MAKELPARAM(mw, mh) : 0;
     }
+    if (msg == WM_SIZE && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && h == g_hook.hwnd)
+        InterlockedExchange(&g_toldSize, LONG(lp));  // (what the game was last told: see ApplyWindow)
     const WNDPROC orig = g_hook.orig;
     const bool unicode = g_hook.unicode;
     if (msg == WM_NCDESTROY && h == g_hook.hwnd) {
@@ -656,10 +688,21 @@ static void CALLBACK TopmostTick(void*, BOOLEAN) {
     LeaveCriticalSection(&g_displayLock);
 }
 
+// DDSCL_NOWINDOWCHANGES asks ddraw.dll to leave the window alone: it changes the display
+// mode only, and the game's window (made the mode's size) fills the screen through that. With
+// display=borderless there is no mode change for it to rely on: the game's 640x480 window sat
+// in the corner of a 1366x768 desktop (Hydro Thunder, coop 0x55). There the window covers the
+// screen anyway, as the switched mode would have shown it, and is restacked and minimized as
+// any covering window is; switch and window leave it alone, as ddraw.dll does.
+bool DDraw::WindowChanges() const {
+    if (!(coop_ & DDSCL_NOWINDOWCHANGES)) return true;
+    return (modeSet_ ? activeDisplay_ : g_config.display) == kDisplayBorderless;
+}
+
 // Called with g_displayLock held.
 void DDraw::KeepTopmost() {
     if (!Exclusive() || !alive || applying_ || suspended_ || deviceState_ == kDevLost || !hwnd_ ||
-        (coop_ & DDSCL_NOWINDOWCHANGES) || IsIconic(hwnd_))
+        !WindowChanges() || IsIconic(hwnd_))
         return;
     if ((modeSet_ ? activeDisplay_ : g_config.display) == kDisplayWindow) return;
     if (GetWindowLongW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST) return;
@@ -738,6 +781,53 @@ void DDraw::UnhookWindow() {
     g_hook.hwnd = nullptr;
 }
 
+// Minimized on focus loss, as ddraw.dll does, so that it can be found again: a minimized
+// window is left with its taskbar button and its place in Alt+Tab. A window that has neither
+// would be lost, a small title bar in the corner of the desktop behind the other windows:
+// - with an owner (Visual Basic's forms can be owned by its hidden main window, which has
+//   the button), the owner is minimized, the window hidden with it and shown again with it;
+//   an owner that isn't visible has no button either: the window is left as it is then;
+// - a window the taskbar has no button for is given one while in the background
+//   (WS_EX_APPWINDOW, shown again so that the taskbar sees it; its own style back with the
+//   focus, see OnActivate): a tool window (WS_EX_TOOLWINDOW, or WS_EX_NOACTIVATE, which the
+//   taskbar skips too), or one Windows minimized onto the desktop, where it puts a window it
+//   has no button for (with a button, off the screen). Pal95's window (Visual Basic 4),
+//   unowned and of no special style, had none and couldn't be reached again.
+void DDraw::MinimizeGameWindow() {
+    const HWND owner = GetAncestor(hwnd_, GA_ROOTOWNER);
+    const LONG ex = GetWindowLongW(hwnd_, GWL_EXSTYLE);
+    DD2D9_LOG("focus lost: window extended style 0x%lx, owner %p", static_cast<unsigned long>(ex),
+              static_cast<void*>(owner != hwnd_ ? owner : nullptr));
+    if (!owner || owner == hwnd_) {
+        const LONG skipped = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);
+        MINIMIZEDMETRICS mm = {};
+        mm.cbSize = sizeof(mm);
+        RECT r = {};
+        const bool parked = SystemParametersInfoW(SPI_GETMINIMIZEDMETRICS, sizeof(mm), &mm, 0) &&
+                            (mm.iArrange & ARW_HIDE) && IsIconic(hwnd_) && GetWindowRect(hwnd_, &r) && r.left > -10000;
+        if (((ex & skipped) && !(ex & WS_EX_APPWINDOW)) || parked) {
+            DD2D9_LOG("focus lost: no taskbar button (%s): given one while in the background",
+                      parked ? "minimized onto the desktop" : "a tool window");
+            ShowWindow(hwnd_, SW_HIDE);
+            SetWindowLongW(hwnd_, GWL_EXSTYLE, (GetWindowLongW(hwnd_, GWL_EXSTYLE) & ~skipped) | WS_EX_APPWINDOW);
+            taskbarEx_ = ex & (skipped | WS_EX_APPWINDOW);
+            taskbarExChanged_ = true;
+            ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);
+        }
+    } else if (IsWindowVisible(owner)) {
+        DD2D9_LOG("focus lost: minimizing the window's owner %p", static_cast<void*>(owner));
+        ShowWindow(owner, SW_SHOWMINNOACTIVE);
+        // Windows hides the owned windows with it; where it hasn't (Wine), hidden here.
+        if (IsWindowVisible(hwnd_)) {
+            ShowWindow(hwnd_, SW_HIDE);
+            hiddenWithOwner_ = true;
+        }
+    } else {
+        DD2D9_LOG("focus lost: the window's owner %p is hidden: not minimized", static_cast<void*>(owner));
+    }
+}
+
 // Called with g_displayLock held.
 void DDraw::OnActivate(bool active, DWORD thread) {
     if (applying_ || !Exclusive() || !alive) return;
@@ -749,8 +839,9 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // Window mode is an ordinary window; switch and borderless cover the screen.
         const bool cover = display != kDisplayWindow && !suspended_;
         // DDSCL_NOWINDOWCHANGES: the mode goes back, the window is left alone (as ddraw.dll:
-        // neither minimized nor made non-topmost; spec: re/spec/window-procedure.md).
-        const bool windowChanges = !(coop_ & DDSCL_NOWINDOWCHANGES);
+        // neither minimized nor made non-topmost; spec: re/spec/window-procedure.md), unless
+        // borderless covered it anyway (WindowChanges).
+        const bool windowChanges = WindowChanges();
         if (cover) {
             DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
             suspended_ = true;      // first: the presenter must not create a new device from here on
@@ -770,7 +861,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
             focusLossOnly_ = true;  // unless a mode change comes on top (InvalidateSurfaces)
         }
         // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
-        if (cover && windowChanges && IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWMINNOACTIVE);  // a hidden one stays so
+        if (cover && windowChanges && IsWindowVisible(hwnd_)) MinimizeGameWindow();  // a hidden one stays so
         if (cover) UpdateDeviceWindow();  // hidden
         if (cover) LogFocusThief(thread, GetForegroundWindow());
         return;
@@ -778,7 +869,26 @@ void DDraw::OnActivate(bool active, DWORD thread) {
     InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     if (suspended_) {
         DD2D9_LOG("focus regained: setting up %lux%lu again", modeW_, modeH_);
-        if (IsIconic(hwnd_) && !(coop_ & DDSCL_NOWINDOWCHANGES)) ShowWindow(hwnd_, SW_RESTORE);
+        if (WindowChanges()) {
+            if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+            // Its owner, minimized on focus loss (MinimizeGameWindow), back too, and the
+            // window with it; restored from its taskbar button, the owner passes the focus on
+            // to the window, as clicking the window would.
+            const HWND owner = GetAncestor(hwnd_, GA_ROOTOWNER);
+            if (owner && owner != hwnd_) {
+                if (IsIconic(owner)) ShowWindow(owner, SW_SHOWNOACTIVATE);
+                if (hiddenWithOwner_ && !IsWindowVisible(hwnd_)) ShowWindow(hwnd_, SW_SHOWNA);
+                if (GetForegroundWindow() == owner) SetForegroundWindow(hwnd_);
+            }
+            hiddenWithOwner_ = false;
+            // Its own style back, given a taskbar button in the background (MinimizeGameWindow;
+            // the button stays until it is next hidden).
+            if (taskbarExChanged_) {
+                const LONG bits = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_APPWINDOW;
+                SetWindowLongW(hwnd_, GWL_EXSTYLE, (GetWindowLongW(hwnd_, GWL_EXSTYLE) & ~bits) | taskbarEx_);
+                taskbarExChanged_ = false;
+            }
+        }
         ApplyWindow();
         // Only now: until the mode is switched back the presenter must not create
         // a device (it would make a windowed one, then replace it right away).
@@ -786,7 +896,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         UpdateDeviceWindow();
         GameImageChanged();
         MarkDirty();
-    } else if (display != kDisplayWindow && !(coop_ & DDSCL_NOWINDOWCHANGES)) {
+    } else if (display != kDisplayWindow && WindowChanges()) {
         // ddraw.dll makes the exclusive window topmost once it is in front.
         SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         ConfineCursor(true);
@@ -797,7 +907,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
 // g_displayLock held.
 void DDraw::OnDisplayChange() {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
-    if (!Exclusive() || !alive || (coop_ & DDSCL_NOWINDOWCHANGES) || !hwnd_ || IsIconic(hwnd_)) return;
+    if (!Exclusive() || !alive || !WindowChanges() || !hwnd_ || IsIconic(hwnd_)) return;
     const int display = modeSet_ ? activeDisplay_ : g_config.display;
     if (display == kDisplayWindow) return;
     CoverMonitor(HWND_TOP, SWP_NOACTIVATE);
@@ -836,6 +946,11 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     AdjustWindowRectEx(&r, DWORD(style), GetMenu(hwnd_) != nullptr, DWORD(exStyle));
     coverHwnd_ = hwnd_;
     coverSize_ = {r.right - r.left, r.bottom - r.top};  // first: WM_GETMINMAXINFO lets it be this large
+    struct Covering {
+        bool& flag;
+        explicit Covering(bool& f) : flag(f) { flag = true; }
+        ~Covering() { flag = false; }
+    } covering(covering_);
     SetWindowPos(hwnd_, insertAfter, r.left, r.top, coverSize_.cx, coverSize_.cy, flags);
     // Minimized (a game going exclusive again from its own activation, before Windows has
     // restored the window): its rectangle and client area are the icon's. No region from
@@ -860,6 +975,7 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
         coverSize_.cy += dh;
         SetWindowPos(hwnd_, nullptr, r.left, r.top, coverSize_.cx, coverSize_.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    coverPos_ = {r.left, r.top};
     RECT w = {};
     GetWindowRect(hwnd_, &w);
     if (HRGN rgn = CreateRectRgn(m.left - w.left, m.top - w.top, m.right - w.left, m.bottom - w.top)) {
@@ -928,7 +1044,7 @@ void DDraw::ConfineCursor(bool on) {
 void DDraw::CheckCover(HWND h, bool moved) {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     if (!Exclusive() || !alive || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
-        (coop_ & DDSCL_NOWINDOWCHANGES) || IsIconic(h) || !IsWindowVisible(h))
+        !WindowChanges() || IsIconic(h) || !IsWindowVisible(h))
         return;
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
@@ -964,6 +1080,49 @@ void DDraw::CheckCover(HWND h, bool moved) {
     quietMove_ = false;
 }
 
+// The game sizing its window while borderless covers the screen with it: one sized to cover
+// the game's screen (at the monitor's corner, at least the mode's size: what a real switch to
+// that mode shows as fullscreen) is given the covering size instead, before it changes.
+// CheckCover does the same afterwards, but from a posted message, which a game that doesn't
+// read its messages while it loads sees late: Hydro Thunder sizes its window to 640x480
+// right after SetDisplayMode, and showed in the corner for its first two seconds. A smaller
+// window (the game going windowed) is left alone. With a frame change (games set their style,
+// then SetWindowPos with SWP_FRAMECHANGED: Hydro Thunder still started in the corner) the
+// covering rectangle is worked out for the new frame (the style is set by now); CheckCover
+// checks the client area once the game has handled it. Returns whether the position was
+// changed. g_displayLock held.
+bool DDraw::FitCover(HWND h, WINDOWPOS* wp) {
+    if (!Exclusive() || !alive || covering_ || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
+        !WindowChanges() || !modeSet_ || activeDisplay_ != kDisplayBorderless || IsIconic(h))
+        return false;
+    if ((wp->flags & (SWP_NOSIZE | SWP_NOMOVE)) == (SWP_NOSIZE | SWP_NOMOVE)) return false;
+    RECT w = {};
+    GetWindowRect(h, &w);
+    const LONG x = (wp->flags & SWP_NOMOVE) ? w.left : wp->x, y = (wp->flags & SWP_NOMOVE) ? w.top : wp->y;
+    const LONG cx = (wp->flags & SWP_NOSIZE) ? w.right - w.left : wp->cx;
+    const LONG cy = (wp->flags & SWP_NOSIZE) ? w.bottom - w.top : wp->cy;
+    if (x == coverPos_.x && y == coverPos_.y && cx == coverSize_.cx && cy == coverSize_.cy) return false;
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(GameMonitor(h), &mi);
+    const LONG mx = mi.rcMonitor.left, my = mi.rcMonitor.top;
+    if (x > mx || y > my || x + cx < mx + LONG(modeW_) || y + cy < my + LONG(modeH_)) return false;  // smaller: windowed
+    DD2D9_LOG("the game sizes its window to %ldx%ld at %ld,%ld: kept covering the screen", cx, cy, x, y);
+    if (wp->flags & SWP_FRAMECHANGED) {
+        RECT r = mi.rcMonitor;
+        AdjustWindowRectEx(&r, DWORD(GetWindowLongW(h, GWL_STYLE)), GetMenu(h) != nullptr,
+                           DWORD(GetWindowLongW(h, GWL_EXSTYLE)));
+        coverPos_ = {r.left, r.top};
+        coverSize_ = {r.right - r.left, r.bottom - r.top};  // (WM_GETMINMAXINFO lets it be this large)
+    }
+    wp->x = coverPos_.x;
+    wp->y = coverPos_.y;
+    wp->cx = coverSize_.cx;
+    wp->cy = coverSize_.cy;
+    wp->flags &= ~UINT(SWP_NOMOVE | SWP_NOSIZE);
+    return true;
+}
+
 // For WM_GETMINMAXINFO: the window may grow past the screen by its frame.
 bool DDraw::CoverSize(HWND h, SIZE* out) const {
     if (h != coverHwnd_ || !coverSize_.cx) return false;
@@ -984,13 +1143,16 @@ void DDraw::ApplyWindow() {
     // Before SetDisplayMode: as in ddraw.dll, switch and borderless cover the screen at the
     // desktop mode; window mode has nothing to show yet and leaves the window alone.
     if (!modeSet_ && display == kDisplayWindow) return;
-    // DDSCL_NOWINDOWCHANGES: the display mode still changes, the window doesn't.
-    const bool windowChanges = !(coop_ & DDSCL_NOWINDOWCHANGES);
     applying_ = true;  // focus changes caused by our own mode / window changes are not the user's
-    if (windowChanges) SaveWindow();  // before the mode switch, which may move or clamp the window
+    // DDSCL_NOWINDOWCHANGES: the display mode still changes, the window doesn't (but with
+    // borderless, which has no mode change, it does: see WindowChanges).
+    const bool mayChange = !(coop_ & DDSCL_NOWINDOWCHANGES);
+    // Saved before the mode switch, which may move or clamp the window.
+    if (mayChange || display == kDisplayBorderless) SaveWindow();
     if (modeSet_ && display == kDisplaySwitch && !SwitchMode()) {
         DD2D9_LOG("display mode %lux%lu not available, using a borderless scaled window", modeW_, modeH_);
         display = kDisplayBorderless;
+        if (!mayChange) SaveWindow();  // (borderless covers it after all)
     }
     if (display != kDisplaySwitch && switched_) {
         ChangeDisplay(nullptr, 0);
@@ -1006,7 +1168,7 @@ void DDraw::ApplyWindow() {
         InstallMouseHooks();
         InstallVideoHooks();
     }
-    if (!windowChanges) {
+    if (!mayChange && display != kDisplayBorderless) {
         applying_ = false;
         return;
     }
@@ -1034,6 +1196,16 @@ void DDraw::ApplyWindow() {
         CoverMonitor(front ? HWND_TOPMOST : nullptr,
                      SWP_NOACTIVATE | (front ? SWP_SHOWWINDOW : SWP_NOZORDER));
         if (front) ConfineCursor(true);
+        // The mode's size, as the window sized to it would have told the game (see g_toldSize).
+        if (modeSet_ && g_toldSize != LONG(MAKELPARAM(modeW_, modeH_)) && !IsIconic(hwnd_)) {
+            DD2D9_LOG("the game's window is told its mode's size, %lux%lu (WM_SIZE)", modeW_, modeH_);
+            // (Sent from the window's own thread, as SetWindowPos would; posted from another,
+            // which may be waiting for a lock held here.)
+            if (GetWindowThreadProcessId(hwnd_, nullptr) == GetCurrentThreadId())
+                SendMessageW(hwnd_, WM_SIZE, SIZE_RESTORED, MAKELPARAM(modeW_, modeH_));
+            else
+                PostMessageW(hwnd_, WM_SIZE, SIZE_RESTORED, MAKELPARAM(modeW_, modeH_));
+        }
     }
     applying_ = false;
     static const char* kNames[] = {"display mode switched", "centered window", "borderless window"};
@@ -1412,18 +1584,22 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     const bool restore = leaving && !ddraw1Coop_;
     // The game's display mode gives way to the desktop's (restored, or virtual and dropped).
     const bool modeBack = restore && (modeSet_ || switched_);
+    // The window gets back its place in the stacking order unless the game asks for it to be
+    // left alone, and borderless didn't cover it regardless (WindowChanges; coop_ is still
+    // the exclusive mode's here).
+    const bool restack = !(flags & DDSCL_NOWINDOWCHANGES) || ((coop_ & DDSCL_NOWINDOWCHANGES) && WindowChanges());
     if (leaving) {
         FlipToGDISurface();  // as ddraw.dll: the screen GDI draws on is in front again
         if (restore) {
             // Still hooked: the window covers the screen in the desktop mode before the game
             // hears of the change (see OnDisplayChange).
             RestoreDisplay();
-            RestoreSavedWindow(!(flags & DDSCL_NOWINDOWCHANGES));
+            RestoreSavedWindow(restack);
         } else {
             suspended_ = false;
             GameImageChanged();
             // The window stays as it is but for being topmost, as with ddraw.dll.
-            if (!(flags & DDSCL_NOWINDOWCHANGES) && hwnd_ && IsWindow(hwnd_))
+            if (restack && hwnd_ && IsWindow(hwnd_))
                 SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             DD2D9_LOG("leaving exclusive mode: the display mode stays (DirectDraw 1)");
         }
@@ -1596,6 +1772,13 @@ void DDraw::PollDisplayChange() {
 // blt" when a texture upload finds them lost. Read without a lock, as InOwnMode.
 bool DDraw::EmulatedMode() const { return Exclusive() && modeSet_ && !switched_; }
 
+// The display is in this object's mode as far as anyone can see: switched to it and still
+// there, or shown scaled or in a window over its (still existing) window.
+bool DDraw::ShowsMode() const {
+    if (!modeSet_ || !hwnd_ || !IsWindow(hwnd_)) return false;
+    return EmulatedMode() || InOwnMode();
+}
+
 bool DDraw::KeepsSurfacesOnFocus() const { return EmulatedMode() && g_config.display != kDisplaySwitch; }
 
 bool DDraw::OtherExclusive() const {
@@ -1748,7 +1931,9 @@ HRESULT DDraw::GetDisplayMode(void* desc, int version) {
     static DWORD lastLogged[3];  // g_lock: logged when the answer changes (games ask every frame)
     if (lastLogged[0] != w || lastLogged[1] != h || lastLogged[2] != bpp) {
         DD2D9_TRACE("GetDisplayMode -> %lux%lu, %lu bpp%s", w, h, bpp,
-                    modeSet_ ? " (the game's mode)" : g_config.desktopBpp != 32 ? " (the desktop, desktopbpp=)" : " (the desktop)");
+                    modeSet_ ? " (the game's mode)"
+                    : g_exclusiveDD && g_exclusiveDD != this && g_exclusiveDD->ShowsMode() ? " (another object's mode)"
+                    : g_config.desktopBpp != 32 ? " (the desktop, desktopbpp=)" : " (the desktop)");
         lastLogged[0] = w, lastLogged[1] = h, lastLogged[2] = bpp;
     }
     DescOut(d, desc);  // only as much as the caller's structure holds

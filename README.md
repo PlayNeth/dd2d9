@@ -72,11 +72,11 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 ### Display modes and windows
 
 - **Real display mode switches** for exclusive-mode games, as the original did. The colour depth stays virtual: an 8-bit game runs on a 32-bit desktop. If the monitor lacks the mode, dd2d9 falls back to a borderless window with the image scaled. `display=window` and `display=borderless` avoid mode switches altogether.
-- **Alt+Tab as in `ddraw.dll`:** losing focus restores the desktop and minimizes the game, and coming back sets it up again. The screensaver and monitor power-off are blocked while the game is in front.
+- **Alt+Tab as in `ddraw.dll`:** losing focus restores the desktop and minimizes the game, and coming back sets it up again. A window that would be minimized with no taskbar button (owned, a tool window, or one the taskbar missed) stays reachable: its owner is minimized instead, or it gets a button while in the background. The screensaver and monitor power-off are blocked while the game is in front.
 - **Lost surfaces as in `ddraw.dll`:** mode changes and focus loss make surfaces lost until the game restores them, as games expect. Unlike on real hardware, their contents survive.
-- **Several DirectDraw objects:** a second one taking exclusive mode takes it over from the first, for games that recreate their DirectDraw object without releasing the old one.
-- **The mouse follows the game's mode** when it's shown scaled or in a window: the game sees its mode's coordinates, with its window as the screen, as after a real mode switch, and the cursor never leaves that screen. `mouse=raw` turns this off (a game that draws its own cursor where `GetCursorPos` says, unclipped, can then write past its buffers: Xuan-Yuan Sword 3 EX crashes). The window's size messages and GDI's screen size are the mode's whatever the setting.
-- **Movies played by Windows' video player (MCI) into the game's window** are scaled and placed with the game's image (with `mouse=scale`): the position the game gives in its mode's coordinates is translated, as the mouse's is, and so are the player's window control (MCIWnd) and the picture placed in it.
+- **Several DirectDraw objects:** a second one taking exclusive mode takes it over from the first, for games that recreate their DirectDraw object without releasing the old one. In normal mode, a window shows the object that last drew into it (a video renderer's movie over the game, as with DirectShow's Video Mixing Renderer 7).
+- **The game sees its own display mode as the screen** when it's shown scaled or in a window, as after a real mode switch. Its cursor functions, every way of asking for the screen's size (`GetSystemMetrics`, the desktop window's rectangle, `GetMonitorInfo`, `EnumDisplaySettings`' current mode), its window's rectangles and coordinate conversions, and its window's mouse messages are translated, so it sees its mode's coordinates with its window as the screen, and the cursor never leaves that screen. A `ChangeDisplaySettings` to that mode does nothing. The window's size messages and GDI's screen size are the mode's too. Graphics and input DLLs in the game folder (DXVK...) keep the real values.
+- **Movies played by Windows' video player (MCI) into the game's window** are scaled and placed with the game's image: the position the game gives in its mode's coordinates is translated, as the mouse's is, and so are the player's window control (MCIWnd), the picture placed in it and the command interface (`mciSendCommand`, the player's own child window included). The area a game is asked to repaint (`WM_PAINT`) is in its mode's coordinates too.
 - **Fullscreen goes to the primary monitor,** as with `ddraw.dll`: `display=switch` and `display=borderless` alike, wherever Windows put the game's window. `display=window` stays where the window is.
 - **Windowed games** get a desktop-sized primary surface, and the part under their window is shown.
 - **Overlays:** overlay surfaces (RGB, YUY2, UYVY or YV12) are laid over the primary as it's presented, as the hardware showed them without touching its pixels: stretched or shrunk, mirrored, behind a destination colour key, with a source key, in their z-order. `UpdateOverlay`, the position and z-order methods and overlay flip chains follow `ddraw.dll`'s checks. A windowed program paints the destination key into its window with GDI, so dd2d9 also looks for the key in what that window draws; in a window, only the part of an overlay over the program's own window shows. `videooverlay=off` reports no overlay hardware.
@@ -104,6 +104,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
   - 1 GB of memory by default (`ram`): Windows reports 2 GB and a 4 GB page file, and old games overflow adding them up and claim there isn't enough;
   - one processor (`cpus`), and a 2 GHz clock in the registry (`cpu`);
   - a 16 or 24-bit desktop (`desktopbpp`) for games that refuse a 32-bit one, through DirectDraw, GDI and the display settings alike.
+- **Windows 9x behaviour games relied on,** always on: memory from the process heap comes zeroed (games that read it before writing, such as Daytona USA Deluxe).
 
 ### Differences from `ddraw.dll` on purpose
 
@@ -148,7 +149,6 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `point`, `linear`, `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges) |
 | `vsync` | `auto` (the game decides), `on`, `off` |
-| `mouse` | `scale` (the mouse follows a scaled or windowed mode), `raw` |
 | `d3d` | `auto`: dd2d9's own Direct3D 3–7; `off`: no Direct3D (2D only) |
 | `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
 | `fpslimit` | `0` (off); frames per second at most |
@@ -190,7 +190,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 - **A game refuses to start on a 32-bit desktop** ("16 bit screen mode required"): set `desktopbpp=16` in a `[game.exe]` section.
 - **A game says there isn't enough memory:** keep `ram` at its default, or lower it.
 - **A game runs too fast:** set `fpslimit`. If it times itself from the registry's processor clock, try `cpu=0`.
-- **The mouse is off in a scaled or windowed mode:** check `mouse=scale`; `mouse=raw` gives the game the real coordinates.
+- **The mouse is off in a scaled or windowed mode:** please report it with `dd2d9.log` (`log=2`); the translation can't be turned off since 1.3.0.
 - **Z-fighting (hatched light maps or decals):** try `wbuffer=force` or a higher `overlaybias`, and `depth24=on`.
 - **Display mode switches are a problem:** `display=borderless` or `display=window` avoid them.
 - **Under Wine with DXVK in the game's folder:** `d3d9=system`, the default, presents through the prefix's own Direct3D 9; `d3d9=game` uses the game folder's.
@@ -228,6 +228,7 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 - `ddtest fs8` runs a 640×480×8 exclusive-mode flip-chain animation and checks the pacing;
 - `ddtest win` runs a windowed primary with a clipper;
 - `ddtest mouse` checks the mouse translation (run it with `display=borderless`);
+- `ddtest audit borderless` and `ddtest audit window` (run with that `display` in `dd2d9.ini`) take fullscreen the ways games do and check where the picture lands on the real screen, and that every way of asking for the screen's size gives the game's mode;
 - `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys and key ranges, mirroring, stretching, overlapping copies) against a reference implementation.
 
 `build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp. It writes `d3d7test.txt`.
