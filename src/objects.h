@@ -50,6 +50,7 @@ struct Buffer {
     void EndDC();  // after the game's ReleaseDC: shadow DIB contents back to memory
     HBITMAP shadow = nullptr;   // for GetDC where GDI can't use the memory itself
     uint8_t* shadowBits = nullptr;
+    std::vector<uint8_t> shadowWas;  // the shadow as GetDC filled it (EndDC: what GDI changed)
     HANDLE kmtBitmap = nullptr;  // dc came from D3DKMTCreateDCFromMemory
     void CopyToShadow();
     uint8_t* Row(int y) const { return bits + y * pitch; }
@@ -93,7 +94,10 @@ public:
     int Count() const;
     PALETTEENTRY entries[256] = {};
     DWORD caps = 0;
-    DWORD version = 1;
+    // Changes to the entries, drawn from the counter every buffer's serial comes from: a
+    // palette made where a freed one was can't match what was cached of it (GetDC's colour
+    // table, the presenter's).
+    DWORD version = NextCpuSerial();
 
 private:
     ~Palette();
@@ -671,6 +675,7 @@ private:
     bool switched_ = false;     // the real display mode was changed
     bool ddraw1Coop_ = false;   // a SetCooperativeLevel through IDirectDraw succeeded (g_displayLock)
     bool suspended_ = false;    // display setup undone because the game lost focus
+    bool restoring_ = false;    // ...and being set up again (OnActivate): the image counts as shown
     bool backgrounded_ = false;  // lost focus at some point during this exclusive mode
     bool hiddenWithOwner_ = false;  // hidden on focus loss, its owner minimized (MinimizeGameWindow)
     bool taskbarExChanged_ = false;  // given a taskbar button in the background (MinimizeGameWindow)

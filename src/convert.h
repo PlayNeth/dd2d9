@@ -34,4 +34,25 @@ private:
     uint32_t lut_[256];
 };
 
+// Rows of A8R8G8B8 into a format's pixels, exactly as ARGBToPixel makes one (util.cpp), with
+// SSE2 for 16-bit formats of contiguous channels and 32-bit X8R8G8B8 / A8R8G8B8; others
+// through a table per channel. `orMask` is set on every pixel written. Not palettized.
+class RowPacker {
+public:
+    // For format `f` (kept until another is asked for: the tables are made once).
+    void Prepare(const Format& f);
+    void Run(const uint32_t* src, uint8_t* dst, int n, uint32_t orMask) const;
+    uint32_t One(uint32_t c) const { return t_[0][c & 255] | t_[1][(c >> 8) & 255] | t_[2][(c >> 16) & 255] | t_[3][c >> 24]; }
+
+private:
+    enum Kind { kTable, k16, k32 };
+    bool valid_ = false;
+    Kind kind_ = kTable;
+    Format f_;
+    int bytes_ = 0;
+    int shift_[4] = {}, bits_[4] = {};  // k16: blue, green, red, alpha (bits 0: absent)
+    uint32_t mask32_ = 0;               // k32: the bits kept
+    uint32_t t_[4][256];                // kTable: blue, green, red, alpha
+};
+
 }  // namespace dd2d9

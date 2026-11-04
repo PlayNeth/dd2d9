@@ -3,6 +3,78 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.3.1
+Three fixes from players, confirmed in the games (Pal95's dialogue text, a movie cut in
+half after Alt+Tab, movies played in the game's own child window), a call tracer for
+developers, then a line-by-line review of the whole code: the bugs it found, and faster
+software blits (the same pixels as before, checked over 6000 random blits).
+
+- **Text drawn with GDI on an 8-bit surface follows the palette on Windows.** Pal95 draws
+  its dialogue into a 320x20 strip: filled with index 255 (transparent), a black shadow,
+  palette entry 1 set to white, the text in white. On Windows the strip's DC (from
+  `D3DKMTCreateDCFromMemory`) kept the colour table it was made with whatever
+  `SetDIBColorTable` said, so white was drawn as 255 and only the shadow showed. 8-bit
+  surfaces now get their DC through a DIB copy, whose table does follow (`paltext`, run on
+  Windows 11 with Windows' `ddraw.dll` and with dd2d9).
+- **Back from Alt+Tab, the game sees its own screen while its window comes back.** Windows
+  restores the window first, sending the game `WM_SIZE` and `WM_ACTIVATE`; dd2d9 still had
+  its setup marked as away then, so `GetClientRect` and `GetSystemMetrics` answered with
+  the monitor's size. Heroes of the Three Kingdoms 3 read it there and blitted its movie
+  centred in a 1920x1080 screen from then on: the 640x480 picture showed its right part
+  enlarged beside the last good frame. The image counts as shown from the start of the
+  setup.
+- **Movies opened by command string in the player's own child window are scaled.** Rockman X
+  Math opens its movies with `open ... parent <window> style child`, asks for the player's
+  window (`status ... window handle`) and centres it with `MoveWindow` in its 640x480: the
+  movie played at its size near the corner of the screen, and the screen's refresh flickered
+  over it. Such a device is now handled as one opened through the command interface
+  (`MCI_DGV_OPEN_PARENT`, Road Rash): the game moving its window (`MoveWindow`,
+  `SetWindowPos`) is scaled, the picture placed in it, and the window counts as showing a
+  movie (not refreshed over).
+- **New developer tool: ddtrace** (`tools/ddtrace`), a separate `ddraw.dll` that logs every
+  DirectDraw and Direct3D (3–7) call a game makes and passes it on to Windows' own
+  `ddraw.dll`, dd2d9 or another wrapper, so two runs can be compared call for call. It found
+  that a KOF 99 missing its health bars and timer was a damaged copy of the game, not dd2d9.
+  Not part of dd2d9's own `ddraw.dll`.
+- A DC out on a locked surface: writes made through the lock meanwhile are kept (only what
+  GDI drew is copied back from the DIB copy; the older copy overwrote them).
+- Surfaces: a surface referenced again by another thread while its last `Release` waited for
+  the lock is kept; `Lock`'s fast path for textures goes by the DirectDraw object's kind
+  (made by `DirectDrawCreateEx`), not the interface; `Flip` checks `DDFLIP_STEREO` after a
+  lost surface, as ddraw.dll; a client-memory surface's size and pitch are checked in 64
+  bits; `DuplicateSurface` clears its result after the lost check.
+- Palette versions come from the counter buffers use, so a palette made where a freed one
+  was can't match what was cached of the old one.
+- An overlay locked or with its DC out while shown isn't cached as finished (it was decoded
+  half written, and not again until the game next touched it).
+- `SetCooperativeLevel` with `DDSCL_CREATEDEVICEWINDOW` twice keeps the first device
+  window; leaving exclusive mode lets the cursor go with DirectDraw 1 too; a
+  `SetDisplayMode` or `RestoreDisplayMode` while Alt+Tabbed away is noted and set up on the
+  way back (the display was switched with the device window topmost over the desktop);
+  a `WM_DISPLAYCHANGE` that arrives while another thread holds the display lock is checked
+  again shortly after, not dropped.
+- Direct3D: emulated W buffering takes its scale once per draw from the nearest vertex (a
+  triangle's corners could get different scales, and an infinite rhw zeroed it for the
+  rest of the frame); a clear with one rectangle over the whole target counts as whole (the
+  W scale restarts, no upload of what it covers); a failed vertex declaration isn't
+  released; Direct3D 2's device holds and releases its Z buffer through the same interface
+  after `SetRenderTarget` changes the target's; transformed indexed draws (Direct3D 3–6)
+  with indices past the vertices use vertex 0, as Direct3D 7 does; a viewport whose
+  position plus size wraps 32 bits is refused.
+- Hooks: a game DLL unloaded and loaded again is patched again; modules are kept loaded
+  while patched; `ChangeDisplaySettings` isn't handed a copy read past a short `DEVMODE`.
+  The crash logger allocates nothing (it runs with the heap perhaps damaged) and does
+  nothing with `log=0`. A thread's sleep timer is closed with the thread.
+- Faster: a sprite from a DXT texture atlas decodes only its own blocks (15 to 180–380
+  Mpix/s, 32x32 from 1024x1024), YUY2 and YV12 only the columns blitted; converting blits
+  (16↔32-bit, YUY2 into 16-bit) a row at a time with SSE2 (3–4 times faster); stretched or
+  mirrored keyed sprites, key ranges and destination keys with SSE2 (10–40% faster);
+  24-bit fills four pixels at a time; `GetDisplayMode` asks for the refresh rate at most
+  twice a second.
+- Tested: ddtest 365/365 (new checks for the two movie fixes and the locked-surface
+  DC, each failing before it, and for the device window), ddtest audit, d3d7test, Wine's ddraw
+  tests: no regressions. The three player fixes confirmed in the games.
+
 ## 1.3.0
 Borderless and window mode, made to match what a game expects of a real mode switch. Fixes
 from Hydro Thunder, then an audit of the ways a game can take or check fullscreen (new

@@ -23,10 +23,15 @@ std::vector<Patched>* g_patched;  // g_hookLock
 // The modules a hook table was applied to (g_hookLock): not walked again for it (a game
 // creating DirectDraw objects over and over would have every module's imports walked each
 // time); a module loaded since, or another at the same address, is.
+// A module unloaded and loaded again at the same address is told apart by a slot it was
+// patched in (`probe`) holding the real function again (not the hook, nor another
+// hooker's patch over it): walked again.
 struct Scanned {
     const ImportHook* hooks;
     HMODULE module;
     std::wstring path;
+    void** probe;  // one slot patched (none: nothing there to patch, whichever copy)
+    void* real;
 };
 std::vector<Scanned>* g_scanned;
 
@@ -168,19 +173,43 @@ unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) 
     std::vector<std::pair<HMODULE, std::wstring>> modules;
     if (inLoaderLock) ModulesFromLoader(&modules);
     else ModulesFromSnapshot(&modules);
+    // Kept loaded while patched (another thread could unload one meanwhile); pinned before
+    // the lock is taken, since pinning takes the loader lock. In DllMain the loader lock,
+    // held, keeps every module loaded.
+    std::vector<HMODULE> pinned;
+    if (!inLoaderLock) {
+        size_t kept = 0;
+        for (size_t i = 0; i < modules.size(); i++) {
+            HMODULE pin = nullptr;
+            if (modules[i].first == self) continue;  // (LeaveAlone's, under the lock)
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(modules[i].first), &pin))
+                continue;  // gone since the snapshot
+            pinned.push_back(pin);
+            if (pin == modules[i].first) modules[kept++] = std::move(modules[i]);
+        }
+        modules.resize(kept);
+    }
     unsigned count = 0;
     AcquireSRWLockExclusive(&g_hookLock);
     if (!g_patched) g_patched = new std::vector<Patched>;
     if (!g_scanned) g_scanned = new std::vector<Scanned>;
     for (const auto& [m, path] : modules) {
         if (m == self || LeaveAlone(path.c_str())) continue;
-        bool seen = false;
-        for (const Scanned& sc : *g_scanned) seen |= sc.hooks == hooks && sc.module == m && sc.path == path;
-        if (seen) continue;
+        auto sc = g_scanned->begin();
+        for (; sc != g_scanned->end(); ++sc)
+            if (sc->hooks == hooks && sc->module == m && sc->path == path) break;
+        if (sc != g_scanned->end()) {
+            if (!sc->probe || *sc->probe != sc->real) continue;
+            g_scanned->erase(sc);  // the same file loaded again: its imports are the real ones again
+        }
+        const size_t before = g_patched->size();
         count += PatchModule(m, hooks, n);
-        g_scanned->push_back({hooks, m, path});
+        Scanned added = {hooks, m, path, nullptr, nullptr};
+        if (g_patched->size() > before) added.probe = (*g_patched)[before].slot, added.real = (*g_patched)[before].original;
+        g_scanned->push_back(std::move(added));
     }
     ReleaseSRWLockExclusive(&g_hookLock);
+    for (HMODULE m : pinned) FreeLibrary(m);  // (outside the lock: it can run a DLL's detach)
     return count;
 }
 

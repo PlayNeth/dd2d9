@@ -50,7 +50,14 @@ void Surface::FillCore(RECT* r, DWORD value) {
         case 1: memset(row, int(value), size_t(n)); break;
         case 2: for (int x = 0; x < n; x++) reinterpret_cast<uint16_t*>(row)[x] = uint16_t(value); break;
         case 4: for (int x = 0; x < n; x++) reinterpret_cast<uint32_t*>(row)[x] = value; break;
-        default: for (int x = 0; x < n; x++) WritePx(row + x * 3, 3, value); break;
+        default: {  // 24-bit: four pixels (three words) at a time
+            uint32_t w[3];
+            for (int k = 0; k < 12; k++) reinterpret_cast<uint8_t*>(w)[k] = uint8_t(value >> (8 * (k % 3)));
+            int x = 0;
+            for (; x + 4 <= n; x += 4) memcpy(row + x * 3, w, 12);
+            for (; x < n; x++) WritePx(row + x * 3, 3, value);
+            break;
+        }
         }
     }
 }
@@ -117,6 +124,7 @@ NearestIndex g_nearest;
 std::vector<RECT> g_clips;
 std::vector<int> g_xmap;
 std::vector<uint8_t> g_temp;
+std::vector<uint8_t> g_keyRow;  // a stretched / mirrored keyed row's source pixels, gathered
 // Set on every pixel a blit writes (BltFourCC: alpha 255 from a source without alpha).
 uint32_t g_orMask;
 
@@ -186,14 +194,71 @@ __attribute__((noinline)) static void KeyRow(T* d, const T* s, int n, uint32_t m
     }
 }
 
-// Any combination of keys, 1:1 (Direct) or stretched / mirrored columns (out of line, as KeyRow).
+// lo <= (v & mask) <= hi for each pixel (all ones where so), as InKey.
+template <typename T> struct InRange;
+template <> struct InRange<uint8_t> {
+    static __m128i Test(__m128i v, __m128i lo, __m128i range) {
+        return _mm_cmpeq_epi8(_mm_subs_epu8(_mm_sub_epi8(v, lo), range), _mm_setzero_si128());
+    }
+    static __m128i Bias(uint32_t v) { return Simd<uint8_t>::Set(v); }
+};
+template <> struct InRange<uint16_t> {
+    static __m128i Test(__m128i v, __m128i lo, __m128i range) {
+        return _mm_cmpeq_epi16(_mm_subs_epu16(_mm_sub_epi16(v, lo), range), _mm_setzero_si128());
+    }
+    static __m128i Bias(uint32_t v) { return Simd<uint16_t>::Set(v); }
+};
+template <> struct InRange<uint32_t> {
+    // (No unsigned compare: both sides with the top bit flipped, compared signed; `range` comes
+    // flipped already, from Bias.)
+    static __m128i Test(__m128i v, __m128i lo, __m128i range) {
+        const __m128i d = _mm_xor_si128(_mm_sub_epi32(v, lo), _mm_set1_epi32(INT32_MIN));
+        return _mm_xor_si128(_mm_cmpgt_epi32(d, range), _mm_set1_epi32(-1));
+    }
+    static __m128i Bias(uint32_t v) { return _mm_set1_epi32(int(v ^ 0x80000000u)); }
+};
+
+// One row, 1:1, any combination of keys (ranges too) and the OR mask: a source pixel is
+// written where its key doesn't match and the destination's key does.
+template <typename T, bool SrcKey, bool DstKey>
+__attribute__((noinline)) static void KeyRowAny(T* d, const T* s, int n, const BlitJob& j) {
+    constexpr int kPerVector = 16 / sizeof(T);
+    const __m128i skMask = Simd<T>::Set(j.skMask), skLo = Simd<T>::Set(j.skLo), skRange = InRange<T>::Bias(j.skHi - j.skLo);
+    const __m128i dkMask = Simd<T>::Set(j.dkMask), dkLo = Simd<T>::Set(j.dkLo), dkRange = InRange<T>::Bias(j.dkHi - j.dkLo);
+    const __m128i orMask = Simd<T>::Set(j.orMask);
+    int i = 0;
+    for (; i + kPerVector <= n; i += kPerVector) {
+        const __m128i sv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + i));
+        __m128i* dp = reinterpret_cast<__m128i*>(d + i);
+        const __m128i dv = _mm_loadu_si128(dp);
+        __m128i write = _mm_set1_epi32(-1);
+        if (SrcKey) write = _mm_andnot_si128(InRange<T>::Test(_mm_and_si128(sv, skMask), skLo, skRange), write);
+        if (DstKey) write = _mm_and_si128(InRange<T>::Test(_mm_and_si128(dv, dkMask), dkLo, dkRange), write);
+        const int bits = _mm_movemask_epi8(write);
+        if (bits == 0) continue;
+        const __m128i out = _mm_or_si128(sv, orMask);
+        _mm_storeu_si128(dp, bits == 0xFFFF ? out : _mm_or_si128(_mm_and_si128(write, out), _mm_andnot_si128(write, dv)));
+    }
+    for (; i < n; i++) {
+        const uint32_t v = s[i];
+        if (SrcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
+        if (DstKey && !InKey(uint32_t(d[i]) & j.dkMask, j.dkLo, j.dkHi)) continue;
+        d[i] = T(v | j.orMask);
+    }
+}
+
+// Any combination of keys, 1:1 (Direct) or stretched / mirrored columns (out of line, as KeyRow):
+// the row's source pixels (gathered by column first when not Direct) through KeyRowAny.
 template <typename T, bool Direct, bool SrcKey, bool DstKey>
 __attribute__((noinline)) static void KeyRows(const BlitJob& j, const int* xmap) {
     const int n = j.dc.right - j.dc.left;
     const int sx = j.s0.left + (j.dc.left - j.d0.left);  // first source column when Direct
-    // (Locals: the row stores could alias the job, which would be read again at every pixel.)
-    const uint32_t skMask = j.skMask, skLo = j.skLo, skHi = j.skHi, dkMask = j.dkMask, dkLo = j.dkLo, dkHi = j.dkHi,
-                   orMask = j.orMask;
+    const uint32_t orMask = j.orMask;
+    T* gathered = nullptr;
+    if (!Direct) {
+        g_keyRow.resize(size_t(n) * sizeof(T));
+        gathered = reinterpret_cast<T*>(g_keyRow.data());
+    }
     int lastSy = -1;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
@@ -204,12 +269,13 @@ __attribute__((noinline)) static void KeyRows(const BlitJob& j, const int* xmap)
         }
         lastSy = sy;
         const T* srow = reinterpret_cast<const T*>(j.src + sy * j.spitch);
-        for (int i = 0; i < n; i++) {
-            const uint32_t v = Direct ? srow[sx + i] : srow[xmap[i]];
-            if (SrcKey && InKey(v & skMask, skLo, skHi)) continue;
-            if (DstKey && !InKey(uint32_t(drow[i]) & dkMask, dkLo, dkHi)) continue;
-            drow[i] = T(v | orMask);
+        const T* from = srow + sx;
+        if (!Direct) {
+            for (int i = 0; i < n; i++) gathered[i] = srow[xmap[i]];
+            from = gathered;
         }
+        if (!SrcKey && !DstKey && !orMask) memcpy(drow, from, size_t(n) * sizeof(T));
+        else KeyRowAny<T, SrcKey, DstKey>(drow, from, n, j);
     }
 }
 
@@ -241,43 +307,29 @@ static void BlitSameFormat(const BlitJob& j) {
     }
 }
 
-// A8R8G8B8 to a format's pixel: a table per channel (ARGBToPixel's rounding), made again
-// when the format changes. g_lock held.
-struct Packer {
-    Format fmt;
-    bool valid = false;
-    uint32_t t[4][256];
-    void Prepare(const Format& f) {
-        if (valid && fmt == f) return;
-        fmt = f;
-        valid = true;
-        for (uint32_t i = 0; i < 256; i++) {
-            t[0][i] = ARGBToPixel(f, i << 16) & f.r;
-            t[1][i] = ARGBToPixel(f, i << 8) & f.g;
-            t[2][i] = ARGBToPixel(f, i) & f.b;
-            t[3][i] = ARGBToPixel(f, i << 24) & f.a;
-        }
-    }
-    uint32_t operator()(uint32_t argb) const {
-        return t[0][(argb >> 16) & 255] | t[1][(argb >> 8) & 255] | t[2][argb & 255] | t[3][argb >> 24];
-    }
-};
-Packer g_packer;
-std::vector<uint32_t> g_row;
+RowPacker g_packer;  // (g_lock held)
+std::vector<uint32_t> g_row, g_gathered;
 
-// Any formats, keys, stretching and mirroring: a pixel at a time, a converting blit's source
-// rows made A8R8G8B8 first (RowConverter: the part the columns read).
+// Any formats, keys, stretching and mirroring, a converting blit's source rows made
+// A8R8G8B8 first (RowConverter: the part the columns read). Without keys into a format that
+// isn't palettized, a row at a time (RowPacker, the columns gathered first when stretched or
+// mirrored); otherwise a pixel at a time.
 static void BlitGeneric(const BlitJob& j) {
     const int* xmap = BuildXMap(j);
     const int n = j.dc.right - j.dc.left;
     if (n <= 0) return;
     const int lo = std::min(xmap[0], xmap[n - 1]), span = std::max(xmap[0], xmap[n - 1]) + 1 - lo;
-    RowConverter conv(*j.sf, j.spal);
+    const bool keys = j.srcKey || j.dstKey;
+    const bool rows = j.convert && !keys && !j.df->pal8;
+    // (Its table only for a palettized source: built at every blit.)
+    const RowConverter conv(*j.sf, j.spal);
     if (j.convert) {
         g_row.resize(size_t(span));
         if (!j.df->pal8) g_packer.Prepare(*j.df);
     }
-    const bool keys = j.srcKey || j.dstKey;
+    // 1:1 columns: the converted row is the destination's, in order.
+    const bool direct = !j.mirrorX && j.d0.right - j.d0.left == j.s0.right - j.s0.left;
+    if (rows && !direct) g_gathered.resize(size_t(n));
     int lastSy = -1;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         uint8_t* drow = j.dst + y * j.dpitch + j.dc.left * j.dbytes;
@@ -289,6 +341,15 @@ static void BlitGeneric(const BlitJob& j) {
         lastSy = sy;
         const uint8_t* srow = j.src + sy * j.spitch;
         if (j.convert) conv.Run(srow + lo * j.sbytes, g_row.data(), span);
+        if (rows) {
+            const uint32_t* from = g_row.data();
+            if (!direct) {
+                for (int i = 0; i < n; i++) g_gathered[size_t(i)] = g_row[size_t(xmap[i] - lo)];
+                from = g_gathered.data();
+            }
+            g_packer.Run(from, drow, n, j.orMask);
+            continue;
+        }
         for (int i = 0; i < n; i++) {
             uint32_t v = 0;
             if (j.srcKey || !j.convert) {
@@ -299,7 +360,7 @@ static void BlitGeneric(const BlitJob& j) {
             if (j.dstKey && !InKey(ReadPx(dp, j.dbytes) & j.dkMask, j.dkLo, j.dkHi)) continue;
             if (j.convert) {
                 const uint32_t argb = g_row[size_t(xmap[i] - lo)];
-                v = j.df->pal8 ? g_nearest(j.dpal, argb) : g_packer(argb);
+                v = j.df->pal8 ? g_nearest(j.dpal, argb) : g_packer.One(argb);
             }
             WritePx(dp, j.dbytes, v | j.orMask);
         }
@@ -462,7 +523,8 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     const bool dstConv = realDst->fmt.fourcc, srcConv = realSrc && realSrc->fmt.fourcc;
     const RECT dr = dstRect ? *dstRect : RECT{0, 0, realDst->w, realDst->h};
     const RECT sr = src ? (srcRect ? *srcRect : RECT{0, 0, realSrc->w, realSrc->h}) : RECT{};
-    auto decode = [&](Surface* s, Buffer* t, std::vector<uint8_t>& mem, LONG top, LONG bottom) -> bool {
+    // (Only the columns too: a sprite from a big texture atlas decodes its own blocks.)
+    auto decode = [&](Surface* s, Buffer* t, std::vector<uint8_t>& mem, LONG top, LONG bottom, LONG left, LONG right) -> bool {
         s->CpuAccess(false);
         const Buffer* b = s->buf;
         t->w = b->w;
@@ -481,7 +543,10 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         const int align = b->fmt.BlockCompressed() ? 4 : b->fmt.Planar() ? 2 : 1;
         const int y0 = int(std::max<LONG>(top, 0)) / align * align;
         const int y1 = int(std::min<LONG>((std::min<LONG>(bottom, b->h) + align - 1) / align * align, b->h));
-        if (y0 < y1) DecodeFourCC(b, t->bits, t->pitch, y0, y1);
+        const int across = b->fmt.BlockCompressed() ? 4 : 2;  // (YUV: pairs, 2x2 blocks)
+        const int x0 = int(std::max<LONG>(left, 0)) / across * across;
+        const int x1 = int(std::min<LONG>((std::min<LONG>(right, b->w) + across - 1) / across * across, b->w));
+        if (y0 < y1 && x0 < x1) DecodeFourCC(b, t->bits, t->pitch, y0, y1, x0, x1);
         return true;
     };
     static std::vector<uint8_t> dstMem, srcMem;
@@ -492,12 +557,13 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         // (Its own source too: the rows of both.)
         const bool both = src == this || (src && src->buf == buf);
         const LONG top = both ? std::min(dr.top, sr.top) : dr.top, bottom = both ? std::max(dr.bottom, sr.bottom) : dr.bottom;
-        if (!decode(this, &dstTemp, dstMem, top, bottom)) return DDERR_OUTOFMEMORY;
+        const LONG left = both ? std::min(dr.left, sr.left) : dr.left, right = both ? std::max(dr.right, sr.right) : dr.right;
+        if (!decode(this, &dstTemp, dstMem, top, bottom, left, right)) return DDERR_OUTOFMEMORY;
         td = &dstTemp;
         if (both) ts = td;
     }
     if (srcConv && !ts) {
-        if (!decode(src, &srcTemp, srcMem, sr.top, sr.bottom)) return DDERR_OUTOFMEMORY;
+        if (!decode(src, &srcTemp, srcMem, sr.top, sr.bottom, sr.left, sr.right)) return DDERR_OUTOFMEMORY;
         ts = &srcTemp;
     }
     // A source without alpha is opaque (Wine's test_surface_format_conversion_alpha, RGBX
@@ -507,7 +573,7 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     // Colour keys of the FourCC sides, as the decoded pixels they match (a source key is in
     // the source's format, a destination key in the destination's): set for the blit, put
     // back after.
-    DDBLTFX fxConv;
+    DDBLTFX fxConv{};
     if (fx) fxConv = *fx;
     Surface* const keyDst = destKeyFromSource ? src : this;
     const DDCOLORKEY savedSrc = src ? src->ck[kCkSrcBlt] : DDCOLORKEY{}, savedDst = keyDst ? keyDst->ck[kCkDestBlt] : DDCOLORKEY{};

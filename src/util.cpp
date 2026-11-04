@@ -454,8 +454,13 @@ static HMODULE ModuleAt(const void* addr) {
 
 // "module.dll+0x1234" for a code address, or the bare address outside any module.
 static void DescribeAddress(const void* addr, char* out, size_t size) {
+    // No allocation (it runs in the crash handler, perhaps with the heap damaged).
     if (HMODULE m = ModuleAt(addr)) {
-        snprintf(out, size, "%s+0x%lx", Utf8(BaseName(ModulePath(m))).c_str(),
+        char path[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(m, path, MAX_PATH);
+        path[n < MAX_PATH ? n : MAX_PATH - 1] = 0;
+        const char* name = strrchr(path, '\\');
+        snprintf(out, size, "%s+0x%lx", name ? name + 1 : path,
                  static_cast<unsigned long>(static_cast<const char*>(addr) - reinterpret_cast<const char*>(m)));
     } else {
         snprintf(out, size, "%p", addr);
@@ -482,6 +487,7 @@ static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep) {
     case 0xE06D7363: what = "C++ exception"; break;
     default: return EXCEPTION_CONTINUE_SEARCH;  // not a crash (or, for stack overflows, no stack left to log with)
     }
+    if (!g_logFile) return EXCEPTION_CONTINUE_SEARCH;
     static LONG loggedThrows;
     if (InterlockedIncrement(code == 0xE06D7363 ? &loggedThrows : &logged) > 5) return EXCEPTION_CONTINUE_SEARCH;
     char at[300];
@@ -500,15 +506,17 @@ static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep) {
     MEMORY_BASIC_INFORMATION mbi;
     if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return EXCEPTION_CONTINUE_SEARCH;
     const auto* top = reinterpret_cast<const ULONG_PTR*>(static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize);
-    std::string chain;
+    char chain[12 * 80] = "";
+    size_t used = 0;
     int found = 0;
     for (int i = 0; i < 512 && sp + i < top && found < 12; i++) {
         if (!ModuleAt(reinterpret_cast<const void*>(sp[i]))) continue;
         DescribeAddress(reinterpret_cast<const void*>(sp[i]), at, sizeof(at));
-        chain += found++ ? ", " : "";
-        chain += at;
+        const int w = snprintf(chain + used, sizeof(chain) - used, "%s%s", found++ ? ", " : "", at);
+        if (w < 0 || size_t(w) >= sizeof(chain) - used) break;
+        used += size_t(w);
     }
-    Log(1, "  stack (modules found, innermost first): %s", found ? chain.c_str() : "none");
+    Log(1, "  stack (modules found, innermost first): %s", found ? chain : "none");
 #endif
     return EXCEPTION_CONTINUE_SEARCH;
 }

@@ -1453,7 +1453,8 @@ struct GpuContext::Impl final : Gpu::Owner {
         gpu.RemoveOwner(this);
     }
     void ReleaseGpuResources() override {
-        for (auto& e : decls) e.second->Release();
+        for (auto& e : decls)
+            if (e.second) e.second->Release();  // a failed one is cached as nullptr
         decls.clear();
         boundRt = boundZ = nullptr;
     }
@@ -1763,7 +1764,11 @@ void GpuContext::Impl::ClampCutouts(DWORD fvf, const void* verts, UINT stride, U
 void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, float z, DWORD stencil) {
     Impl& p = *p_;
     if (!p.dev) return;
-    const bool whole = n == 0 && p.CoversTarget();
+    // Whole: no rectangles with a viewport over the target, or one rectangle over all of it
+    // (Direct3D 7 games often pass the viewport's rectangle).
+    const bool whole = p.rt && (n == 0 ? p.CoversTarget()
+                                       : n == 1 && rects[0].left <= 0 && rects[0].top <= 0 &&
+                                             rects[0].right >= p.rt->buf->w && rects[0].bottom >= p.rt->buf->h);
     if (!p.BindTargets(whole && (flags & D3DCLEAR_TARGET), whole && (flags & D3DCLEAR_ZBUFFER))) return;
     if (!p.boundZ) flags &= ~DWORD(D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL);
     if (!flags) return;
@@ -1965,6 +1970,11 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         const bool flatRhw = (badRhw || (minRhw > 0.0f && maxRhw > minRhw * 10000.0f)) && (!p.tex[0] || minRhw == 0.0f);
         badRhw = badRhw || flatRhw;
         const bool wz = p.wEmulate;
+        // The scale for the whole draw at once, from its nearest valid w: shrunk vertex by
+        // vertex, a triangle's corners before the nearest one got another scale than those
+        // after (its depth warped); an infinite rhw (bad, above) made it 0 and every depth
+        // after it 1 until the next whole clear.
+        if (wz && maxRhw * g_wScale > 1.0f) g_wScale = 0.5f / maxRhw;
         if (clampZ || badRhw || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
             for (UINT i = 0; i < vertexCount; i++) {
@@ -1976,8 +1986,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                 // up (the game's own z may not: NFS III's light maps fought with the road).
                 // The scale keeps the nearest w seen within [0, 1], 24 bits for the rest.
                 if (wz) {
-                    const float rhw = v[3] > 0.0f ? v[3] : 0.0f;
-                    if (rhw * g_wScale > 1.0f) g_wScale = 0.5f / rhw;
+                    const float rhw = v[3] >= FLT_MIN && std::isfinite(v[3]) ? v[3] : 0.0f;  // (bad: as far as can be)
                     v[2] = 1.0f - rhw * g_wScale;
                 }
                 if (flatRhw) v[3] = 1.0f;

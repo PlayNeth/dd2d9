@@ -91,6 +91,7 @@ Buffer* Buffer::Create(int w, int h, const Format& f) {
 }
 
 Buffer* Buffer::CreateExternal(void* mem, int w, int h, LONG pitch, const Format& f) {
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return nullptr;  // (as Create: sizes the blitter can take)
     auto* b = new (std::nothrow) Buffer();
     if (!b) return nullptr;
     b->w = w;
@@ -136,7 +137,13 @@ void LoadKmt() {
 // The D3DDDIFORMAT for f, or 0 if GDI can't take it.
 UINT KmtFormat(const Format& f) {
     if (f.zbuf || f.fourcc || f.bump) return 0;
-    if (f.pal8) return 41;  // P8
+    // 8-bit surfaces get a DIB copy instead (Buffer::GetDC): their DC's colour table has to
+    // follow the palette (GetDC, Palette::SetEntries), and on Windows SetDIBColorTable leaves
+    // a DC from D3DKMTCreateDCFromMemory with the table it was made with (Wine's follows).
+    // Pal95's text strip kept the grey ramp it was made with: its white text became index
+    // 255, its transparent colour, and only the shadow showed. (paltext on Windows 11: white
+    // drawn as 255 whatever the palette; Wine: as the palette's white.)
+    if (f.pal8) return 0;
     if (f.bpp == 32 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return f.a == 0xFF000000u ? 21 : 22;
     if (f.bpp == 32 && f.r == 0x3FF00000 && f.g == 0xFFC00 && f.b == 0x3FF) return 35;  // A2R10G10B10
     if (f.bpp == 24 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return 20;
@@ -201,13 +208,28 @@ HDC Buffer::GetDC() {
 void Buffer::CopyToShadow() {
     const LONG sp = DibPitch(w, fmt), row = LONG(w * fmt.Bytes());
     for (int y = 0; y < h; y++) memcpy(shadowBits + y * sp, Row(y), size_t(row));
+    shadowWas.assign(shadowBits, shadowBits + size_t(sp) * size_t(h));
 }
 
-void Buffer::EndDC() {
+// Only what GDI changed goes back: GetDC is allowed on a locked surface, and on XP the DC
+// draws into the surface memory itself, so the game's writes through the lock while the DC
+// is out stay (copied back whole, the shadow's older copy of them overwrote them).
+void Buffer::EndDC() {  // (GdiFlush done by the caller)
     if (!shadow) return;
-    GdiFlush();
     const LONG sp = DibPitch(w, fmt), row = LONG(w * fmt.Bytes());
-    for (int y = 0; y < h; y++) memcpy(Row(y), shadowBits + y * sp, size_t(row));
+    const bool snapshot = shadowWas.size() >= size_t(sp) * size_t(h);
+    for (int y = 0; y < h; y++) {
+        const uint8_t* now = shadowBits + y * sp;
+        uint8_t* mem = Row(y);
+        if (!snapshot) {
+            memcpy(mem, now, size_t(row));
+            continue;
+        }
+        const uint8_t* was = shadowWas.data() + size_t(y) * size_t(sp);
+        if (!memcmp(now, was, size_t(row))) continue;
+        for (LONG i = 0; i < row; i++)
+            if (now[i] != was[i]) mem[i] = now[i];
+    }
 }
 
 // ================================================================ Surface
@@ -380,6 +402,9 @@ ULONG Surface::Release(int slot) {
         {
             Guard l;
             if (root) return ULONG(r);  // can't happen: the root holds a reference
+            // Referenced again before the lock was ours: a thread holding it found the surface
+            // in dd->surfaces (EnumSurfaces, GetSurfaceFromDC) and took a reference. It lives.
+            if (total_ != 0) return ULONG(r);
             owner = dd;
             ownerRef = ddRef;
             owner->IntAddRef();  // the object stays allocated until its Release below is done
@@ -712,7 +737,10 @@ HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
     size_t i = 0;
     for (; i < list.size(); i++) {
         DDSURFACEDESC2 d2;
-        list[i]->GetSurfaceDesc(&d2);
+        {
+            Guard l;  // (its buffer: SetSurfaceDesc or a Flip on another thread changes it)
+            list[i]->GetSurfaceDesc(&d2);
+        }
         union {
             DDSURFACEDESC v1;
             DDSURFACEDESC2 v2;
@@ -1166,10 +1194,12 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
     if (CantDraw() && !background) return DDERR_SURFACELOST;
     auto* d = static_cast<DDSURFACEDESC2*>(outDesc);
     const DWORD caps = desc.ddsCaps.dwCaps;
-    // XP's fast path for DirectDraw 7 system-memory textures (spec section 1.4); managed
-    // textures, kept in system memory too, get it as well (Wine's test on Windows).
+    // XP's fast path for system-memory textures of a DirectDraw object made by
+    // DirectDrawCreateEx (spec section 1.4: DDRAWILCL_DIRECTDRAW7, the object's flag, not the
+    // interface the surface was made through); managed textures, kept in system memory too,
+    // get it as well (Wine's test on Windows).
     const bool managed = (desc.ddsCaps.dwCaps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) != 0;
-    const bool fast = ddVersion == 7 && (sysmemRequested || managed) && (caps & DDSCAPS_TEXTURE);
+    const bool fast = dd->dd7 && (sysmemRequested || managed) && (caps & DDSCAPS_TEXTURE);
     RECT area = {0, 0, buf->w, buf->h};
     if (fast) {
         if (!d) return DDERR_INVALIDPARAMS;
@@ -1403,9 +1433,10 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         const DWORD kIntervals = 0x07000000;
         const bool overlay = (desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY) != 0;
         if ((flags & ~(0x3Fu | kIntervals)) || ((flags & (DDFLIP_EVEN | DDFLIP_ODD)) && !overlay) ||
-            (flags & DDFLIP_STEREO) || ((flags & DDFLIP_NOVSYNC) && (flags & kIntervals)))
+            ((flags & DDFLIP_NOVSYNC) && (flags & kIntervals)))
             return DDERR_INVALIDPARAMS;
         if (IsLost() || (target && target->IsLost(false))) return DDERR_SURFACELOST;
+        if (flags & DDFLIP_STEREO) return DDERR_INVALIDPARAMS;  // (after the lost check, row 6)
         // Called on the front buffer of a chain (created, or put together with AddAttachedSurface).
         const DWORD caps = desc.ddsCaps.dwCaps;
         if (!(caps & DDSCAPS_FLIP) || !(caps & DDSCAPS_FRONTBUFFER)) return DDERR_NOTFLIPPABLE;
@@ -1599,7 +1630,7 @@ HRESULT Palette::SetEntries(DWORD flags, DWORD start, DWORD count, LPPALETTEENTR
         memcpy(entries + start, in, sizeof(PALETTEENTRY) * count);
     }
     ReserveSystemEntries();
-    version++;
+    version = NextCpuSerial();
     DD2D9_TRACE("Palette %p SetEntries start=%lu count=%lu%s", static_cast<void*>(this), start, count,
                dd_ && dd_->primary && dd_->primary->ShownPalette() == this ? " (primary)" : "");
     if (dd_ && dd_->primary && dd_->primary->ShownPalette() == this) dd_->MarkDirty();

@@ -434,7 +434,7 @@ public:
     D3DDEVICEDESC hal = {}, hel = {};
     LONG ref = 1;
     int outerSlot = -1;  // version 1: the surface slot AddRef/Release go to
-    int zSlot = -1;      // version 2: the Z buffer's slot after SetRenderTarget (creation: rtVersion's)
+    int zSlot = -1;      // version 2: the slot the Z buffer is held by
     bool rtUnheld = false;  // SetRenderTarget to a Z buffer: set without a reference (B §7.1)
 
     // ---- front-end state (B §1.3), answered by every Get

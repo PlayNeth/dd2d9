@@ -204,13 +204,21 @@ std::string Translate(const std::string& cmd, std::string* natural, HWND* natura
     return out;
 }
 
+// A device opened with a command string in its own child window of the game's (see
+// "mciSendCommand" below, where it joins the command interface's devices).
+void BeforeStringCommand(const std::string& cmd);
+void AfterStringCommand(const std::string& cmd, MCIERROR e);
+
 MCIERROR WINAPI HookSendStringA(LPCSTR cmd, LPSTR ret, UINT len, HWND callback) {
     if (!cmd) return g_sendStringA(cmd, ret, len, callback);
     std::string natural;
     HWND naturalWindow = nullptr;
     const std::string sent = Translate(cmd, &natural, &naturalWindow);
     if (!natural.empty()) PlaceNatural(natural, naturalWindow);
-    return g_sendStringA(sent.c_str(), ret, len, callback);
+    BeforeStringCommand(cmd);
+    const MCIERROR e = g_sendStringA(sent.c_str(), ret, len, callback);
+    AfterStringCommand(cmd, e);
+    return e;
 }
 
 MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback) {
@@ -226,9 +234,16 @@ MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback
     HWND naturalWindow = nullptr;
     const std::string sent = Translate(a, &natural, &naturalWindow);
     if (!natural.empty()) PlaceNatural(natural, naturalWindow);
-    if (sent == a) return g_sendStringW(cmd, ret, len, callback);
-    const std::wstring w(sent.begin(), sent.end());
-    return g_sendStringW(w.c_str(), ret, len, callback);
+    BeforeStringCommand(a);
+    MCIERROR e;
+    if (sent == a) {
+        e = g_sendStringW(cmd, ret, len, callback);
+    } else {
+        const std::wstring w(sent.begin(), sent.end());
+        e = g_sendStringW(w.c_str(), ret, len, callback);
+    }
+    AfterStringCommand(a, e);
+    return e;
 }
 
 // ---------------------------------------------------------------- mciSendCommand
@@ -250,7 +265,8 @@ struct CmdDevice {
     bool child;       // in its own child window of `window` (else in `window` itself)
     HWND parent;      // opened in a child window of this one (MCI_WINDOW's default: back to it)
     bool placed;      // the game gave a destination
-    bool gameWindow;  // the game placed the child window itself (MCI_PUT with MCI_DGV_PUT_WINDOW)
+    bool gameWindow;  // the game placed the child window itself (MCI_PUT with MCI_DGV_PUT_WINDOW, or moving it)
+    HWND own;         // that child window (MCI_STATUS's MCI_DGV_STATUS_HWND), for the game moving it
 };
 std::map<MCIDEVICEID, CmdDevice>* g_cmdDevices;  // under g_videoLock
 volatile LONG g_cmdShown;                         // its size (read without the lock)
@@ -266,6 +282,16 @@ SendCommandFn RealSendCommandA() {
         return m ? reinterpret_cast<SendCommandFn>(reinterpret_cast<void*>(GetProcAddress(m, "mciSendCommandA"))) : nullptr;
     }();
     return f;
+}
+
+// The device's own window (opened with a child window style), as the player reports it.
+HWND DeviceWindow(MCIDEVICEID id) {
+    const SendCommandFn send = RealSendCommandA();
+    if (!send) return nullptr;
+    MCI_DGV_STATUS_PARMSA p = {};
+    p.dwItem = MCI_DGV_STATUS_HWND;
+    if (send(id, MCI_STATUS, MCI_STATUS_ITEM, reinterpret_cast<DWORD_PTR>(&p)) != 0) return nullptr;
+    return reinterpret_cast<HWND>(p.dwReturn);
 }
 
 // A rectangle of the game's (x, y, width, height) in `window`'s real client coordinates: in a
@@ -337,9 +363,10 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
         const auto* o = reinterpret_cast<const MCI_DGV_OPEN_PARMSA*>(parms);
         if (e == 0 && o && (flags & MCI_DGV_OPEN_PARENT) && o->hWndParent && (flags & MCI_DGV_OPEN_WS) &&
             (o->dwStyle & WS_CHILD)) {
+            const HWND own = DeviceWindow(o->wDeviceID);  // (not under g_videoLock: an MCI call)
             EnterCriticalSection(&g_videoLock);
             if (!g_cmdDevices) g_cmdDevices = new std::map<MCIDEVICEID, CmdDevice>;
-            (*g_cmdDevices)[o->wDeviceID] = CmdDevice{o->hWndParent, true, o->hWndParent, false, false};
+            (*g_cmdDevices)[o->wDeviceID] = CmdDevice{o->hWndParent, true, o->hWndParent, false, false, own};
             RecountAll();
             LeaveCriticalSection(&g_videoLock);
             DD2D9_LOG("video device %u: opened in a child window of %p", o->wDeviceID, static_cast<void*>(o->hWndParent));
@@ -361,8 +388,8 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
         const HWND h = reinterpret_cast<const MCI_DGV_WINDOW_PARMSA*>(parms)->hWnd;
         auto it = devs.find(id);
         const HWND parent = it != devs.end() ? it->second.parent : nullptr;
-        if (h != MCI_DGV_WINDOW_DEFAULT) devs[id] = CmdDevice{h, false, parent, false, false};
-        else if (parent) devs[id] = CmdDevice{parent, true, parent, false, false};  // (its own window again)
+        if (h != MCI_DGV_WINDOW_DEFAULT) devs[id] = CmdDevice{h, false, parent, false, false, nullptr};
+        else if (parent) devs[id] = CmdDevice{parent, true, parent, false, false, it->second.own};  // (its own window again)
         else if (it != devs.end()) devs.erase(it);
         RecountAll();
     } else if (msg == MCI_PUT && parms && devs.count(id)) {
@@ -412,6 +439,100 @@ MCIERROR WINAPI HookSendCommandW(MCIDEVICEID id, UINT msg, DWORD_PTR flags, DWOR
     return SendCommand(g_sendCommandW, id, msg, flags, parms);
 }
 
+// The command strings' devices by ID (winmm's mciGetDeviceIDA).
+MCIDEVICEID DeviceId(const std::string& alias) {
+    using Fn = MCIDEVICEID(WINAPI*)(LPCSTR);
+    static const Fn f = [] {
+        HMODULE m = GetModuleHandleW(L"winmm.dll");
+        return m ? reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(m, "mciGetDeviceIDA"))) : nullptr;
+    }();
+    return f ? f(alias.c_str()) : 0;
+}
+
+// "open <file> ... alias <a> parent <window> style child": the player's own child window in
+// the game's, as with MCI_DGV_OPEN_PARENT. Rockman X Math opens its movies so, asks for
+// the window ("status ... window handle") and centres it with MoveWindow in its 640x480:
+// the movie played at its size in the corner of the screen. Played without a destination,
+// it gets its natural size, scaled, as through the command interface; closed, forgotten.
+void BeforeStringCommand(const std::string& cmd) {
+    const std::vector<std::string> t = Split(cmd);
+    if (t.size() < 2) return;
+    const std::string verb = Lower(t[0]), alias = Lower(t[1]);
+    if (verb != "play" && verb != "close") return;
+    InitOnce();
+    EnterCriticalSection(&g_videoLock);
+    if (!g_cmdDevices || g_cmdDevices->empty()) {
+        LeaveCriticalSection(&g_videoLock);
+        return;
+    }
+    LeaveCriticalSection(&g_videoLock);
+    const MCIDEVICEID id = alias == "all" ? MCI_ALL_DEVICE_ID : DeviceId(alias);  // (not under the lock)
+    if (!id) return;
+    EnterCriticalSection(&g_videoLock);
+    bool natural = false;
+    CmdDevice dev = {};
+    if (verb == "close") {
+        if (id == MCI_ALL_DEVICE_ID) g_cmdDevices->clear();
+        else g_cmdDevices->erase(id);
+        RecountAll();
+    } else if (g_cmdDevices->count(id)) {
+        dev = (*g_cmdDevices)[id];
+        natural = !dev.placed;
+    }
+    LeaveCriticalSection(&g_videoLock);
+    if (natural) PlaceNaturalCmd(id, dev);
+}
+
+void AfterStringCommand(const std::string& cmd, MCIERROR e) {
+    if (e != 0) return;
+    const std::vector<std::string> t = Split(cmd);
+    if (t.size() < 2 || Lower(t[0]) != "open") return;
+    std::string alias;
+    long parent = 0;
+    bool child = false;
+    for (size_t i = 2; i + 1 < t.size(); i++) {
+        const std::string k = Lower(t[i]);
+        if (k == "alias") alias = Lower(t[i + 1]);
+        else if (k == "parent") Number(t[i + 1], &parent);
+        else if (k == "style") {
+            long v;
+            child = Lower(t[i + 1]) == "child" || (Number(t[i + 1], &v) && (DWORD(v) & WS_CHILD));
+        }
+    }
+    if (alias.empty() || !parent || !child) return;
+    const HWND window = reinterpret_cast<HWND>(intptr_t(parent));
+    const MCIDEVICEID id = DeviceId(alias);
+    if (!id) return;
+    const HWND own = DeviceWindow(id);
+    InitOnce();
+    EnterCriticalSection(&g_videoLock);
+    if (!g_cmdDevices) g_cmdDevices = new std::map<MCIDEVICEID, CmdDevice>;
+    (*g_cmdDevices)[id] = CmdDevice{window, true, window, false, false, own};
+    RecountAll();
+    LeaveCriticalSection(&g_videoLock);
+    DD2D9_LOG("video \"%s\" (device %u): opened in a child window %p of %p", alias.c_str(), id, static_cast<void*>(own),
+              static_cast<void*>(window));
+}
+
+// The game moving or sizing a device's own child window (MoveWindow, SetWindowPos): in its
+// mode's coordinates, scaled as an MCIWnd window is; the device then counts as placed by the
+// game (its picture scaled with the window). False: not one.
+bool DeviceWindowToReal(HWND h, long r[4]) {
+    if (!h || !g_cmdShown) return false;
+    InitOnce();
+    EnterCriticalSection(&g_videoLock);
+    bool done = false;
+    if (g_cmdDevices)
+        for (auto& d : *g_cmdDevices)
+            if (d.second.child && d.second.own == h && InWindowToReal(d.second.window, r)) {
+                d.second.gameWindow = true;
+                done = true;
+                break;
+            }
+    LeaveCriticalSection(&g_videoLock);
+    return done;
+}
+
 // ---------------------------------------------------------------- MCIWnd
 using MoveWindowFn = BOOL(WINAPI*)(HWND, int, int, int, int, BOOL);
 using SetWindowPosFn = BOOL(WINAPI*)(HWND, HWND, int, int, int, int, UINT);
@@ -441,6 +562,14 @@ bool Scale(HWND parent, double* sx, double* sy) {
 }
 
 BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
+    {
+        long r[4] = {x, y, w, ht};
+        if (DeviceWindowToReal(h, r)) {
+            DD2D9_LOG("video window %p: %d,%d %dx%d in the game's coordinates, %ld,%ld %ldx%ld on the screen",
+                      static_cast<void*>(h), x, y, w, ht, r[0], r[1], r[2], r[3]);
+            return g_moveWindow(h, int(r[0]), int(r[1]), int(r[2]), int(r[3]), repaint);
+        }
+    }
     if (const HWND parent = MciWndParent(h)) {
         long r[4] = {x, y, w, ht};
         if (ToReal(parent, r)) {
@@ -454,13 +583,12 @@ BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
 
 BOOL WINAPI HookSetWindowPos(HWND h, HWND after, int x, int y, int w, int ht, UINT flags) {
     if ((flags & (SWP_NOMOVE | SWP_NOSIZE)) != (SWP_NOMOVE | SWP_NOSIZE)) {
-        if (const HWND parent = MciWndParent(h)) {
-            long r[4] = {x, y, w, ht};
-            if (ToReal(parent, r)) {
-                // A size alone scales; a position alone moves with the image (its own size kept).
-                if (!(flags & SWP_NOMOVE)) x = int(r[0]), y = int(r[1]);
-                if (!(flags & SWP_NOSIZE)) w = int(r[2]), ht = int(r[3]);
-            }
+        long r[4] = {x, y, w, ht};
+        const HWND parent = MciWndParent(h);
+        if ((parent && ToReal(parent, r)) || (!parent && DeviceWindowToReal(h, r))) {
+            // A size alone scales; a position alone moves with the image (its own size kept).
+            if (!(flags & SWP_NOMOVE)) x = int(r[0]), y = int(r[1]);
+            if (!(flags & SWP_NOSIZE)) w = int(r[2]), ht = int(r[3]);
         }
     }
     return g_setWindowPos(h, after, x, y, w, ht, flags);

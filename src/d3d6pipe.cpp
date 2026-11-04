@@ -70,6 +70,7 @@ void Project(const VpMap& m, PVert* p) {
 
 // Scratch reused from draw to draw (every caller holds g_lock).
 std::vector<PVert> t_pverts;
+std::vector<WORD> t_safeIdx;  // indices past the vertices, as vertex 0
 std::vector<uint8_t> t_out;
 std::vector<WORD> t_idx;
 std::vector<LightC> t_lights;
@@ -561,6 +562,15 @@ HRESULT Device::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT
         Use u(this);
         if (!u.ok) return D3D_OK;
         BindTextures9();
+        // Indices past the vertices given: vertex 0 instead (the GPU would read past them).
+        for (DWORD i = 0; idx && i < ni; i++)
+            if (idx[i] >= n) {
+                t_safeIdx.assign(idx, idx + ni);
+                for (WORD& k : t_safeIdx)
+                    if (k >= n) k = 0;
+                idx = t_safeIdx.data();
+                break;
+            }
         ctx.Draw(t, fvf & ~DWORD(0x001), v, stride, n, idx, ni, prims, rs[7] != D3DZB_FALSE);
         return D3D_OK;
     }

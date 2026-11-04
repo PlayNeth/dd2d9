@@ -34,7 +34,8 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
     // References (A §What a device holds): none for version 1 (the surface's aggregate).
     if (version == 2) {
         rt->AddRef(Surface::SlotFor(rtVersion));
-        if (z) z->AddRef(Surface::SlotFor(rtVersion));
+        zSlot = Surface::SlotFor(rtVersion);  // kept: rtVersion changes with SetRenderTarget
+        if (z) z->AddRef(zSlot);
     } else if (version == 3) {
         rt->AddRef(Surface::kRefV4);
         if (z) z->AddRef(Surface::kRefV1);
@@ -118,7 +119,7 @@ Device::~Device() {
     if (rtUnheld) rt = nullptr;
     if (version == 2) {
         if (rt) rt->Release(Surface::SlotFor(rtVersion));
-        if (z) z->Release(zSlot >= 0 ? zSlot : Surface::SlotFor(rtVersion));
+        if (z) z->Release(zSlot);
     } else if (version == 3) {
         if (rt) rt->Release(Surface::kRefV4);
         if (z) z->Release(Surface::kRefV1);
@@ -972,7 +973,7 @@ HRESULT Device::SetRenderTargetI(Surface* s, int sVersion) {
     if (s->palette) s->palette->AddRef();
     if (rt && !rtUnheld) rt->Release(version == 2 ? Surface::SlotFor(rtVersion) : Surface::kRefV4);
     rtUnheld = false;
-    if (z) z->Release(version == 2 ? (zSlot >= 0 ? zSlot : Surface::SlotFor(rtVersion)) : Surface::kRefV1);
+    if (z) z->Release(version == 2 ? zSlot : Surface::kRefV1);
     if (pal) pal->Release();
     rt = s;
     rtVersion = version == 2 ? 1 : 4;

@@ -1,0 +1,6 @@
+[ddtrace]
+; The ddraw.dll the game's calls go on to, a path or a file name in the game's folder.
+; Empty: Windows' own (System32's ddraw.dll).
+; In front of dd2d9: rename dd2d9's ddraw.dll to dd2d9.dll and set target=dd2d9.dll
+; In front of another wrapper: rename its ddraw.dll (real.dll, say) and set target=real.dll
+target=

@@ -13,8 +13,9 @@ struct Buffer;
 
 bool DxtFormat(DWORD fourCC);  // DXT1-5
 // `b` (DXT or YUV) into `argb` (b's size, `pitch` bytes a row): rows y0 to y1 (DXT: from
-// y0's block row on), or all of it.
-void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch, int y0 = 0, int y1 = 0x7FFFFFFF);
+// y0's block row on), columns x0 to x1 (whole DXT blocks, whole YUV pairs), or all of it.
+void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch, int y0 = 0, int y1 = 0x7FFFFFFF, int x0 = 0,
+                  int x1 = 0x7FFFFFFF);
 // The part of `b` that `r` touches, from `argb` (b's size, `pitch` bytes a row): whole DXT
 // blocks (pixels past the surface's edge repeat its last row and column) or whole YUV
 // pixel pairs (chroma the pair's average).

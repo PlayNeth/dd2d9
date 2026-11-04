@@ -100,7 +100,7 @@ HRESULT Viewport::SetViewport2(D3DVIEWPORT2* d) {
     if (dev->version >= 2 && dev->rt) {  // version-1 devices take anything
         const DWORD w = DWORD(dev->rt->W()), h = DWORD(dev->rt->H());
         if (d->dvClipWidth == 0.0f || d->dvClipHeight == 0.0f || d->dvMinZ == d->dvMaxZ || d->dwX > w || d->dwY > h ||
-            d->dwX + d->dwWidth > w || d->dwY + d->dwHeight > h)
+            d->dwWidth > w - d->dwX || d->dwHeight > h - d->dwY)  // (not dwX + dwWidth: it can wrap)
             return DDERR_INVALIDPARAMS;
     }
     data = *d;
@@ -317,7 +317,9 @@ HRESULT Viewport::ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>*
     // To the viewport. d3dim clips a version 1 device's rectangles to the render target
     // only, but the drivers then held the clear to the viewport (Wine's test_clear; AMD's
     // didn't).
-    const RECT clip = {LONG(data.dwX), LONG(data.dwY), LONG(data.dwX + data.dwWidth), LONG(data.dwY + data.dwHeight)};
+    // (A version 1 device's viewport is taken unchecked: kept to 32 bits signed.)
+    auto edge = [](DWORD a, DWORD b = 0) { return LONG(std::min<uint64_t>(uint64_t(a) + b, 0x7FFFFFFF)); };
+    const RECT clip = {edge(data.dwX), edge(data.dwY), edge(data.dwX, data.dwWidth), edge(data.dwY, data.dwHeight)};
     for (DWORD i = 0; i < n; i++) {
         RECT r = {rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2}, c;
         if (IntersectRect(&c, &r, &clip)) out->push_back(c);

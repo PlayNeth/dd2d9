@@ -296,7 +296,10 @@ void TakeOverlays(const Surface* primary, std::vector<OverlayLayer*>* out) {
         l->ddfx = (s->overlayFlags & DDOVER_DDFX) ? s->overlayFx.dwDDFX : 0;
         l->destKey = s->overlayFx.dckDestColorkey;
         l->srcKey = s->overlayFx.dckSrcColorkey;
-        l->serial = s->buf->cpuSerial;
+        // Locked or with a DC out, the memory may be half written: taken now, but not cached
+        // as that serial (the serial changes at Lock, not at Unlock, and the finished picture
+        // would never be decoded again: a torn overlay until the game next touched it).
+        l->serial = (s->lockCount || s->dcOut) ? NextCpuSerial() : s->buf->cpuSerial;
         const Format& pf = primary->buf->fmt;
         const Palette* pp = pf.pal8 ? primary->ShownPalette() : nullptr;
         l->destKeyArgb = PixelToARGB(pf, l->destKey.dwColorSpaceLowValue, pp ? pp->entries : primary->dd->defaultPalette);

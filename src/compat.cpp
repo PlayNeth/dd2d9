@@ -453,7 +453,10 @@ BOOL WINAPI HookEnumDisplaySettingsExW(LPCWSTR device, DWORD mode, DEVMODEW* dm,
 template <typename Dev> const Dev* RealDepth(const Dev* dm, Dev* copy) {
     const int bpp = ShownBppOrZero();
     if (!dm || !bpp || !(dm->dmFields & DM_BITSPERPEL) || dm->dmBitsPerPel != DWORD(bpp)) return dm;
-    *copy = *dm;  // (the public part: dmDriverExtra bytes after it aren't passed on)
+    // The public part as the game sized it (an older, shorter DEVMODE: not read past), its
+    // dmDriverExtra bytes after it not passed on.
+    *copy = Dev{};
+    memcpy(copy, dm, std::min<size_t>(dm->dmSize ? dm->dmSize : sizeof(Dev), sizeof(Dev)));
     copy->dmDriverExtra = 0;
     copy->dmFields &= ~DWORD(DM_BITSPERPEL);
     return copy;

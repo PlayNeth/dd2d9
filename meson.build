@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.3.0',
+  version : '1.3.1',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -54,3 +54,6 @@ executable('d3d7test', 'tests/d3d7test.cpp',
   link_args : static_link + ['-mwindows'],
   install : false)
 
+
+# ddtrace: a separate logging ddraw.dll for developers (tools/ddtrace/README.md).
+subdir('tools/ddtrace')

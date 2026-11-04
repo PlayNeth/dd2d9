@@ -227,7 +227,9 @@ RECT DDraw::PresentTarget(HWND hwnd) const {
 bool DDraw::ImageOnScreen(RECT* image, SIZE* mode) const {
     // After a real mode switch the screen is the game's mode: nothing to translate (also
     // not while the display is between two modes).
-    if (!Exclusive() || !modeSet_ || activeDisplay_ == kDisplaySwitch || suspended_ || !hwnd_ ||
+    // Coming back from the background (OnActivate, restoring_), the window is set up again
+    // under the game's messages (WM_SIZE, WM_ACTIVATE): those see its screen already.
+    if (!Exclusive() || !modeSet_ || activeDisplay_ == kDisplaySwitch || (suspended_ && !restoring_) || !hwnd_ ||
         !IsWindow(hwnd_) || IsIconic(hwnd_))
         return false;
     const RECT t = PresentTarget(hwnd_);
@@ -474,6 +476,11 @@ UINT CheckCoverMsg() {
     return msg;
 }
 
+UINT DeferredDisplayChangeMsg() {
+    static UINT msg = RegisterWindowMessageW(L"DD2D9_DeferredDisplayChange");
+    return msg;
+}
+
 // Window messages that tell how the game's window and focus change (log=2).
 void TraceMessage(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     const char* name = nullptr;
@@ -573,7 +580,7 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             PostMessageW(h, deferred, wp, lp);
         }
         if (msg == deferred) return 0;
-    } else if (msg == WM_DISPLAYCHANGE) {
+    } else if (msg == WM_DISPLAYCHANGE || (DeferredDisplayChangeMsg() && msg == DeferredDisplayChangeMsg())) {
         // Before the game sees it, as ddraw.dll: the surfaces are lost and the window
         // covers the screen in the new mode. Windows sends the notices twice, the second
         // time late (after ChangeDisplaySettings returned and the game made its new
@@ -581,7 +588,10 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // display that really left the game's mode loses the surfaces. SetDisplayMode
         // already lost those of the old mode.
         // The owner only under the display lock: TearDown unhooks under it, then frees it.
-        // (Held by another thread now: that thread is changing the mode, dd2d9's own.)
+        // (Held by another thread now: usually dd2d9 changing the mode, but also the topmost
+        // timer or SetCooperativeLevel on another thread, while someone else changes it: the
+        // check is posted again, at most ~500 times, rather than dropped.)
+        const UINT again = DeferredDisplayChangeMsg();
         if (TryEnterCriticalSection(&g_displayLock)) {
             DDraw* owner = g_hook.owner;
             if (h == g_hook.hwnd && owner) {
@@ -590,7 +600,10 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 owner->OnDisplayChange();
             }
             LeaveCriticalSection(&g_displayLock);
+        } else if (again && (msg != again || wp < 500)) {
+            PostMessageW(h, again, msg == again ? wp + 1 : 0, 0);
         }
+        if (msg == again) return 0;  // (dd2d9's own: not the game's)
     } else if (msg == WM_WINDOWPOSCHANGING && lp && h == g_hook.hwnd && g_hook.owner && !g_hook.owner->QuietMove()) {
         // The game sizing its covering window back (see FitCover): kept covering, before the
         // game's own handling sees the position. (The display lock held by another thread:
@@ -869,6 +882,11 @@ void DDraw::OnActivate(bool active, DWORD thread) {
     InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     if (suspended_) {
         DD2D9_LOG("focus regained: setting up %lux%lu again", modeW_, modeH_);
+        // The game's screen from here on, for what it asks while its window comes back (see
+        // ImageOnScreen): Heroes of the Three Kingdoms 3, handling its restore, read the
+        // monitor's size and blitted its movie centred in a 1920x1080 screen.
+        restoring_ = true;
+        GameImageChanged();
         if (WindowChanges()) {
             if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
             // Its owner, minimized on focus loss (MinimizeGameWindow), back too, and the
@@ -893,6 +911,7 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // Only now: until the mode is switched back the presenter must not create
         // a device (it would make a windowed one, then replace it right away).
         suspended_ = false;
+        restoring_ = false;
         UpdateDeviceWindow();
         GameImageChanged();
         MarkDirty();
@@ -1304,8 +1323,15 @@ double DDraw::VBlankPhase() const {
 void SleepUntilQpc(int64_t target) {
     static LARGE_INTEGER freq;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-    thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* HIGH_RESOLUTION */,
-                                                         TIMER_ALL_ACCESS);
+    // One timer per thread, closed with the thread (a game thread ending no longer leaks it).
+    struct ThreadTimer {
+        HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        ~ThreadTimer() {
+            if (h) CloseHandle(h);
+        }
+    };
+    thread_local ThreadTimer threadTimer;
+    const HANDLE timer = threadTimer.h;
     for (;;) {
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
@@ -1553,8 +1579,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
             focusWnd_ = hwnd;
             if (deviceWnd_ && IsWindow(deviceWnd_)) SetWindowLongPtrA(deviceWnd_, 0, LONG_PTR(hwnd));
         }
-        HWND made = nullptr;
-        if (!lclWnd_) {
+        // A second call keeps the device window made by the first (lclWnd_ is it: checked
+        // above); destroyed only when the window changes (spec, SetCooperativeLevel 12).
+        HWND made = lclWnd_;
+        if (!made) {
             made = CreateDeviceWindow(focusWnd_);
             if (!made) return DDERR_INVALIDPARAMS;
         }
@@ -1598,6 +1626,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
         } else {
             suspended_ = false;
             GameImageChanged();
+            // The cursor is let go and the foreground unlocked as in ddraw.dll's leaving (even
+            // with DirectDraw 1): nothing else would (Uncover isn't run, and the window is
+            // unhooked below, so no focus change reaches OnActivate).
+            ConfineCursor(false);
             // The window stays as it is but for being topmost, as with ddraw.dll.
             if (restack && hwnd_ && IsWindow(hwnd_))
                 SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -1679,6 +1711,11 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
     // ddraw.dll leaves impossible modes to the display, which refuses them.
     if (!w || !h || w > 16384 || h > 16384) return DDERR_UNSUPPORTED;
     if (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) return DDERR_UNSUPPORTED;
+    // In the background (Alt+Tab: OnActivate set it all aside), the mode is only noted: it is
+    // set up when the game comes back (OnActivate). A game handling WM_ACTIVATEAPP with a
+    // mode change had the display switched and its device window shown topmost over the
+    // desktop, and coming back then skipped the restore (its owner, its taskbar style).
+    const bool away = Exclusive() && suspended_;
     {
         Guard l;
         modeSet_ = true;
@@ -1686,10 +1723,12 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
         modeH_ = h;
         modeBpp_ = bpp;
         modeRefresh_ = rr;
-        suspended_ = false;
+        if (!away) suspended_ = false;
         GameImageChanged();
     }
-    if (Exclusive()) {
+    if (away) {
+        DD2D9_LOG("  in the background: set up when the game comes back");
+    } else if (Exclusive()) {
         ApplyWindow();
         UpdateDeviceWindow();
     } else if (g_config.display == kDisplaySwitch && !SwitchMode()) {
@@ -1842,13 +1881,15 @@ HRESULT DDraw::RestoreDisplayMode() {
     if (g_exclusiveDD && g_exclusiveDD != this) return DDERR_NOEXCLUSIVEMODE;
     if (AnyLocked()) return DDERR_SURFACEBUSY;
     if (!modeSet_ && !switched_) return DD_OK;  // nothing set: nothing to restore, nothing lost
+    const bool away = Exclusive() && suspended_;  // (see SetDisplayMode: it stays set aside)
     RestoreDisplay();
     {
         Guard l;
         modeSet_ = false;
+        if (away) suspended_ = true;
         GameImageChanged();
     }
-    ApplyWindow();  // still exclusive: the window covers the screen at the desktop mode
+    if (!away) ApplyWindow();  // still exclusive: the window covers the screen at the desktop mode
     InvalidateSurfaces();
     NoteDisplayMode();
     MarkDirty();
@@ -1923,10 +1964,19 @@ HRESULT DDraw::GetDisplayMode(void* desc, int version) {
     d.dwWidth = w;
     d.dwHeight = h;
     d.lPitch = LONG(w * f.Bytes());  // as ddraw.dll: not rounded
-    // The display's own report, as ddraw.dll gives it (0 for the driver default).
-    DEVMODEW dm = {};
-    dm.dmSize = sizeof(dm);
-    d.dwRefreshRate = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 0;
+    // The display's own report, as ddraw.dll gives it (0 for the driver default). Asked again
+    // when the mode answered changes, else at most every half second (g_lock): games ask
+    // every frame, and it is a call into the kernel.
+    static DWORD rate, rateAt, rateFor[3];
+    const DWORD now = GetTickCount();
+    if (!rateAt || now - rateAt >= 500 || rateFor[0] != w || rateFor[1] != h || rateFor[2] != bpp) {
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        rate = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 0;
+        rateAt = now | 1;  // (never 0: "not asked yet")
+        rateFor[0] = w, rateFor[1] = h, rateFor[2] = bpp;
+    }
+    d.dwRefreshRate = rate;
     f.ToDDPF(&d.ddpfPixelFormat);
     static DWORD lastLogged[3];  // g_lock: logged when the answer changes (games ask every frame)
     if (lastLogged[0] != w || lastLogged[1] != h || lastLogged[2] != bpp) {
@@ -2454,6 +2504,7 @@ HRESULT DDraw::DuplicateSurface(void* src, void** out, int ddVersion) {
     if (!s || !out) return DDERR_INVALIDPARAMS;
     Guard l;
     if (s->IsLost()) return DDERR_SURFACELOST;
+    *out = nullptr;  // (after the lost check: spec step 2)
     // A flip chain's front can be duplicated (alone); its members and the primary can't.
     if (s->isPrimary || s->root) return DDERR_CANTDUPLICATE;
     // As ddraw.dll: the duplicate is handed out through the source's interface version,
@@ -2587,13 +2638,15 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
             const bool v4pitch = ddVersion == 4 && (F & DDSD_PITCH);
             if (!v4pitch) {
                 if (!(F & DDSD_LINEARSIZE) || (F & DDSD_PITCH)) return DDERR_INVALIDPARAMS;
-                const uint64_t blocks = uint64_t((in.dwWidth + 3) / 4) * ((in.dwHeight + 3) / 4);
+                const uint64_t blocks = ((uint64_t(in.dwWidth) + 3) / 4) * ((uint64_t(in.dwHeight) + 3) / 4);
                 if (in.dwLinearSize < blocks * (f.fourCC == MAKEFOURCC('D', 'X', 'T', '1') ? 8 : 16))
                     return DDERR_INVALIDPARAMS;
             }
         } else {
             const DWORD bpp = (F & DDSD_PIXELFORMAT) ? in.ddpfPixelFormat.dwRGBBitCount : displayBpp;
-            if (!(F & DDSD_PITCH) || in.lPitch < LONG((bpp * in.dwWidth + 7) / 8) || (in.lPitch & 3))
+            // (In 64 bits: a huge width would wrap to a small pitch and pass.)
+            if (!(F & DDSD_PITCH) || in.lPitch < 0 || uint64_t(in.lPitch) < (uint64_t(bpp) * in.dwWidth + 7) / 8 ||
+                (in.lPitch & 3))
                 return DDERR_INVALIDPARAMS;
         }
     }

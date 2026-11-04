@@ -3,7 +3,9 @@
 
 #include <emmintrin.h>
 
+#include <algorithm>
 #include <cstring>
+#include <iterator>
 
 namespace dd2d9 {
 
@@ -140,6 +142,93 @@ void RowConverter::Run32(const uint32_t* src, uint32_t* dst, int n) const {
         _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), v);
     }
     for (; i < n; i++) dst[i] = One(src[i]);
+}
+
+// ---------------------------------------------------------------- RowPacker
+
+void RowPacker::Prepare(const Format& f) {
+    if (valid_ && f_ == f) return;
+    valid_ = true;
+    f_ = f;
+    bytes_ = int(f.Bytes());
+    kind_ = kTable;
+    for (uint32_t i = 0; i < 256; i++) {
+        t_[0][i] = ARGBToPixel(f, i) & f.b;
+        t_[1][i] = ARGBToPixel(f, i << 8) & f.g;
+        t_[2][i] = ARGBToPixel(f, i << 16) & f.r;
+        t_[3][i] = ARGBToPixel(f, i << 24) & f.a;
+    }
+    const uint32_t masks[4] = {f.b, f.g, f.r, f.a};
+    std::fill(std::begin(shift_), std::end(shift_), 0);
+    std::fill(std::begin(bits_), std::end(bits_), 0);
+    if (f.bpp == 16 && !f.pal8 && !f.fourcc && !f.zbuf) {
+        bool ok = true;
+        for (int c = 0; c < 4 && ok; c++) {
+            if (!masks[c]) continue;
+            shift_[c] = __builtin_ctz(masks[c]);
+            const uint32_t m = masks[c] >> shift_[c];
+            ok = !(m & (m + 1)) && m <= 255;  // contiguous, at most 8 bits
+            bits_[c] = __builtin_popcount(m);
+        }
+        if (ok) {
+            kind_ = k16;
+            return;
+        }
+    }
+    if (f.bpp == 32 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF && (!f.a || f.a == 0xFF000000u)) {
+        kind_ = k32;
+        mask32_ = 0x00FFFFFFu | f.a;
+    }
+}
+
+void RowPacker::Run(const uint32_t* src, uint8_t* dst, int n, uint32_t orMask) const {
+    int i = 0;
+    if (kind_ == k32) {
+        uint32_t* d = reinterpret_cast<uint32_t*>(dst);
+        const __m128i keep = _mm_set1_epi32(int(mask32_)), set = _mm_set1_epi32(int(orMask));
+        for (; i + 4 <= n; i += 4) {
+            const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(d + i), _mm_or_si128(_mm_and_si128(v, keep), set));
+        }
+        for (; i < n; i++) d[i] = (src[i] & mask32_) | orMask;
+        return;
+    }
+    if (kind_ == k16) {
+        // Each channel c (0-255) as Insert8 makes it: (c * max + 127) / 255, here
+        // (x + (x >> 8)) >> 8 with x = c * max + 128 (exact for every c and width up to 8).
+        uint16_t* d = reinterpret_cast<uint16_t*>(dst);
+        const __m128i byte = _mm_set1_epi32(255), r128 = _mm_set1_epi16(128), set = _mm_set1_epi16(short(orMask));
+        for (; i + 8 <= n; i += 8) {
+            const __m128i lo = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+            const __m128i hi = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i + 4));
+            __m128i out = set;
+            for (int c = 0; c < 4; c++) {
+                if (!bits_[c]) continue;
+                const __m128i sh = _mm_cvtsi32_si128(8 * c);
+                const __m128i v = _mm_packs_epi32(_mm_and_si128(_mm_srl_epi32(lo, sh), byte), _mm_and_si128(_mm_srl_epi32(hi, sh), byte));
+                __m128i q;
+                if (bits_[c] == 8) {
+                    q = v;
+                } else {
+                    const __m128i x = _mm_add_epi16(_mm_mullo_epi16(v, _mm_set1_epi16(short((1 << bits_[c]) - 1))), r128);
+                    q = _mm_srli_epi16(_mm_add_epi16(x, _mm_srli_epi16(x, 8)), 8);
+                }
+                out = _mm_or_si128(out, _mm_sll_epi16(q, _mm_cvtsi32_si128(shift_[c])));
+            }
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(d + i), out);
+        }
+        for (; i < n; i++) d[i] = uint16_t(One(src[i]) | orMask);
+        return;
+    }
+    for (; i < n; i++, dst += bytes_) {
+        const uint32_t v = One(src[i]) | orMask;
+        switch (bytes_) {
+        case 1: dst[0] = uint8_t(v); break;
+        case 2: memcpy(dst, &v, 2); break;
+        case 3: dst[0] = uint8_t(v), dst[1] = uint8_t(v >> 8), dst[2] = uint8_t(v >> 16); break;
+        default: memcpy(dst, &v, 4); break;
+        }
+    }
 }
 
 }  // namespace dd2d9

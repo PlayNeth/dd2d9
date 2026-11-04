@@ -46,13 +46,21 @@ static RECT g_lastPaint = {-1, -1, -1, -1};  // WM_PAINT's rectangle (BeginPaint
 // A game that keeps its window the mode's size from its own window procedure: any other size
 // is set back, at once, from WM_SIZE (Hydro Thunder, as its logs show it: 0 = off).
 static int g_keepW, g_keepH;
+// What the game's window procedure reads of its screen while handling WM_SIZE (restored), and
+// of the screen's width: Heroes of the Three Kingdoms 3 centres its movie by them.
+static RECT g_sizeClient = {-1, -1, -1, -1};
+static int g_sizeScreenW = -1;
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_SIZE && g_keepW && (LOWORD(l) != g_keepW || HIWORD(l) != g_keepH))
         SetWindowPos(h, nullptr, 0, 0, g_keepW, g_keepH, SWP_NOZORDER | SWP_NOACTIVATE);
     if (m == WM_USER + 1) g_userMsgs++;
     if (m == WM_MOUSEMOVE) g_lastMouseMove = l;
-    if (m == WM_SIZE && (w == SIZE_RESTORED || w == SIZE_MAXIMIZED)) g_lastSize = l;
+    if (m == WM_SIZE && (w == SIZE_RESTORED || w == SIZE_MAXIMIZED)) {
+        g_lastSize = l;
+        GetClientRect(h, &g_sizeClient);
+        g_sizeScreenW = GetSystemMetrics(SM_CXSCREEN);
+    }
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_SCREENSAVE) {
         g_screensaverMsgs++;
         return 0;
@@ -949,6 +957,24 @@ static int RunFullscreen8(int modeW, int modeH) {
             strip->Unlock(nullptr);
             CHECK(got == 1, "8-bit DC: a colour drawn after the palette set it is its index (%u, want 1)", got);
         }
+        // A DC taken while the surface is locked: what the game writes through the lock
+        // with the DC out stays after ReleaseDC (on XP the DC draws into the memory itself).
+        sd = {};
+        sd.dwSize = sizeof(sd);
+        if (strip && SUCCEEDED(strip->Lock(nullptr, &sd, DDLOCK_WAIT, nullptr))) {
+            BYTE* px = static_cast<BYTE*>(sd.lpSurface);
+            px[2] = 7;
+            dc = nullptr;
+            if (SUCCEEDED(strip->GetDC(&dc))) {
+                px[3] = 9;  // through the lock, with the DC out
+                SetPixel(dc, 4, 0, RGB(pe[1].peRed, pe[1].peGreen, pe[1].peBlue));
+                strip->ReleaseDC(dc);
+            }
+            const BYTE a = px[2], b = px[3], g = px[4];
+            strip->Unlock(nullptr);
+            CHECK(a == 7 && b == 9 && g == 1, "8-bit DC out on a locked surface: writes through the lock kept (%u %u, want 7 9), "
+                  "GDI's too (%u, want 1)", a, b, g);
+        }
         if (strip) strip->Release();
     }
 
@@ -1132,10 +1158,10 @@ static int RunWindowed() {
         fx.dwFillColor = d.ddpfPixelFormat.dwBBitMask;
         const HRESULT hr = prim2->Blt(&cr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
         int blue = 0, other = 0;
-        for (int i = 0; i < 60; i++) {
+        for (int i = 0; i < 70; i++) {
             Pump();
             Sleep(25);
-            if (i < 10) continue;  // (shown by then)
+            if (i < 20) continue;  // (shown by then: its presenter's device made)
             HDC sdc = GetDC(nullptr);
             const COLORREF c = GetPixel(sdc, (cr.left + cr.right) / 2, (cr.top + cr.bottom) / 2) & 0xFFFFFF;
             ReleaseDC(nullptr, sdc);
@@ -1498,6 +1524,28 @@ static int RunCoopModes() {
         const bool keeps = v == 1;
         CHECK(SUCCEEDED(hr) && (keeps ? (w == 640 && h == 480) : (int(w) == deskW && int(h) == deskH)),
               "DirectDraw %d: exclusive -> NORMAL %s the display mode (%lux%lu)", v, keeps ? "keeps" : "restores", w, h);
+    }
+
+    // DDSCL_CREATEDEVICEWINDOW twice: the device window the first call made stays (ddraw.dll
+    // destroys it only when the window changes); it went, and came back with every other call.
+    {
+        HWND focus = MakeWindow(WS_POPUP, 100, 100);
+        IDirectDraw7* dd = nullptr;
+        DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+        if (dd) {
+            const DWORD fs = DDSCL_CREATEDEVICEWINDOW | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+            dd->SetCooperativeLevel(focus, DDSCL_SETFOCUSWINDOW);
+            const HRESULT hr1 = dd->SetCooperativeLevel(nullptr, fs);
+            const HWND first = FindWindowA("DirectDrawDeviceWnd", nullptr);
+            const HRESULT hr2 = dd->SetCooperativeLevel(nullptr, fs);
+            const HWND second = FindWindowA("DirectDrawDeviceWnd", nullptr);
+            CHECK(SUCCEEDED(hr1) && SUCCEEDED(hr2) && first && first == second && IsWindow(first),
+                  "CREATEDEVICEWINDOW twice keeps the device window (0x%08lx 0x%08lx, %p then %p)", hr1, hr2,
+                  static_cast<void*>(first), static_cast<void*>(second));
+            dd->SetCooperativeLevel(focus, DDSCL_NORMAL);
+            dd->Release();
+        }
+        DestroyWindow(focus);
     }
 
     // Back to exclusive mode and a new primary: refused while the old one exists (lost or
@@ -2096,6 +2144,34 @@ static int RunMouse() {
                 }
                 DestroyWindow(popup);
             }
+            // Rockman X Math's way: opened by command string in a child window of the game's,
+            // the player's window asked for and centred with MoveWindow in the mode's
+            // coordinates, then played: the window over the image, the movie scaled in it.
+            snprintf(cmd, sizeof(cmd), "open dd2d9test.avi type avivideo alias x parent %lu style child",
+                     static_cast<unsigned long>(reinterpret_cast<uintptr_t>(hwnd)));
+            if (mciSendStringA(cmd, nullptr, 0, nullptr) == 0) {
+                out[0] = 0;
+                mciSendStringA("status x window handle", out, sizeof(out), nullptr);
+                const HWND child = reinterpret_cast<HWND>(uintptr_t(strtoul(out, nullptr, 10)));
+                MoveWindow(child, 304, 228, 32, 24, FALSE);
+                mciSendStringA("play x wait", nullptr, 0, nullptr);
+                using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+                const auto realWindowRect = reinterpret_cast<RectFn>(
+                    reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+                RECT cw = {};
+                realWindowRect(child, &cw);
+                out[0] = 0;
+                mciSendStringA("where x destination", out, sizeof(out), nullptr);
+                sscanf(out, "%ld %ld %ld %ld", &r[0], &r[1], &r[2], &r[3]);
+                const long ex = ix + long(304 * scale), ey = iy + long(228 * scale);
+                CHECK(child && labs(cw.left - ex) <= 1 && labs(cw.top - ey) <= 1 &&
+                          labs(cw.right - cw.left - long(32 * scale)) <= 2 && labs(cw.bottom - cw.top - long(24 * scale)) <= 2 &&
+                          r[0] == 0 && r[1] == 0 && labs(r[2] - long(32 * scale)) <= 1 && labs(r[3] - long(24 * scale)) <= 1,
+                      "MCI string, child window moved by the game: over the image (%ld,%ld-%ld,%ld), the movie scaled in "
+                      "it (%s)",
+                      cw.left, cw.top, cw.right, cw.bottom, out);
+                mciSendStringA("close x", nullptr, 0, nullptr);
+            }
         } else {
             printf("SKIP MCI video: no AVI player (%lu)\n", static_cast<unsigned long>(e));
         }
@@ -2132,8 +2208,15 @@ static int RunMouse() {
             Pump();
             CHECK(prim->IsLost() == DDERR_SURFACELOST, "borderless: primary lost in the background");
             g_lastSize = -1;
+            g_sizeClient = RECT{-1, -1, -1, -1};
+            g_sizeScreenW = -1;
             SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
             Pump();
+            // While its window is restored, the game asks of its screen already in the mode
+            // (Heroes of the Three Kingdoms 3 blitted its movie centred in 1920x1080).
+            CHECK(g_sizeScreenW == -1 || (g_sizeClient.right == 640 && g_sizeClient.bottom == 480 && g_sizeScreenW == 640),
+                  "borderless: coming back, the window procedure sees the mode (client %ldx%ld, screen width %d)",
+                  g_sizeClient.right, g_sizeClient.bottom, g_sizeScreenW);
             hr = prim->IsLost();
             CHECK(hr == DD_OK, "borderless: primary not lost back in front (0x%08lx)", hr);
             prim->Release();
