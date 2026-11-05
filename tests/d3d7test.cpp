@@ -354,6 +354,63 @@ static int Run(int w, int h, int bpp) {
         }
         if (checker) checker->Release();
 
+        // An 8-bit palettized texture whose palette has DDPCAPS_ALPHA (each entry's peFlags is
+        // its alpha, as PopCap's SexyApp games use them: Bejeweled 2's menu). Drawn
+        // alpha-blended on black, its left half (alpha 0x40) must come out dark grey and its
+        // right half (alpha 0xFF) white.
+        {
+            D3DDEVICEDESC7 caps3d = {};
+            const bool alphaPalCaps = SUCCEEDED(dev->GetCaps(&caps3d)) &&
+                                      (caps3d.dpcTriCaps.dwTextureCaps & D3DPTEXTURECAPS_ALPHAPALETTE);
+            DDSURFACEDESC2 pd = {};
+            pd.dwSize = sizeof(pd);
+            pd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            pd.dwWidth = pd.dwHeight = 64;
+            pd.ddsCaps.dwCaps = DDSCAPS_TEXTURE;
+            pd.ddpfPixelFormat.dwSize = sizeof(pd.ddpfPixelFormat);
+            pd.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+            pd.ddpfPixelFormat.dwRGBBitCount = 8;
+            IDirectDrawSurface7* ptex = nullptr;
+            IDirectDrawPalette* apal = nullptr;
+            PALETTEENTRY ents[256] = {};
+            ents[1] = {0xFF, 0xFF, 0xFF, 0x40};
+            ents[2] = {0xFF, 0xFF, 0xFF, 0xFF};
+            hr = dd->CreateSurface(&pd, &ptex, nullptr);
+            const HRESULT hp = dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256 | DDPCAPS_ALPHA, ents, &apal, nullptr);
+            CHECK(SUCCEEDED(hr) && ptex && SUCCEEDED(hp) && apal, "alpha-palette texture -> 0x%08lx, palette -> 0x%08lx", hr, hp);
+            DDSURFACEDESC2 pl = {};
+            pl.dwSize = sizeof(pl);
+            HRESULT hs = E_FAIL, hl = E_FAIL;
+            if (ptex && apal && SUCCEEDED(hs = ptex->SetPalette(apal))) hl = ptex->Lock(nullptr, &pl, DDLOCK_WAIT, nullptr);
+            if (ptex && apal)
+                CHECK(SUCCEEDED(hs) && SUCCEEDED(hl), "alpha-palette texture: SetPalette 0x%08lx, Lock 0x%08lx", hs, hl);
+            if (SUCCEEDED(hl)) {
+                for (int y = 0; y < 64; y++) {
+                    memset(static_cast<BYTE*>(pl.lpSurface) + y * pl.lPitch, 1, 32);
+                    memset(static_cast<BYTE*>(pl.lpSurface) + y * pl.lPitch + 32, 2, 32);
+                }
+                ptex->Unlock(nullptr);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                dev->SetTexture(0, ptex);
+                dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
+                dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
+                dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
+                dev->BeginScene();
+                TV aq[4] = {{0, 0, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {128, 0, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                            {0, 128, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {128, 128, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, aq, 4, 0);
+                dev->EndScene();
+                dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, FALSE);
+                dev->SetTexture(0, nullptr);
+                const DWORD dark = pixel(16, 64), light = pixel(112, 64), dg = (dark >> 8) & 0xFF;
+                CHECK(!alphaPalCaps || (dg > 0x30 && dg < 0x50 && light == 0xFFFFFF),
+                      "alpha-palette texture blended%s: alpha 0x40 half 0x%06lx (want about 0x404040), alpha 0xFF half 0x%06lx",
+                      alphaPalCaps ? "" : " (no D3DPTEXTURECAPS_ALPHAPALETTE: not checked)", dark, light);
+            }
+            if (ptex) ptex->Release();
+            if (apal) apal->Release();
+        }
+
         // Eight additive passes of a faint blue (3 of 255): a 16-bit render target rounds
         // each one back to nothing; drawn in 32 bits (render32=on) they add up (24). (Wine's
         // OpenGL renderer keeps 16-bit targets at higher precision: they add up there too.)

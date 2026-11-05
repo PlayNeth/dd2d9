@@ -7,6 +7,18 @@
 
 namespace dd2d9 {
 
+volatile LONG g_deviceStateEpoch = 0;
+
+HRESULT SetFvf9(IDirect3DDevice9* d, DWORD fvf) {
+    DeviceStateChanged();
+    return d->SetFVF(fvf);
+}
+
+HRESULT SetTexture9(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t) {
+    DeviceStateChanged();
+    return d->SetTexture(stage, t);
+}
+
 // Direct3D 9: by default Windows' own d3d9.dll, loaded by its full path. Next to a wrapper
 // such as D7VK the game folder holds DXVK's d3d9.dll, whose Vulkan presentation can let
 // the driver take the display over in a window that covers it, and switch the display mode
@@ -195,6 +207,7 @@ IDirect3DDevice9* Gpu::Ensure() {
                       static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF), devW_, devH_);
         }
         generation_++;
+        DeviceStateChanged();
         inScene_ = false;
         return dev_;
     }
@@ -213,6 +226,7 @@ IDirect3DDevice9* Gpu::Ensure() {
         }
         DD2D9_LOG("D3D9 device reset after a loss");
         generation_++;
+        DeviceStateChanged();
         inScene_ = false;
         return dev_;
     }
@@ -279,6 +293,9 @@ IDirect3DSurface9* Gpu::TargetBackBuffer() {
 }
 
 HRESULT Gpu::PresentTarget() {
+    // Overlay and capture tools that hook Present may draw with their own vertex format and
+    // not put ours back: Draw sets its declaration again after every frame.
+    DeviceStateChanged();
     if (swap_) return swap_->Present(nullptr, nullptr, nullptr, nullptr, 0);
     if (!dev_ || !targetWnd_) return E_FAIL;
     const RECT src = {0, 0, LONG(targetW_), LONG(targetH_)};
@@ -294,6 +311,7 @@ void Gpu::CloseScene() {
     if (!inScene_) return;
     inScene_ = false;
     if (dev_) dev_->EndScene();
+    DeviceStateChanged();  // (tools that hook EndScene, as PresentTarget's that hook Present)
 }
 
 void Gpu::DropSwapChain() {
@@ -310,11 +328,12 @@ void Gpu::AddOwner(Owner* o) {
 void Gpu::RemoveOwner(Owner* o) { owners_.erase(std::remove(owners_.begin(), owners_.end(), o), owners_.end()); }
 
 void Gpu::ReleaseResources() {
+    DeviceStateChanged();
     CloseScene();
     // Nothing of the owners' left bound: a D3DPOOL_DEFAULT surface or texture the device
     // still holds keeps a native Reset from succeeding (then every loss means a new device).
     if (dev_) {
-        for (DWORD i = 0; i < 8; i++) dev_->SetTexture(i, nullptr);
+        for (DWORD i = 0; i < 8; i++) SetTexture9(dev_, i, nullptr);
         IDirect3DSurface9* own = nullptr;
         if (SUCCEEDED(dev_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &own))) {
             dev_->SetRenderTarget(0, own);
@@ -334,6 +353,7 @@ void Gpu::ReleaseResources() {
 
 void Gpu::Release() {
     CloseScene();
+    DeviceStateChanged();
     const std::vector<Owner*> owners = owners_;  // an owner may remove itself meanwhile
     owners_.clear();
     for (Owner* o : owners) o->GpuReleased();

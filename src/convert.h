@@ -11,8 +11,9 @@ namespace dd2d9 {
 class RowConverter {
 public:
     // pal: a palettized format's colours (null: grey ramp, as PixelToARGB). keyed/key: pixels
-    // whose colour bits equal the key's become 0.
-    RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed = false, DWORD key = 0);
+    // whose colour bits equal the key's become 0. palAlpha: the palette has DDPCAPS_ALPHA, each
+    // entry's peFlags is its alpha (textures only).
+    RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed = false, DWORD key = 0, bool palAlpha = false);
     void Run(const uint8_t* src, uint32_t* dst, int n) const;
 
 private:
@@ -29,6 +30,7 @@ private:
     Format f_;
     const PALETTEENTRY* pal_;
     bool keyed_;
+    bool palAlpha_;
     uint32_t key_, keyMask_;
     Channel ch_[4];  // red, green, blue, alpha
     uint32_t lut_[256];

@@ -1385,15 +1385,6 @@ HRESULT Surface::FreePrivateData(REFGUID tag) {
     return DDERR_NOTFOUND;
 }
 
-void Surface::FillRect(const RECT& r, DWORD value) {
-    const RECT bounds = {0, 0, buf->w, buf->h};
-    RECT c;
-    if (buf->fmt.BlockCompressed() || !IntersectRect(&c, &r, &bounds)) return;
-    FillCore(&c, value);
-    BumpUniqueness();
-    MarkDirtyIfVisible(&c);
-}
-
 void Surface::CpuAccess(bool write, const RECT* area) {
     if (buf->gpu) GpuCpuAccess(this, write, area);  // reads back what Direct3D drew, if newer
     else if (write) buf->MarkGpuStale(area);

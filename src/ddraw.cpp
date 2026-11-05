@@ -1320,7 +1320,7 @@ double DDraw::VBlankPhase() const {
 // (Windows 10 1803 and later) for all but the last half millisecond, which is spun; without
 // one, Sleep for all but the last ~1.5 ms. (Spinning the last 2 ms on Sleep(0) cost the game
 // its only core with cpus=1.)
-void SleepUntilQpc(int64_t target) {
+static void SleepUntilQpc(int64_t target) {
     static LARGE_INTEGER freq;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     // One timer per thread, closed with the thread (a game thread ending no longer leaks it).

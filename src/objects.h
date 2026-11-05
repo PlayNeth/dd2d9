@@ -246,7 +246,6 @@ public:
     // held), or with null, the whole image (any thread).
     void MarkDirtyIfVisible(const RECT* area = nullptr);
     void ReplaceBuffer(Buffer* b);  // takes ownership of b
-    void FillRect(const RECT& r, DWORD value);  // raw pixel value, clipped to the surface; g_lock held
     Surface* NextMipLevel() const;              // next smaller level of a mipmap chain, or null
 
     DDraw* dd;
@@ -380,7 +379,6 @@ public:
     // presents there from now on.
     void DropDevice();
     void SetGamma(const DDGAMMARAMP& ramp);
-    void GetGamma(DDGAMMARAMP* ramp);
     // Where an sw x sh image goes in a bw x bh area, as the stretch setting says.
     RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
 
@@ -414,7 +412,7 @@ private:
     bool gdiPending_ = false;  // the last WM_PRINT timed out (its DC may still be painted)
     unsigned gdiSeq_ = 0;      // counts captures (the GPU path uploads a new one)
     OverlayGpu* ovGpu_ = nullptr;
-    void BuildLut16(const Format& f);
+    void BuildLut16(const Format& f, const uint8_t (&gamma)[3][256], DWORD gammaVersion);
     void CountPresent(double lockSeconds, double convertSeconds, double fraction);
 
     DDraw* dd_;

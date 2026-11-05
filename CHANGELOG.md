@@ -3,6 +3,91 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.4.0
+Direct3D 3-6 games get faster vertex processing and lighting and far fewer draws from
+execute buffers, every draw costs a little less, Bejeweled 2's menu is fixed, and colour keys
+in blits of YUV video surfaces match only what they name.
+
+- **8-bit textures with an alpha palette are blended by the palette's alpha.** dd2d9
+  reports `D3DPTEXTURECAPS_ALPHAPALETTE`, but uploaded every 8-bit texture as opaque: the
+  `peFlags` of a palette made with `DDPCAPS_ALPHA` were ignored. Bejeweled 2 (PopCap's
+  SexyApp) draws its menu's glow with such textures, blended `SRCALPHA` → `ONE`, so each
+  layer was added at full strength and the lower menu washed out to flat pale colours.
+  The palette's `peFlags` are now the texels' alpha, and the code that treats a texture as
+  having no alpha (automatic mipmaps, the colour-key cutout, the Direct3D 3–6 `MODULATE` alpha
+  fix-up) counts these textures as having alpha; a texture given such a palette after it
+  was first drawn is made again without automatic mipmaps. New d3d7test check: a texture whose
+  palette gives alpha 0x40 on white, blended over black, gives 0xffffff before and about
+  0x404040 now. Confirmed in the game.
+- **Direct3D 3–6 transforms and lights four vertices at a time (SSE2).** Each vertex goes
+  through the same operations in the same order as before, so the output is the same bit
+  for bit, but for the specular and spot-light powers (next): checked with the new
+  `d3dimbench` on ordinary vertices and on odd ones (NaN, infinities, zero normals), with
+  every light type, vertex colours, specular, and linear, EXP and EXP2 fog. The four-lane
+  code divides on every lane and picks the answers after, where the scalar code skipped a
+  vertex or light: floating-point exceptions are masked while it runs (a game that unmasks
+  them doesn't trap), and the game's state put back after. Built with `-ffp-contract=off`,
+  so no compiler setting fuses its multiplies and adds differently from the scalar code's.
+  `ProcessVertices` in `d3dimbench` (Wine): one directional light 19.9 → 43.3 million
+  vertices a second; the lit sphere drawn with `DrawIndexedPrimitive` 289 → 331 frames a
+  second.
+- **Specular and spot-light powers computed four at a time.** `powf` was most of the time
+  of lighting with specular or spot lights; an SSE2 `exp2(y log2 x)` replaces it, within
+  1e-5 of it (115 ulps at most, at a power of 128): an 8-bit colour moved by one step in 6
+  of 4.2 million lighting terms tried, and none of `d3dimbench`'s 31000 vertices changed.
+  Zero, negative, NaN and infinite inputs, and powers too large, still go through `powf`;
+  a power of 1 gives the value itself, and the rounding mode doesn't change the result.
+  Three lights with specular and fog: 8.3 → 23.4 million vertices a second (12.1 with the
+  vector code and `powf`).
+- **Execute buffers draw consecutive points, lines or triangles as one draw.** A
+  `TRIANGLE` instruction was a Direct3D 9 draw of its own, and some games put one triangle
+  in each. Anything else in the buffer (a state, a matrix, `PROCESSVERTICES`, a branch, the
+  end) draws what is waiting first, so every primitive is drawn in the same order and with
+  the same states. Each instruction keeps the vertices and the clipping it had drawn alone,
+  and some choices are made once for a whole draw: the draw is split back into one per
+  instruction where joining them would change any of them (an untextured draw's rhw
+  flattened, bad rhw replaced, the emulated W buffer's scale, a 2D draw kept out of
+  antialiasing, cut-outs' texture addressing clamped). `d3dimbench`: one instruction per
+  triangle 16 → 395 frames a second, one per row 581 → 853, cut by the near plane
+  34 → 334; the same pixels.
+- **The vertex declaration and the textures are set only when they change.** Both were set
+  for every draw (all 8 texture stages, most of them empty). GPU blits, the presenter and
+  overlays, which set their own, and a device made, reset or presented, or a scene ended,
+  make the next draw set them again (overlay tools hooking `Present` or `EndScene` may set
+  their own too). Binding a draw's textures under Wine: 0.83 → 0.52 µs.
+- **The checks of transformed vertices are one SSE2 pass.** Each draw of transformed
+  vertices looked at every vertex twice (whether it is flat 2D, and for a bad rhw or a z
+  to clamp): 4 → 1.4 ns a vertex, the same answers (NaN and the zeros' signs included,
+  checked on 200000 random draws).
+- **YUV colour keys in blits are compared in Y, U and V.** A key on a YUY2, UYVY, YV12 or
+  I420 surface was converted to RGB and compared with the decoded pixels; YUV to RGB clamps,
+  so video black (Y 16) also matched everything below black (Y under 16, the same RGB
+  black). Overlays' keys, and a blit within one surface using both its keys, still compare
+  in RGB. New ddtest checks: a YUY2 source key and a YUY2 destination key on black, beside
+  a pixel below black, keyed both pixels before and only the black one now; a YV12 source
+  key on white beside a pixel above white keyed both before and only the white one now,
+  and one with different U and V keys only its own block.
+- **The 16-bit gamma table is built outside the gamma lock, and three times faster.** A
+  game setting its gamma ramp every frame (a fade) waited for the presenter's 65536
+  conversions; the table is now made from a table per channel (each colour channel depends
+  on its own bits only): 319 → 99 µs per ramp, the same table (checked for eight 16-bit
+  layouts and three ramps).
+- **Undefined behaviour removed** (clang's undefined-behaviour sanitizer over every test
+  suite): a NaN colour or fog value converted to an integer now gives, explicitly, what x86
+  gives (the output is unchanged, but no longer left to the compiler), and the walk of the
+  loader's module list no longer takes a member of a null pointer (`CONTAINING_RECORD`). The
+  sanitizer finds nothing else in ddtest, `ddtest fuzz`, d3d7test or d3dimbench.
+- **Tidying:** three functions nothing called are gone; the README says dd2d9 needs Windows
+  Vista or later (it uses Vista's locks and timers); `tests/wine/build.sh` builds Wine's
+  tests with GCC 14 and later, which turned two of their warnings into errors.
+- **Tests:** `d3dimbench` (new) checks and times Direct3D 3–6's vertex pipeline and
+  execute buffers by hashes of their output, and checks that consecutive `TRIANGLE`
+  instructions draw the same pixels as the same instructions drawn one by one (a near and
+  a far untextured triangle; two triangles with unused vertices of rhw 0 between them). `ddtest fuzz` falls back to single colour
+  keys when a key range is refused (dd2d9, as `ddraw.dll`'s software blitter, takes no
+  ranges): it compared its blits against ranges that were never set, and failed on 1.3.1
+  too.
+
 ## 1.3.1
 Three fixes from players, confirmed in the games (Pal95's dialogue text, a movie cut in
 half after Alt+Tab, movies played in the game's own child window), a call tracer for

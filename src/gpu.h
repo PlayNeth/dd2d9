@@ -18,11 +18,22 @@
 struct IDirect3D9;
 struct IDirect3DDevice9;
 struct IDirect3DSwapChain9;
+struct IDirect3DBaseTexture9;
 struct IDirect3DSurface9;
 
 namespace dd2d9 {
 
 IDirect3D9* CreateD3D9();  // Windows' d3d9.dll or the game's, as configured
+
+// GpuContext::Draw sets a vertex declaration or a stage's texture only when it isn't the one
+// it set last on that device (gpures.cpp). Anything else that sets a device's vertex format or
+// textures (GPU blits, the presenter, overlays) goes through SetFvf9 and SetTexture9, and a
+// device made, reset, released or presented bumps the epoch too: Draw's record is then
+// stale. Gpu lock held.
+extern volatile LONG g_deviceStateEpoch;
+inline void DeviceStateChanged() { InterlockedIncrement(&g_deviceStateEpoch); }
+HRESULT SetFvf9(IDirect3DDevice9* d, DWORD fvf);
+HRESULT SetTexture9(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t);
 
 class Gpu {
 public:

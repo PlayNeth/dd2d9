@@ -44,8 +44,8 @@ inline __m128i Field(__m128i v, int shift, int bits) {
 
 }  // namespace
 
-RowConverter::RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed, DWORD key)
-    : f_(f), pal_(pal), keyed_(keyed), key_(key), keyMask_(f.KeyMask()) {
+RowConverter::RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed, DWORD key, bool palAlpha)
+    : f_(f), pal_(pal), keyed_(keyed), palAlpha_(palAlpha && f.pal8 && pal), key_(key), keyMask_(f.KeyMask()) {
     if (f.fourcc || f.zbuf) return;
     if (f.pal8) {
         kind_ = kPal8;
@@ -65,7 +65,8 @@ RowConverter::RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed,
 
 uint32_t RowConverter::One(uint32_t v) const {
     if (keyed_ && (v & keyMask_) == (key_ & keyMask_)) return 0;
-    return PixelToARGB(f_, v, pal_);
+    const uint32_t c = PixelToARGB(f_, v, pal_);
+    return palAlpha_ ? (c & 0x00FFFFFFu) | uint32_t(pal_[v & 0xFF].peFlags) << 24 : c;
 }
 
 void RowConverter::Run(const uint8_t* src, uint32_t* dst, int n) const {

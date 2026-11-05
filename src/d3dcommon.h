@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <xmmintrin.h>
 
 namespace dd2d9 {
 
@@ -173,8 +174,13 @@ inline Color FromArgb(DWORD c) {
     return {((c >> 16) & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f, (c & 0xFF) / 255.0f, (c >> 24) / 255.0f};
 }
 inline Color FromCv(const D3DCOLORVALUE& c) { return {c.r, c.g, c.b, c.a}; }
+// A colour value (0 to 255.5) to its integer, truncated, as x86 converts: a NaN (which
+// std::clamp lets through) gives 0x80000000. (DWORD(NaN) is undefined: compilers give that on
+// x86 today, but needn't.)
+inline DWORD TruncToDword(float v) { return DWORD(_mm_cvtt_ss2si(_mm_set_ss(v))); }
+
 inline DWORD ToArgb(Color c) {
-    auto b = [](float v) { return DWORD(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    auto b = [](float v) { return TruncToDword(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
     return (b(c.a) << 24) | (b(c.r) << 16) | (b(c.g) << 8) | b(c.b);
 }
 

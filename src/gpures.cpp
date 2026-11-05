@@ -14,6 +14,7 @@
 #include <climits>
 #include <cfloat>
 #include <cmath>
+#include <emmintrin.h>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -413,9 +414,9 @@ static void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     d->SetViewport(&vp);
     d->SetPixelShader(nullptr);
     d->SetVertexShader(nullptr);
-    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
-    d->SetTexture(0, g->msCopy);
-    d->SetTexture(1, nullptr);
+    SetFvf9(d, D3DFVF_XYZRHW | D3DFVF_TEX1);
+    SetTexture9(d, 0, g->msCopy);
+    SetTexture9(d, 1, nullptr);
     const DWORD tss[][2] = {{D3DTSS_COLOROP, D3DTOP_SELECTARG1}, {D3DTSS_COLORARG1, D3DTA_TEXTURE},
                             {D3DTSS_ALPHAOP, D3DTOP_SELECTARG1}, {D3DTSS_ALPHAARG1, D3DTA_TEXTURE},
                             {D3DTSS_TEXCOORDINDEX, 0}, {D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE}};
@@ -534,8 +535,8 @@ static bool DrawZQuad(Gpu& gpu, IDirect3DDevice9* d, IDirect3DPixelShader9* ps, 
     d->SetViewport(&vp);
     d->SetPixelShader(ps);
     d->SetVertexShader(nullptr);
-    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
-    d->SetTexture(1, nullptr);
+    SetFvf9(d, D3DFVF_XYZRHW | D3DFVF_TEX1);
+    SetTexture9(d, 1, nullptr);
     const DWORD tss[][2] = {{D3DTSS_TEXCOORDINDEX, 0}, {D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE}};
     for (const auto& t : tss) d->SetTextureStageState(0, D3DTEXTURESTAGESTATETYPE(t[0]), t[1]);
     const DWORD ss[][2] = {{D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MAGFILTER, D3DTEXF_POINT},
@@ -597,7 +598,7 @@ static bool ReadBackDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g, const RECT*
         }
         d->SetDepthStencilSurface(nullptr);  // (sampled now: not bound as well)
         d->SetRenderTarget(0, rt);
-        d->SetTexture(0, g->ztex);
+        SetTexture9(d, 0, g->ztex);
         const RECT dst = part ? RECT{0, 0, w, h} : all;
         if (!DrawZQuad(gpu, d, g->zreadPs, part ? kZTile : b->w, part ? kZTile : b->h, dst, b->w, b->h, src, false))
             return false;
@@ -659,7 +660,7 @@ static void UploadDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
         const SavedDeviceState saved(d);
         d->SetRenderTarget(0, g->zrt);
         d->SetDepthStencilSurface(g->surf);
-        d->SetTexture(0, g->zup);
+        SetTexture9(d, 0, g->zup);
         drawn = DrawZQuad(gpu, d, g->zwritePs, b->w, b->h, rc, b->w, b->h, rc, true);
     }
     if (drawn) b->gpuStale = false;
@@ -903,6 +904,15 @@ static const Palette* TexturePalette(const Surface* s) {
     return nullptr;
 }
 
+// An 8-bit texture's palette made with DDPCAPS_ALPHA: each entry's peFlags is its alpha
+// (D3DPTEXTURECAPS_ALPHAPALETTE, which dd2d9 reports). PopCap's SexyApp games (Bejeweled 2)
+// keep their translucent images this way.
+static bool PaletteHasAlpha(const Palette* pal) { return pal && (pal->caps & DDPCAPS_ALPHA); }
+
+bool TextureHasAlpha(const Surface* s) {
+    return s->buf->fmt.a || (s->buf->fmt.pal8 && PaletteHasAlpha(TexturePalette(s)));
+}
+
 // mipmaps=on: whether the GPU can make a texture of this format's smaller levels itself.
 static bool CanAutogen(IDirect3DDevice9* d, D3DFORMAT fmt) {
     static std::unordered_map<int, bool> known;  // Gpu lock
@@ -924,7 +934,7 @@ static bool CanAutogen(IDirect3DDevice9* d, D3DFORMAT fmt) {
 
 // One level of a texture's CPU copy into its locked GPU level.
 static void WriteLevel(const Buffer* b, const D3DLOCKED_RECT& lr, const PALETTEENTRY* entries, bool convert, bool keyed,
-                       DWORD key) {
+                       DWORD key, bool palAlpha = false) {
     if (b->fmt.bump && b->fmt.bpp == 24) {
         // U8V8L8 widened to X8L8V8U8 (the same bytes, a fourth unused): four pixels from three
         // 32-bit words at a time.
@@ -955,7 +965,7 @@ static void WriteLevel(const Buffer* b, const D3DLOCKED_RECT& lr, const PALETTEE
             memcpy(static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, b->bits + y * rowBytes,
                    std::min<size_t>(rowBytes, size_t(lr.Pitch)));
     } else {
-        const RowConverter conv(b->fmt, entries, keyed, key);
+        const RowConverter conv(b->fmt, entries, keyed, key, palAlpha);
         for (int y = 0; y < b->h; y++)
             RowToGpu(b, y, static_cast<uint8_t*>(lr.pBits) + y * lr.Pitch, convert ? &conv : nullptr);
     }
@@ -1028,7 +1038,7 @@ static IDirect3DCubeTexture9* EnsureCube(Gpu& gpu, IDirect3DDevice9* d, Surface*
                 continue;
             D3DLOCKED_RECT lr;
             if (FAILED(t->cube->LockRect(D3DCUBEMAP_FACES(f), i, &lr, nullptr, 0))) continue;
-            WriteLevel(b, lr, entries, t->convert, keyed, key);
+            WriteLevel(b, lr, entries, t->convert, keyed, key, PaletteHasAlpha(pal));
             t->cube->UnlockRect(D3DCUBEMAP_FACES(f), i);
             t->levelBufs[k] = b;
             t->levelSerials[k] = b->cpuSerial;
@@ -1144,7 +1154,7 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
                     const SavedDeviceState saved(d);
                     d->SetRenderTarget(0, level);
                     d->SetDepthStencilSurface(nullptr);
-                    d->SetTexture(0, t->rtTmp);
+                    SetTexture9(d, 0, t->rtTmp);
                     d->SetPixelShaderConstantF(0, maxes, 1);
                     d->SetPixelShaderConstantF(3, minusKey, 1);
                     const RECT all = {0, 0, b->w, b->h};
@@ -1219,8 +1229,9 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
         return rt;
     }
     bool all = false;
+    // (Made with GPU mipmaps and given alpha since, by a palette with alpha: made again without.)
     if (!t->tex || t->levels != chain.size() || keyed != t->keyed || t->w != s->buf->w || t->h != s->buf->h ||
-        !(t->made == s->buf->fmt)) {
+        !(t->made == s->buf->fmt) || (t->autogen && TextureHasAlpha(s))) {
         t->Drop();
         const D3DFORMAT native = NativeFormat(s->buf->fmt);
         t->convert = native == D3DFMT_UNKNOWN || keyed;
@@ -1231,7 +1242,7 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
         // block-compressed ones (D3D9 can't), not 1x1.
         HRESULT hr = E_FAIL;
         t->autogen = false;
-        if (g_config.mipmaps && chain.size() == 1 && !keyed && !s->buf->fmt.a && !s->buf->fmt.fourcc && !s->buf->fmt.bump &&
+        if (g_config.mipmaps && chain.size() == 1 && !keyed && !TextureHasAlpha(s) && !s->buf->fmt.fourcc && !s->buf->fmt.bump &&
             (s->buf->w > 1 || s->buf->h > 1) &&
             CanAutogen(d, t->fmt)) {
             hr = d->CreateTexture(s->buf->w, s->buf->h, 0, D3DUSAGE_AUTOGENMIPMAP, t->fmt, D3DPOOL_MANAGED, &t->tex, nullptr);
@@ -1280,7 +1291,7 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
             continue;
         D3DLOCKED_RECT lr;
         if (FAILED(t->tex->LockRect(i, &lr, nullptr, 0))) continue;
-        WriteLevel(b, lr, entries, t->convert, keyed, key);
+        WriteLevel(b, lr, entries, t->convert, keyed, key, PaletteHasAlpha(pal));
         t->tex->UnlockRect(i);
         t->levelBufs[i] = b;
         t->levelSerials[i] = b->cpuSerial;
@@ -1440,6 +1451,8 @@ struct GpuContext::Impl final : Gpu::Owner {
     bool projDirty = g_config.pixelCenter;
     D3DVIEWPORT9 vp = {0, 0, 1, 1, 0.0f, 1.0f};
     std::unordered_map<DWORD, IDirect3DVertexDeclaration9*> decls;
+    DWORD lastFvf = 0xFFFFFFFF;  // Decl's last answer (most draws use the FVF of the one before)
+    IDirect3DVertexDeclaration9* lastDecl = nullptr;
     std::vector<uint8_t> scratch;
 
     explicit Impl(Gpu& g) : gpu(g) {
@@ -1456,13 +1469,19 @@ struct GpuContext::Impl final : Gpu::Owner {
         for (auto& e : decls)
             if (e.second) e.second->Release();  // a failed one is cached as nullptr
         decls.clear();
+        lastFvf = 0xFFFFFFFF;
+        lastDecl = nullptr;
+        DeviceStateChanged();  // (a declaration Draw set may be gone)
         boundRt = boundZ = nullptr;
     }
 
     IDirect3DVertexDeclaration9* Decl(DWORD fvf);
     bool BindTargets(bool overwriteColor, bool overwriteZ);
     void BindTextures();
+    // The address modes ClampCutouts sets for these vertices (each stage's U and V).
+    void CutoutAddr(DWORD fvf, const void* verts, UINT stride, UINT count, DWORD (&want)[8][2]) const;
     void ClampCutouts(DWORD fvf, const void* verts, UINT stride, UINT count);
+    void SetAddr(const DWORD (&want)[8][2]);  // the sampler address modes, where they differ
     bool CoversTarget() const;
 };
 
@@ -1657,10 +1676,27 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
 }
 
 void GpuContext::Impl::BindTextures() {
+    // Each stage's texture as this function set it last, on which device, and the epoch then
+    // (gpu.h): set again only when it changes (all 8 every draw before, most of them null).
+    static IDirect3DDevice9* texDev = nullptr;
+    static LONG texEpoch = 0;
+    static IDirect3DBaseTexture9* texSet[8] = {};
+    if (texDev != dev || texEpoch != g_deviceStateEpoch) {
+        texDev = dev, texEpoch = g_deviceStateEpoch;
+        for (auto& e : texSet) e = reinterpret_cast<IDirect3DBaseTexture9*>(~uintptr_t(0));  // (unknown)
+    }
     for (DWORD i = 0; i < 8; i++) {
         IDirect3DBaseTexture9* t = tex[i] ? EnsureTex(gpu, dev, tex[i], colorKey) : nullptr;
-        dev->SetTexture(i, t);
-        cutoutStage[i] = t && (tex[i]->buf->fmt.a || (tex[i]->gpuTex && tex[i]->gpuTex->shownKeyed));
+        // (EnsureTex may draw on the GPU itself, RtTexture's copy: its SetTexture9 bumps the epoch.)
+        if (texEpoch != g_deviceStateEpoch) {
+            texEpoch = g_deviceStateEpoch;
+            for (auto& e : texSet) e = reinterpret_cast<IDirect3DBaseTexture9*>(~uintptr_t(0));
+        }
+        if (t != texSet[i]) {
+            dev->SetTexture(i, t);
+            texSet[i] = t;
+        }
+        cutoutStage[i] = t && (TextureHasAlpha(tex[i]) || (tex[i]->gpuTex && tex[i]->gpuTex->shownKeyed));
         if (g_config.anisotropy > 1 || g_config.texLinear) {
             if (g_config.anisotropy > 1 && !anisoLimit) {
                 D3DCAPS9 caps = {};
@@ -1718,7 +1754,7 @@ void GpuContext::Impl::BindTextures() {
 // sprite's edge, a little outside 0..1, where wrapping reaches the other side of the
 // texture and draws a line of it at the edge (NFS III's trees and corn). Clamped, it reads
 // the edge's own transparent texels; inside, nothing changes. Tiled ones keep the game's.
-void GpuContext::Impl::ClampCutouts(DWORD fvf, const void* verts, UINT stride, UINT count) {
+void GpuContext::Impl::CutoutAddr(DWORD fvf, const void* verts, UINT stride, UINT count, DWORD (&out)[8][2]) const {
     // Where each texture coordinate set sits in the vertex (as Decl lays it out).
     const DWORD pos = fvf & 0x0E;
     UINT off = pos == 0x04 ? 16 : 12 + (pos >= 0x06 ? (pos - 0x04) / 2 : 0) * 4;
@@ -1753,12 +1789,23 @@ void GpuContext::Impl::ClampCutouts(DWORD fvf, const void* verts, UINT stride, U
                 if ((want[a] == D3DTADDRESS_WRAP || want[a] == D3DTADDRESS_MIRROR) && lo[a] >= -0.001f && hi[a] <= 1.001f)
                     want[a] = D3DTADDRESS_CLAMP;
         }
-        for (int a = 0; a < 2; a++)
-            if (want[a] != addrSet[i][a]) {
-                dev->SetSamplerState(i, a ? D3DSAMP_ADDRESSV : D3DSAMP_ADDRESSU, want[a]);
-                addrSet[i][a] = want[a];
-            }
+        out[i][0] = want[0], out[i][1] = want[1];
     }
+}
+
+void GpuContext::Impl::ClampCutouts(DWORD fvf, const void* verts, UINT stride, UINT count) {
+    DWORD want[8][2];
+    CutoutAddr(fvf, verts, stride, count, want);
+    SetAddr(want);
+}
+
+void GpuContext::Impl::SetAddr(const DWORD (&want)[8][2]) {
+    for (DWORD i = 0; i < 8; i++)
+        for (int a = 0; a < 2; a++)
+            if (want[i][a] != addrSet[i][a]) {
+                dev->SetSamplerState(i, a ? D3DSAMP_ADDRESSV : D3DSAMP_ADDRESSU, want[i][a]);
+                addrSet[i][a] = want[i][a];
+            }
 }
 
 void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, float z, DWORD stencil) {
@@ -1796,8 +1843,13 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
 // Direct3D 7 FVF to a Direct3D 9 vertex declaration: the same offsets, but D3DFVF_RESERVED1
 // (D3DLVERTEX's spare DWORD, D3D9's PSIZE) skipped, and five blend weights cut to four.
 IDirect3DVertexDeclaration9* GpuContext::Impl::Decl(DWORD fvf) {
+    if (fvf == lastFvf) return lastDecl;
     auto it = decls.find(fvf);
-    if (it != decls.end()) return it->second;
+    if (it != decls.end()) {
+        lastFvf = fvf;
+        lastDecl = it->second;
+        return it->second;
+    }
     std::vector<D3DVERTEXELEMENT9> e;
     WORD off = 0;
     auto add = [&](BYTE type, BYTE usage, BYTE index, WORD size) {
@@ -1835,13 +1887,71 @@ IDirect3DVertexDeclaration9* GpuContext::Impl::Decl(DWORD fvf) {
         decl = nullptr;
     }
     decls[fvf] = decl;
+    lastFvf = fvf;
+    lastDecl = decl;
     return decl;
 }
 
+// One pass over transformed vertices (x, y, z, rhw first; stride 16 or more), each vertex
+// one vector, in vertex order: minps and maxps with the vertex first give std::min's and
+// std::max's answers (NaN, and the zeros' signs, included), so the loops this replaces decide
+// the same.
+struct TlScan {
+    float x0, y0, x1, y1;  // x and y from lowest to highest
+    bool flat;             // every vertex at vertex 0's z and rhw
+    bool zOut;             // a z below 0 or above 1
+    bool badRhw;           // an rhw that isn't a positive normal number (0, negative, a denormal, NaN, infinite)
+    float minRhw, maxRhw;  // the others' (0: none)
+};
+static TlScan ScanTl(const uint8_t* src, UINT stride, UINT n) {
+    const __m128 v0 = _mm_loadu_ps(reinterpret_cast<const float*>(src));
+    const __m128 zero = _mm_setzero_ps(), one = _mm_set1_ps(1.0f), inf = _mm_set1_ps(INFINITY);
+    const __m128 normMin = _mm_set1_ps(FLT_MIN), normMax = _mm_set1_ps(FLT_MAX);
+    __m128 lo = v0, hi = v0, eq = _mm_cmpeq_ps(zero, zero), out = zero, bad = zero, gMin = inf, gMax = zero;
+    for (UINT i = 0; i < n; i++) {
+        const __m128 v = _mm_loadu_ps(reinterpret_cast<const float*>(src + size_t(i) * stride));
+        if (i) {
+            lo = _mm_min_ps(v, lo);  // v < lo ? v : lo, as std::min(lo, v)
+            hi = _mm_max_ps(v, hi);  // v > hi ? v : hi, as std::max(hi, v)
+            eq = _mm_and_ps(eq, _mm_cmpeq_ps(v, v0));
+        }
+        out = _mm_or_ps(out, _mm_or_ps(_mm_cmplt_ps(v, zero), _mm_cmpgt_ps(v, one)));
+        const __m128 good = _mm_and_ps(_mm_cmpge_ps(v, normMin), _mm_cmple_ps(v, normMax));
+        bad = _mm_or_ps(bad, _mm_andnot_ps(good, _mm_cmpeq_ps(zero, zero)));
+        gMin = _mm_min_ps(_mm_or_ps(_mm_and_ps(good, v), _mm_andnot_ps(good, inf)), gMin);
+        gMax = _mm_max_ps(_mm_and_ps(good, v), gMax);
+    }
+    alignas(16) float l[4], h[4], mn[4], mx[4];
+    _mm_store_ps(l, lo), _mm_store_ps(h, hi), _mm_store_ps(mn, gMin), _mm_store_ps(mx, gMax);
+    TlScan r;
+    r.x0 = l[0], r.y0 = l[1], r.x1 = h[0], r.y1 = h[1];
+    r.flat = (_mm_movemask_ps(eq) & 0xC) == 0xC;
+    r.zOut = (_mm_movemask_ps(out) & 4) != 0;
+    r.badRhw = (_mm_movemask_ps(bad) & 8) != 0;
+    r.minRhw = mn[3] == INFINITY ? 0.0f : mn[3];
+    r.maxRhw = mx[3];
+    return r;
+}
+
 void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride, UINT vertexCount,
-                      const WORD* indices, UINT indexCount, UINT primCount, bool zEnabled) {
+                      const WORD* indices, UINT indexCount, UINT primCount, bool zEnabled, const DrawSeg* segs,
+                      UINT segCount) {
     Impl& p = *p_;
     if (!p.dev || !primCount || !verts || !vertexCount) return;
+    if (segCount < 2) segs = nullptr, segCount = 0;
+    // Several draws (segs), one by one: as each would have been drawn on its own.
+    auto drawEach = [&] {
+        std::vector<WORD> own;
+        for (UINT k = 0; k < segCount; k++) {
+            const DrawSeg& g = segs[k];
+            if (g.indexed) {
+                own.assign(indices + g.firstIndex, indices + g.firstIndex + g.indexCount);
+                for (WORD& i : own) i = WORD(i - g.firstVertex);
+            }
+            Draw(primType, fvf, static_cast<const uint8_t*>(verts) + size_t(g.firstVertex) * stride, stride,
+                 g.vertexCount, g.indexed ? own.data() : nullptr, g.indexed ? g.indexCount : 0, g.primCount, zEnabled);
+        }
+    };
     // antialias2d=off: a 2D draw (a HUD, a menu, text) skips antialiasing: drawn into the
     // resolved image after the 3D so far, pixel for pixel, its edges as the game drew them
     // (multisampled, a HUD's edges came out soft). 2D: transformed vertices at one depth
@@ -1853,19 +1963,53 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // as for the CPU's drawing.
     RECT flatRect = {};
     p.flat2d = false;
-    const bool depthNeither = !zEnabled || !p.z || (p.rsMirror[D3DRS_ZFUNC] == D3DCMP_ALWAYS && !p.zWrite);
-    if (!g_config.aa2d && (fvf & 0x0E) == 0x04 && stride >= 16 && depthNeither &&
-        p.rsMirror[D3DRS_STENCILENABLE] != TRUE && p.rt && p.rt->buf->gpu && p.rt->buf->gpu->ms) {  // (no depth-stencil with `surf`)
-        const auto* src = static_cast<const uint8_t*>(verts);
-        const float* v0 = reinterpret_cast<const float*>(src);
-        float x0 = v0[0], y0 = v0[1], x1 = v0[0], y1 = v0[1];
-        bool flat = true;
-        for (UINT i = 1; i < vertexCount && flat; i++) {
-            const float* v = reinterpret_cast<const float*>(src + size_t(i) * stride);
-            flat = v[2] == v0[2] && v[3] == v0[3];
-            x0 = std::min(x0, v[0]), x1 = std::max(x1, v[0]), y0 = std::min(y0, v[1]), y1 = std::max(y1, v[1]);
+    const bool tl = (fvf & 0x0E) == 0x04 && stride >= 16;
+    // Several draws (segs): their vertices only, each scanned once (between their ranges may
+    // lie vertices none of them uses).
+    static std::vector<std::pair<UINT, UINT>> spans;  // (every caller holds g_lock)
+    TlScan scan{};
+    if (tl && !segs) {
+        scan = ScanTl(static_cast<const uint8_t*>(verts), stride, vertexCount);
+    } else if (tl) {
+        spans.clear();
+        for (UINT k = 0; k < segCount; k++) spans.emplace_back(segs[k].firstVertex, segs[k].firstVertex + segs[k].vertexCount);
+        std::sort(spans.begin(), spans.end());
+        bool firstSpan = true;
+        for (size_t k = 0; k < spans.size();) {
+            UINT a = spans[k].first, b = spans[k].second;
+            for (k++; k < spans.size() && spans[k].first <= b; k++) b = std::max(b, spans[k].second);
+            const TlScan t = ScanTl(static_cast<const uint8_t*>(verts) + size_t(a) * stride, stride, b - a);
+            if (firstSpan) {
+                scan = t;
+            } else {
+                scan.zOut |= t.zOut;
+                scan.badRhw |= t.badRhw;
+                scan.minRhw = scan.minRhw == 0.0f ? t.minRhw : t.minRhw == 0.0f ? scan.minRhw : std::min(scan.minRhw, t.minRhw);
+                scan.maxRhw = std::max(scan.maxRhw, t.maxRhw);
+            }
+            firstSpan = false;
         }
-        if (flat && std::isfinite(x0) && std::isfinite(x1) && std::isfinite(y0) && std::isfinite(y1)) {
+        scan.flat = false;  // (2D: decided draw by draw below)
+    }
+    const bool depthNeither = !zEnabled || !p.z || (p.rsMirror[D3DRS_ZFUNC] == D3DCMP_ALWAYS && !p.zWrite);
+    const bool flatTest = !g_config.aa2d && tl && depthNeither && p.rsMirror[D3DRS_STENCILENABLE] != TRUE && p.rt &&
+                          p.rt->buf->gpu && p.rt->buf->gpu->ms;  // (no depth-stencil with `surf`)
+    // Several draws: each one's own scan, for what's decided from it below.
+    static std::vector<TlScan> segScan;  // (every caller holds g_lock)
+    if (segs) {
+        if (!tl || scan.badRhw) return drawEach();  // (DrawPVerts' are transformed; bad rhw: the draw's smallest valid one)
+        if (flatTest || p.wEmulate) {  // (only what's decided from them below)
+            segScan.resize(segCount);
+            for (UINT k = 0; k < segCount; k++) {
+                segScan[k] = ScanTl(static_cast<const uint8_t*>(verts) + size_t(segs[k].firstVertex) * stride, stride,
+                                    segs[k].vertexCount);
+                if (flatTest && segScan[k].flat) return drawEach();  // a 2D draw: drawn into `surf`
+            }
+        }
+    }
+    if (flatTest) {
+        const float x0 = scan.x0, y0 = scan.y0, x1 = scan.x1, y1 = scan.y1;
+        if (scan.flat && std::isfinite(x0) && std::isfinite(x1) && std::isfinite(y0) && std::isfinite(y1)) {
             const float w = float(p.rt->buf->w), h = float(p.rt->buf->h);
             flatRect = {LONG(std::clamp(std::floor(x0) - 1.0f, 0.0f, w)), LONG(std::clamp(std::floor(y0) - 1.0f, 0.0f, h)),
                         LONG(std::clamp(std::ceil(x1) + 1.0f, 0.0f, w)), LONG(std::clamp(std::ceil(y1) + 1.0f, 0.0f, h))};
@@ -1877,10 +2021,42 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     p.flat2d = false;
     if (!bound) return;
     p.BindTextures();
-    if (MsaaType(p.dev) != D3DMULTISAMPLE_NONE) p.ClampCutouts(fvf, verts, stride, vertexCount);
+    if (segs) {
+        // Untextured rhw flattened (below): the whole draw's or none.
+        bool apart = (scan.minRhw > 0.0f && scan.maxRhw > scan.minRhw * 10000.0f) && (!p.tex[0] || scan.minRhw == 0.0f);
+        if (p.wEmulate) {  // the W scale each would have been drawn with, the scale as one
+            const float all = scan.maxRhw * g_wScale > 1.0f ? 0.5f / scan.maxRhw : g_wScale;
+            float s = g_wScale;
+            for (UINT k = 0; k < segCount && !apart; k++) {
+                if (segScan[k].maxRhw * s > 1.0f) s = 0.5f / segScan[k].maxRhw;
+                apart = s != all;
+            }
+        }
+        if (apart) return drawEach();
+    }
+    if (MsaaType(p.dev) != D3DMULTISAMPLE_NONE) {
+        if (!segs) {
+            p.ClampCutouts(fvf, verts, stride, vertexCount);
+        } else {  // each draw's address modes for the cut-outs: the same, or one by one
+            DWORD all[8][2], own[8][2];
+            for (UINT k = 0; k < segCount; k++) {
+                p.CutoutAddr(fvf, static_cast<const uint8_t*>(verts) + size_t(segs[k].firstVertex) * stride, stride,
+                              segs[k].vertexCount, k ? own : all);
+                if (k && memcmp(all, own, sizeof all) != 0) return drawEach();
+            }
+            p.SetAddr(all);
+        }
+    }
     IDirect3DVertexDeclaration9* decl = p.Decl(fvf);
     if (!decl) return;
-    p.dev->SetVertexDeclaration(decl);
+    // The declaration this function set last, on which device, and the epoch then (gpu.h).
+    static IDirect3DDevice9* declDev = nullptr;
+    static IDirect3DVertexDeclaration9* declSet = nullptr;
+    static LONG declEpoch = 0;
+    if (decl != declSet || p.dev != declDev || declEpoch != g_deviceStateEpoch) {
+        p.dev->SetVertexDeclaration(decl);
+        declDev = p.dev, declSet = decl, declEpoch = g_deviceStateEpoch;
+    }
     // Transformed vertices: Direct3D 7 clips their z to [0, 1] only with ZENABLE on, so it
     // can't matter with it off, but D3D9 always clips: clamp it then. rhw 0 on every vertex
     // (2D drawn through Direct3D) is 1: the same picture, without DXVK's infinities.
@@ -1945,7 +2121,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         p.dev->SetTransform(D3DTS_PROJECTION, &m);
         p.projDirty = false;
     }
-    if ((fvf & 0x0E) == 0x04 && stride >= 16) {
+    if (tl) {
         const auto* src = static_cast<const uint8_t*>(verts);
         // Bad rhw: hardware of the era interpolated colour across the screen without rhw and
         // used it for texture perspective only; Direct3D 9 weighs every attribute by it, and
@@ -1955,18 +2131,9 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // every vertex when untextured (colour linear on the screen, as then), else the bad
         // ones the draw's smallest valid rhw. An untextured draw whose rhw differ over 10000
         // times is flattened too: the smallest weigh nothing and flush to 0 as easily.
-        bool clampZ = false, badRhw = false;
-        float minRhw = 0.0f, maxRhw = 0.0f;
-        for (UINT i = 0; i < vertexCount; i++) {
-            const float* v = reinterpret_cast<const float*>(src + size_t(i) * stride);
-            if (!zEnabled && (v[2] < 0.0f || v[2] > 1.0f)) clampZ = true;
-            if (!(v[3] >= FLT_MIN) || !std::isfinite(v[3])) {
-                badRhw = true;
-            } else {
-                if (minRhw == 0.0f || v[3] < minRhw) minRhw = v[3];
-                maxRhw = std::max(maxRhw, v[3]);
-            }
-        }
+        const bool clampZ = !zEnabled && scan.zOut;  // (ScanTl)
+        bool badRhw = scan.badRhw;
+        const float minRhw = scan.minRhw, maxRhw = scan.maxRhw;
         const bool flatRhw = (badRhw || (minRhw > 0.0f && maxRhw > minRhw * 10000.0f)) && (!p.tex[0] || minRhw == 0.0f);
         badRhw = badRhw || flatRhw;
         const bool wz = p.wEmulate;
@@ -2001,7 +2168,6 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     }
     if (TracingFrame()) {
         float zlo = 1e30f, zhi = -1e30f, wlo = 1e30f, whi = -1e30f;
-        const bool tl = (fvf & 0x0E) == 0x04 && stride >= 16;
         for (UINT i = 0; tl && i < vertexCount; i++) {
             const float* v = reinterpret_cast<const float*>(static_cast<const uint8_t*>(verts) + size_t(i) * stride);
             zlo = std::min(zlo, v[2]);
@@ -2017,7 +2183,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         DD2D9_LOG("drawtrace: prim %lu x%u v%u fvf 0x%lx z(en %lu wr %lu fn %lu) blend(%lu %lu>%lu) atest(%lu %lu ref %lu) "
                   "tex0 %p %dbpp%s%s bias %g slope %g fog(en %lu v %lu t %lu) | z %.6f..%.6f rhw %g..%g%s",
                   primType, primCount, vertexCount, fvf, rs[7], rs[14], rs[23], rs[27], rs[19], rs[20], rs[15], rs[25], rs[24],
-                  static_cast<void*>(t0), t0 ? int(t0->buf->fmt.bpp) : 0, t0 && t0->buf->fmt.a ? " alpha" : "",
+                  static_cast<void*>(t0), t0 ? int(t0->buf->fmt.bpp) : 0, t0 && TextureHasAlpha(t0) ? " alpha" : "",
                   t0 && t0->gpuTex && t0->gpuTex->shownKeyed ? " keyed" : "", bias, slope, rs[28], rs[140], rs[35],
                   tl ? zlo : 0.0f, tl ? zhi : 0.0f, tl ? wlo : 0.0f, tl ? whi : 0.0f, flat2d ? " FLAT2D" : "");
     }

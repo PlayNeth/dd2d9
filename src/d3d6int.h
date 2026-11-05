@@ -476,6 +476,8 @@ public:
     // Execute (C §6)
     std::vector<PVert> tl;       // the TL buffer, indices of execute-buffer primitives
     std::vector<WORD> execIdx;   // Execute's primitives as index lists (scratch)
+    std::vector<WORD> execBatch; // Execute's consecutive primitives of one kind, drawn together (scratch)
+    std::vector<std::pair<DWORD, DWORD>> execParts;  // each instruction's indices in execBatch (scratch)
     // Pick (B §9.2): while set, ExecuteI picks instead of drawing: the triangles that cover
     // the rectangle's top-left pixel, recorded as XP's rasterizer does.
     const D3DRECT* picking = nullptr;
@@ -710,6 +712,10 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
 // vertex is inside, else clipped against XP's volume first.
 void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx, DWORD ni, bool clip,
                 DWORD ntex);
+// Several index lists of one primitive type (parts: offset and count in idx), each drawn as
+// DrawPVerts draws it, in one draw where that changes nothing (GpuContext::Draw).
+void DrawPVertsBatch(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx,
+                     const std::vector<std::pair<DWORD, DWORD>>& parts, bool clip);
 // Direct3D 6 vertex size: texture coordinates are always two floats (no size bits in DX6).
 UINT FvfSize6(DWORD fvf);
 // A viewport's mapping (C §1.6); false (and *m untouched) for degenerate data.

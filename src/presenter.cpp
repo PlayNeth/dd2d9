@@ -194,12 +194,6 @@ void Presenter::SetGamma(const DDGAMMARAMP& ramp) {
     LeaveCriticalSection(&gammaLock_);
 }
 
-void Presenter::GetGamma(DDGAMMARAMP* ramp) {
-    EnterCriticalSection(&gammaLock_);
-    *ramp = gammaRamp_;
-    LeaveCriticalSection(&gammaLock_);
-}
-
 // ---------------------------------------------------------------- device
 
 // The staging surface and the shaders' resources (the shared device's).
@@ -321,12 +315,12 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     d->SetViewport(&vp);
     d->SetPixelShader(gammaPs_);
     d->SetVertexShader(nullptr);
-    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    SetFvf9(d, D3DFVF_XYZRHW | D3DFVF_TEX1);
     d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
     d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
     d->SetRenderState(D3DRS_WRAP0, 0);
-    d->SetTexture(0, gammaSrc_);
-    d->SetTexture(1, gammaLutTex_);
+    SetTexture9(d, 0, gammaSrc_);
+    SetTexture9(d, 1, gammaLutTex_);
     for (DWORD s = 0; s < 2; s++) {
         d->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         d->SetSamplerState(s, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
@@ -350,8 +344,8 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
     gpu.CloseScene();
     d->SetPixelShader(nullptr);
-    d->SetTexture(0, nullptr);
-    d->SetTexture(1, nullptr);
+    SetTexture9(d, 0, nullptr);
+    SetTexture9(d, 1, nullptr);
     return gammaOut_;
 }
 
@@ -457,11 +451,11 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
     d->SetViewport(&vp);
     d->SetPixelShader(sharpPs_);
     d->SetVertexShader(nullptr);
-    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    SetFvf9(d, D3DFVF_XYZRHW | D3DFVF_TEX1);
     d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
     d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
     d->SetRenderState(D3DRS_WRAP0, 0);
-    d->SetTexture(0, sharpTex_);
+    SetTexture9(d, 0, sharpTex_);
     d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
     d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
     d->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
@@ -488,7 +482,7 @@ bool Presenter::DrawSharp(IDirect3DDevice9* d, IDirect3DSurface9* src, const REC
     d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
     gpu.CloseScene();
     d->SetPixelShader(nullptr);
-    d->SetTexture(0, nullptr);
+    SetTexture9(d, 0, nullptr);
     return true;
 }
 
@@ -505,8 +499,8 @@ static void DrawCall(Gpu& gpu, IDirect3DDevice9* d) {
     d->SetDepthStencilSurface(nullptr);
     d->SetPixelShader(nullptr);
     d->SetVertexShader(nullptr);
-    d->SetFVF(D3DFVF_XYZRHW);
-    d->SetTexture(0, nullptr);
+    SetFvf9(d, D3DFVF_XYZRHW);
+    SetTexture9(d, 0, nullptr);
     const DWORD rs[][2] = {{D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE},
                            {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_STENCILENABLE, FALSE},
                            {D3DRS_COLORWRITEENABLE, 0}, {D3DRS_CLIPPLANEENABLE, 0}};
@@ -561,16 +555,41 @@ void Presenter::CountPresent(double lockSeconds, double convertSeconds, double f
 
 // ---------------------------------------------------------------- conversion
 
-// Called with gammaLock_ held.
-void Presenter::BuildLut16(const Format& f) {
+// The presenter thread's (the only one using lut16_), from a copy of the gamma ramp taken
+// under gammaLock_: built without it, so a game setting its ramp every frame (a fade) doesn't
+// wait for the 65536 conversions.
+void Presenter::BuildLut16(const Format& f, const uint8_t (&gamma)[3][256], DWORD gammaVersion) {
     lut16_.resize(65536);
-    for (uint32_t v = 0; v < 65536; v++) {
-        uint32_t c = PixelToARGB(f, v, nullptr);
-        lut16_[v] = (uint32_t(gammaLut_[0][(c >> 16) & 0xFF]) << 16) | (uint32_t(gammaLut_[1][(c >> 8) & 0xFF]) << 8) |
-                    gammaLut_[2][c & 0xFF];
+    if (f.pal8) {
+        for (uint32_t v = 0; v < 65536; v++) {
+            uint32_t c = PixelToARGB(f, v, nullptr);
+            lut16_[v] = (uint32_t(gamma[0][(c >> 16) & 0xFF]) << 16) | (uint32_t(gamma[1][(c >> 8) & 0xFF]) << 8) |
+                        gamma[2][c & 0xFF];
+        }
+    } else {
+        // Each channel PixelToARGB gives depends on that channel's bits alone: a table per
+        // channel (its values, through the gamma ramp), then three lookups an entry, not 65536
+        // conversions of three divisions each (a fade sets a new ramp every frame).
+        const DWORD masks[3] = {f.r, f.g, f.b};
+        std::vector<uint32_t> part[3];
+        int shift[3];
+        for (int c = 0; c < 3; c++) {
+            const uint32_t m = masks[c] & 0xFFFF;
+            shift[c] = m ? __builtin_ctz(m) : 0;
+            const uint32_t max = m >> shift[c];
+            part[c].resize(max + 1);
+            for (uint32_t k = 0; k <= max; k++) {
+                const uint32_t argb = PixelToARGB(f, (k << shift[c]) & m, nullptr);
+                part[c][k] = uint32_t(gamma[c][(argb >> (16 - 8 * c)) & 0xFF]) << (16 - 8 * c);
+            }
+        }
+        const uint32_t mr = f.r & 0xFFFF, mg = f.g & 0xFFFF, mb = f.b & 0xFFFF;
+        const uint32_t *pr = part[0].data(), *pg = part[1].data(), *pb = part[2].data();
+        for (uint32_t v = 0; v < 65536; v++)
+            lut16_[v] = pr[(v & mr) >> shift[0]] | pg[(v & mg) >> shift[1]] | pb[(v & mb) >> shift[2]];
     }
     lut16Fmt_ = f;
-    lut16GammaVersion_ = gammaVersion_;
+    lut16GammaVersion_ = gammaVersion;
 }
 
 // Converts `area` of the snapshot (primary surface coordinates; parts outside
@@ -587,8 +606,9 @@ void Presenter::Convert(const Snapshot& s, const RECT& area, void* bits, int pit
     EnterCriticalSection(&gammaLock_);
     memcpy(gamma, gammaLut_, sizeof(gamma));
     const bool gammaOn = gammaActive_;
-    if (f.bpp == 16 && (lut16_.empty() || lut16Fmt_ != f || lut16GammaVersion_ != gammaVersion_)) BuildLut16(f);
+    const DWORD gammaVersion = gammaVersion_;
     LeaveCriticalSection(&gammaLock_);
+    if (f.bpp == 16 && (lut16_.empty() || lut16Fmt_ != f || lut16GammaVersion_ != gammaVersion)) BuildLut16(f, gamma, gammaVersion);
     uint32_t lut8[256];
     if (f.pal8) {
         for (int i = 0; i < 256; i++)

@@ -596,7 +596,7 @@ bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::ve
     d->SetViewport(&vp);
     d->SetPixelShader(g->ps);
     d->SetVertexShader(nullptr);
-    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0));
+    SetFvf9(d, D3DFVF_XYZRHW | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0));
     d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
     d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
     d->SetRenderState(D3DRS_WRAP0, 0);
@@ -629,9 +629,9 @@ bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::ve
         const DWORD filter = srcKeyed ? D3DTEXF_POINT : D3DTEXF_LINEAR;  // (a key blurred by filtering would fringe)
         d->SetSamplerState(0, D3DSAMP_MINFILTER, filter);
         d->SetSamplerState(0, D3DSAMP_MAGFILTER, filter);
-        d->SetTexture(0, c.tex);
-        d->SetTexture(1, destKeyed ? static_cast<IDirect3DBaseTexture9*>(g->frameTex) : c.tex);
-        d->SetTexture(2, destKeyed && useGdi && g->gdiTex ? static_cast<IDirect3DBaseTexture9*>(g->gdiTex) : c.tex);
+        SetTexture9(d, 0, c.tex);
+        SetTexture9(d, 1, destKeyed ? static_cast<IDirect3DBaseTexture9*>(g->frameTex) : c.tex);
+        SetTexture9(d, 2, destKeyed && useGdi && g->gdiTex ? static_cast<IDirect3DBaseTexture9*>(g->gdiTex) : c.tex);
         auto neg = [](uint32_t argb, float* out) {
             out[0] = -float((argb >> 16) & 255) / 255.0f;
             out[1] = -float((argb >> 8) & 255) / 255.0f;
@@ -677,7 +677,7 @@ bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::ve
     }
     gpu.CloseScene();
     d->SetPixelShader(nullptr);
-    for (DWORD st = 0; st < 3; st++) d->SetTexture(st, nullptr);
+    for (DWORD st = 0; st < 3; st++) SetTexture9(d, st, nullptr);
     return true;
 }
 

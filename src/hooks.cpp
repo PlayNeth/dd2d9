@@ -4,6 +4,7 @@
 #include <tlhelp32.h>
 #include <winternl.h>
 
+#include <cstddef>
 #include <cstring>
 #include <cwchar>
 #include <string>
@@ -137,7 +138,9 @@ void ModulesFromLoader(std::vector<std::pair<HMODULE, std::wstring>>* out) {
     if (!peb || !peb->Ldr) return;
     const LIST_ENTRY* head = &peb->Ldr->InMemoryOrderModuleList;
     for (const LIST_ENTRY* e = head->Flink; e && e != head; e = e->Flink) {
-        const auto* entry = CONTAINING_RECORD(e, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+        // (CONTAINING_RECORD, with offsetof: the macro takes the member of a null pointer.)
+        const auto* entry = reinterpret_cast<const LDR_DATA_TABLE_ENTRY*>(reinterpret_cast<const char*>(e) -
+                                                                          offsetof(LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks));
         if (!entry->DllBase || !entry->FullDllName.Buffer) continue;
         out->emplace_back(static_cast<HMODULE>(entry->DllBase),
                           std::wstring(entry->FullDllName.Buffer, entry->FullDllName.Length / sizeof(wchar_t)));

@@ -170,10 +170,6 @@ inline int BlockBytes(DWORD fourCC) { return fourCC == kDxt1 ? 8 : 16; }
 
 }  // namespace
 
-bool DxtFormat(DWORD fourCC) {
-    return fourCC == kDxt1 || fourCC == kDxt2 || fourCC == kDxt3 || fourCC == kDxt4 || fourCC == kDxt5;
-}
-
 // Rows y0..y1 (multiples of 4, or y1 the height), the blocks over columns x0..x1.
 static void DecodeDxt(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1, int x0, int x1) {
     const DWORD fc = b->fmt.fourCC;
@@ -419,6 +415,50 @@ uint32_t FourCCKeyToArgb(DWORD fourCC, DWORD key) {
     int r, g, b;
     From565(uint16_t(key), &r, &g, &b);
     return 0xFF000000u | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+}
+
+// The Y, U and V a YUV key names (as FourCCKeyToArgb reads it).
+static void KeyYuv(DWORD fourCC, DWORD key, int* y, int* u, int* v) {
+    if (fourCC == MAKEFOURCC('Y', 'U', 'Y', '2') || fourCC == MAKEFOURCC('U', 'Y', 'V', 'Y')) {
+        const YuvLayout l = Layout(fourCC);
+        const uint8_t p[4] = {uint8_t(key), uint8_t(key >> 8), uint8_t(key >> 16), uint8_t(key >> 24)};
+        *y = p[l.y0], *u = p[l.u], *v = p[l.v];
+    } else {
+        *y = int(key & 255), *u = int((key >> 8) & 255), *v = int((key >> 16) & 255);
+    }
+}
+
+void MarkYuvKey(const Buffer* b, uint8_t* argb, LONG pitch, DWORD lo, DWORD hi, int y0, int y1, int x0, int x1) {
+    int ly, lu, lv, hy, hu, hv;
+    KeyYuv(b->fmt.fourCC, lo, &ly, &lu, &lv);
+    KeyYuv(b->fmt.fourCC, hi, &hy, &hu, &hv);
+    hy = std::max(hy, ly), hu = std::max(hu, lu), hv = std::max(hv, lv);
+    y0 = std::max(y0, 0), y1 = std::min(y1, b->h), x0 = std::max(x0, 0), x1 = std::min(x1, b->w);
+    auto in = [&](int y, int u, int v) { return y >= ly && y <= hy && u >= lu && u <= hu && v >= lv && v <= hv; };
+    auto set = [](uint32_t* p, bool keyed) { *p = (*p & 0x00FFFFFFu) | (keyed ? 0u : 0xFF000000u); };
+    if (b->fmt.Planar()) {
+        const Planes p = PlanesOf(b);
+        for (int y = y0; y < y1; y++) {
+            const uint8_t* yr = p.y + size_t(y) * b->pitch;
+            const uint8_t* ur = p.u + size_t(y / 2) * p.cp;
+            const uint8_t* vr = p.v + size_t(y / 2) * p.cp;
+            uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
+            for (int x = x0; x < x1; x++) set(out + x, in(yr[x], ur[x / 2], vr[x / 2]));
+        }
+        return;
+    }
+    const YuvLayout l = Layout(b->fmt.fourCC);
+    const bool lastAlone = (b->w & 1) && b->pitch < LONG(b->w + 1) * 2;  // (as DecodeYuv: grey chroma)
+    for (int y = y0; y < y1; y++) {
+        const uint8_t* row = b->bits + size_t(y) * b->pitch;
+        uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
+        for (int x = x0; x < x1; x++) {
+            const uint8_t* p = row + size_t(x & ~1) * 2;
+            const int yy = (x & 1) ? p[l.y1] : p[l.y0];
+            const bool alone = (x | 1) >= b->w && lastAlone;
+            set(out + x, alone ? in(p[l.y0], 128, 128) : in(yy, p[l.u], p[l.v]));
+        }
+    }
 }
 
 void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1, int x0, int x1) {

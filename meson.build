@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.3.1',
+  version : '1.4.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -7,7 +7,10 @@ if host_machine.system() != 'windows' or host_machine.cpu_family() != 'x86'
   error('DD2D9 targets 32-bit Windows; use --cross-file build-win32.txt')
 endif
 
-add_project_arguments('-Wno-unused-parameter', '-Wno-missing-field-initializers', '-msse2', '-mfpmath=sse', language : 'cpp')
+# -ffp-contract=off: no fused multiply-adds, even where -march allows them (the vertex
+# pipeline's four-lane code gives exactly the scalar code's answers, operation by operation).
+add_project_arguments('-Wno-unused-parameter', '-Wno-missing-field-initializers', '-msse2', '-mfpmath=sse',
+                      '-ffp-contract=off', language : 'cpp')
 
 win_deps = []
 foreach lib : ['d3d9', 'dxguid', 'uuid', 'gdi32', 'user32', 'ole32', 'winmm']
@@ -49,6 +52,14 @@ executable('reloadtest', 'tests/reloadtest.cpp',
 
 # Direct3D 7 test: a triangle through dd2d9's Direct3D 7, 2D on top, flipped ("3d", "gamma" args).
 executable('d3d7test', 'tests/d3d7test.cpp',
+  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
+                  cpp.find_library('user32')],
+  link_args : static_link + ['-mwindows'],
+  install : false)
+
+# Direct3D 3-6 check and benchmark: ProcessVertices, DrawIndexedPrimitive and execute buffers,
+# hashed and timed (two builds compared by their hashes).
+executable('d3dimbench', 'tests/d3dimbench.cpp',
   dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
                   cpp.find_library('user32')],
   link_args : static_link + ['-mwindows'],

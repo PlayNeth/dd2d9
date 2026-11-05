@@ -42,6 +42,9 @@ bool GpuBlt(Surface* dst, const RECT& d, Surface* src, const RECT& s, const std:
 // The buffer's render target when its GPU copy is the newest (Direct3D drew there since
 // the CPU copy was last read back), for presenting it as it is; null otherwise. Gpu lock held.
 IDirect3DSurface9* GpuNewestSurface(Buffer* b);
+// A texture's texels carry alpha: an alpha channel, or an 8-bit texture's palette made with
+// DDPCAPS_ALPHA. g_lock held.
+bool TextureHasAlpha(const Surface* s);
 // Buffer::Release / the Surface destructor: their GPU copies go. g_lock held.
 void GpuBufferGone(Buffer* b);
 void GpuSurfaceGone(Surface* s);
@@ -98,8 +101,16 @@ public:
     // to the viewport already; n = 0: the whole viewport.
     void Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, float z, DWORD stencil);
     // A Direct3D 7 FVF (D3DFVF_RESERVED1 is skipped, not D3D9's PSIZE). indices: 16-bit.
+    // segs (more than one): the draws of several, their vertices one after the other and
+    // `indices` counting from the first of all; drawn as one draw where that decides nothing
+    // otherwise than drawn one by one (a 2D draw, rhw, the W scale, cut-outs' clamping), else
+    // one by one. indexed: drawn alone, with its indices (else its vertices in order).
+    struct DrawSeg {
+        UINT firstVertex, vertexCount, firstIndex, indexCount, primCount;
+        bool indexed;
+    };
     void Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride, UINT vertexCount, const WORD* indices,
-              UINT indexCount, UINT primCount, bool zEnabled);
+              UINT indexCount, UINT primCount, bool zEnabled, const DrawSeg* segs = nullptr, UINT segCount = 0);
     void EndScene();  // the game's EndScene: D3D9's scene closes (presentation may follow)
 
 private:

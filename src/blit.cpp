@@ -127,6 +127,9 @@ std::vector<uint8_t> g_temp;
 std::vector<uint8_t> g_keyRow;  // a stretched / mirrored keyed row's source pixels, gathered
 // Set on every pixel a blit writes (BltFourCC: alpha 255 from a source without alpha).
 uint32_t g_orMask;
+// The source and destination keys' masks when not 0 (BltFourCC: alpha alone, which marks the
+// pixels a YUV key matched).
+uint32_t g_skMaskOverride, g_dkMaskOverride;
 
 // Maps each clipped destination column to a source column.
 // Destination rectangles can be huge when a clipper is attached (only the
@@ -523,8 +526,31 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     const bool dstConv = realDst->fmt.fourcc, srcConv = realSrc && realSrc->fmt.fourcc;
     const RECT dr = dstRect ? *dstRect : RECT{0, 0, realDst->w, realDst->h};
     const RECT sr = src ? (srcRect ? *srcRect : RECT{0, 0, realSrc->w, realSrc->h}) : RECT{};
+    // Colour keys on YUV sides: compared in the surface's own Y, U and V (MarkYuvKey), the
+    // decoded pixels' alpha then 0 where the key matched, which the blit's key tests alone
+    // (g_skMaskOverride, g_dkMaskOverride). A surface that is both sides with both keys has
+    // one decoding for the two: its keys are converted end by end instead (as DXT keys).
+    Surface* const keyDst = destKeyFromSource ? src : this;
+    auto yuv = [](const Buffer* b) { return b->fmt.Yuv() || b->fmt.Planar(); };
+    const bool shared = dstConv && src && (src == this || src->buf == buf);
+    const bool srcKeyOn = src && (flags & (DDBLT_KEYSRC | DDBLT_KEYSRCOVERRIDE)) && (fx || !(flags & DDBLT_KEYSRCOVERRIDE));
+    const bool dstKeyOn = keyDst && (flags & (DDBLT_KEYDEST | DDBLT_KEYDESTOVERRIDE)) && (fx || !(flags & DDBLT_KEYDESTOVERRIDE));
+    bool markSrc = srcKeyOn && srcConv && yuv(realSrc), markDst = dstKeyOn && dstConv && yuv(realDst);
+    if (shared && markSrc && dstKeyOn) markSrc = markDst = false;
+    DWORD srcMark[2] = {}, dstMark[2] = {};  // (an override key is one value: BltLocked's rule)
+    if (markSrc) {
+        const DDCOLORKEY k = (flags & DDBLT_KEYSRCOVERRIDE) ? fx->ddckSrcColorkey : src->ck[kCkSrcBlt];
+        srcMark[0] = k.dwColorSpaceLowValue;
+        srcMark[1] = (flags & DDBLT_KEYSRCOVERRIDE) ? k.dwColorSpaceLowValue : k.dwColorSpaceHighValue;
+    }
+    if (markDst) {
+        const DDCOLORKEY k = (flags & DDBLT_KEYDESTOVERRIDE) ? fx->ddckDestColorkey : keyDst->ck[kCkDestBlt];
+        dstMark[0] = k.dwColorSpaceLowValue;
+        dstMark[1] = (flags & DDBLT_KEYDESTOVERRIDE) ? k.dwColorSpaceLowValue : k.dwColorSpaceHighValue;
+    }
     // (Only the columns too: a sprite from a big texture atlas decodes its own blocks.)
-    auto decode = [&](Surface* s, Buffer* t, std::vector<uint8_t>& mem, LONG top, LONG bottom, LONG left, LONG right) -> bool {
+    auto decode = [&](Surface* s, Buffer* t, std::vector<uint8_t>& mem, LONG top, LONG bottom, LONG left, LONG right,
+                      const DWORD* mark) -> bool {
         s->CpuAccess(false);
         const Buffer* b = s->buf;
         t->w = b->w;
@@ -546,7 +572,10 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         const int across = b->fmt.BlockCompressed() ? 4 : 2;  // (YUV: pairs, 2x2 blocks)
         const int x0 = int(std::max<LONG>(left, 0)) / across * across;
         const int x1 = int(std::min<LONG>((std::min<LONG>(right, b->w) + across - 1) / across * across, b->w));
-        if (y0 < y1 && x0 < x1) DecodeFourCC(b, t->bits, t->pitch, y0, y1, x0, x1);
+        if (y0 < y1 && x0 < x1) {
+            DecodeFourCC(b, t->bits, t->pitch, y0, y1, x0, x1);
+            if (mark) MarkYuvKey(b, t->bits, t->pitch, mark[0], mark[1], y0, y1, x0, x1);
+        }
         return true;
     };
     static std::vector<uint8_t> dstMem, srcMem;
@@ -558,12 +587,14 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         const bool both = src == this || (src && src->buf == buf);
         const LONG top = both ? std::min(dr.top, sr.top) : dr.top, bottom = both ? std::max(dr.bottom, sr.bottom) : dr.bottom;
         const LONG left = both ? std::min(dr.left, sr.left) : dr.left, right = both ? std::max(dr.right, sr.right) : dr.right;
-        if (!decode(this, &dstTemp, dstMem, top, bottom, left, right)) return DDERR_OUTOFMEMORY;
+        const DWORD* mark = markDst ? dstMark : both && markSrc ? srcMark : nullptr;
+        if (!decode(this, &dstTemp, dstMem, top, bottom, left, right, mark)) return DDERR_OUTOFMEMORY;
         td = &dstTemp;
         if (both) ts = td;
     }
     if (srcConv && !ts) {
-        if (!decode(src, &srcTemp, srcMem, sr.top, sr.bottom, sr.left, sr.right)) return DDERR_OUTOFMEMORY;
+        if (!decode(src, &srcTemp, srcMem, sr.top, sr.bottom, sr.left, sr.right, markSrc ? srcMark : nullptr))
+            return DDERR_OUTOFMEMORY;
         ts = &srcTemp;
     }
     // A source without alpha is opaque (Wine's test_surface_format_conversion_alpha, RGBX
@@ -575,16 +606,21 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     // back after.
     DDBLTFX fxConv{};
     if (fx) fxConv = *fx;
-    Surface* const keyDst = destKeyFromSource ? src : this;
     const DDCOLORKEY savedSrc = src ? src->ck[kCkSrcBlt] : DDCOLORKEY{}, savedDst = keyDst ? keyDst->ck[kCkDestBlt] : DDCOLORKEY{};
     auto conv = [](DWORD fc, DDCOLORKEY k) {
         return DDCOLORKEY{FourCCKeyToArgb(fc, k.dwColorSpaceLowValue), FourCCKeyToArgb(fc, k.dwColorSpaceHighValue)};
     };
-    if (srcConv) {
+    if (markSrc) {  // alpha 0: matched
+        src->ck[kCkSrcBlt] = fxConv.ddckSrcColorkey = DDCOLORKEY{0, 0};
+        g_skMaskOverride = 0xFF000000u;
+    } else if (srcConv) {
         src->ck[kCkSrcBlt] = conv(realSrc->fmt.fourCC, savedSrc);
         fxConv.ddckSrcColorkey = conv(realSrc->fmt.fourCC, fxConv.ddckSrcColorkey);
     }
-    if (keyDst && dstConv) {  // compared with the destination's pixels: in its format, wherever it is kept
+    if (keyDst && markDst) {
+        keyDst->ck[kCkDestBlt] = fxConv.ddckDestColorkey = DDCOLORKEY{0, 0};
+        g_dkMaskOverride = 0xFF000000u;
+    } else if (keyDst && dstConv) {  // compared with the destination's pixels: in its format, wherever it is kept
         keyDst->ck[kCkDestBlt] = conv(realDst->fmt.fourCC, savedDst);
         fxConv.ddckDestColorkey = conv(realDst->fmt.fourCC, fxConv.ddckDestColorkey);
     }
@@ -593,6 +629,7 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     g_orMask = opaque;
     const HRESULT hr = BltLocked(dstRect, src, srcRect, flags, fx ? &fxConv : nullptr, useClipper, destKeyFromSource);
     g_orMask = 0;
+    g_skMaskOverride = g_dkMaskOverride = 0;
     buf = realDst;
     if (src) src->buf = realSrc;
     if (src) src->ck[kCkSrcBlt] = savedSrc;
@@ -729,7 +766,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         // An override key is a single color: games often leave the high value uninitialized.
         const bool range = !(flags & DDBLT_KEYSRCOVERRIDE);
         j.srcKey = true;
-        j.skMask = sb->fmt.KeyMask();
+        j.skMask = g_skMaskOverride ? g_skMaskOverride : sb->fmt.KeyMask();
         j.skLo = sk->dwColorSpaceLowValue & j.skMask;
         j.skHi = range ? sk->dwColorSpaceHighValue & j.skMask : j.skLo;
         if (j.skHi < j.skLo) j.skHi = j.skLo;
@@ -744,7 +781,7 @@ HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     if (dk) {
         const bool range = !(flags & DDBLT_KEYDESTOVERRIDE);
         j.dstKey = true;
-        j.dkMask = buf->fmt.KeyMask();
+        j.dkMask = g_dkMaskOverride ? g_dkMaskOverride : buf->fmt.KeyMask();
         j.dkLo = dk->dwColorSpaceLowValue & j.dkMask;
         j.dkHi = range ? dk->dwColorSpaceHighValue & j.dkMask : j.dkLo;
         if (j.dkHi < j.dkLo) j.dkHi = j.dkLo;

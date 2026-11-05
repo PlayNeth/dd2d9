@@ -2293,7 +2293,7 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
                     const float k = dist * rsf(D3DRENDERSTATE_FOGDENSITY);
                     f = expf(-k * k);
                 }
-                specular = (specular & 0x00FFFFFF) | (DWORD(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f) << 24);
+                specular = (specular & 0x00FFFFFF) | (TruncToDword(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f) << 24);
                 fogged = true;
             }
         }

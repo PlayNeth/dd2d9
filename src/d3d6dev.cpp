@@ -328,7 +328,7 @@ void Device::PushStageOps9() {
     Surface* tex = StageSurface(0);
     if (alphaOp == D3DTOP_SELECTARG1 && s0[D3DTSS_ALPHAARG1] == D3DTA_TEXTURE && s0[D3DTSS_COLOROP] == D3DTOP_MODULATE &&
         s0[D3DTSS_COLORARG1] == D3DTA_TEXTURE && (s0[D3DTSS_COLORARG2] == D3DTA_DIFFUSE || s0[D3DTSS_COLORARG2] == D3DTA_CURRENT) &&
-        op1 == D3DTOP_DISABLE && tex && !tex->buf->fmt.a && !tex->buf->fmt.fourcc) {
+        op1 == D3DTOP_DISABLE && tex && !TextureHasAlpha(tex) && !tex->buf->fmt.fourcc) {
         // Texture alpha is 1 (or 0 where colour-keyed): MODULATE gives the vertex alpha.
         alphaOp = D3DTOP_MODULATE;
         SetTSS9(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
@@ -340,7 +340,7 @@ void Device::PushStageOps9() {
     if (keyOn && rs[27] != TRUE && rs[15] != TRUE) {
         alphaOp = D3DTOP_SELECTARG1;
         SetTSS9(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-    } else if (keyOn && !tex->buf->fmt.a && alphaOp == D3DTOP_SELECTARG2) {
+    } else if (keyOn && !TextureHasAlpha(tex) && alphaOp == D3DTOP_SELECTARG2) {
         // With blending, the vertex alpha kept but keyed texels still dropped: the texture's
         // alpha is 1 except there, so MODULATE gives the same alpha everywhere else.
         alphaOp = D3DTOP_MODULATE;

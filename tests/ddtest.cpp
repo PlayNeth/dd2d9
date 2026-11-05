@@ -4,7 +4,7 @@
 //   ddtest pattern  - a still test image in exclusive 640x480x8 (or "pattern <w> <h>") for comparing filters
 //   ddtest overlay  - overlay surfaces laid over an exclusive-mode primary (read back from the screen)
 //   ddtest win      - windowed (DDSCL_NORMAL) 32-bit desktop, blits to the primary through a clipper
-//   ddtest fuzz     - random same-format blits (keys, ranges, mirroring, stretching, overlap)
+//   ddtest fuzz     - random same-format blits (keys, ranges where taken, mirroring, stretching, overlap)
 //                     compared with a reference implementation, for 8/16/32-bit formats
 // Results are printed to ddtest.txt next to the executable.
 #define WIN32_LEAN_AND_MEAN
@@ -511,6 +511,48 @@ static int RunUnit() {
                       "YUY2 source colour key (0x%08lx 0x%08lx): %06lx %06lx %06lx", hr, hk, got[0] & 0xFFFFFF,
                       got[1] & 0xFFFFFF, got[2] & 0xFFFFFF);
             }
+            // A YUY2 key is compared in Y, U and V, not as the RGB it decodes to: video black
+            // (Y 16) keyed, a pixel below black (Y 10, the same RGB black once decoded) drawn.
+            {
+                static const BYTE kDark[8] = {16, 128, 10, 128, 81, 90, 81, 240};
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                yuy->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+                memcpy(l.lpSurface, kDark, 8);
+                yuy->Unlock(nullptr);
+                DDCOLORKEY k = {0x8010'8010u, 0x8010'8010u};  // Y0 16, U 128, Y1 16, V 128
+                hr = yuy->SetColorKey(DDCKEY_SRCBLT, &k);
+                DDBLTFX bfx = {};
+                bfx.dwSize = sizeof(bfx);
+                bfx.dwFillColor = 0x0000FF;
+                rgb->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &bfx);
+                const HRESULT hk = rgb->Blt(&four, yuy, &four, DDBLT_KEYSRC | DDBLT_WAIT, nullptr);
+                rgb->Lock(nullptr, &r, DDLOCK_WAIT, nullptr);
+                memcpy(got, r.lpSurface, 32);
+                rgb->Unlock(nullptr);
+                CHECK(SUCCEEDED(hr) && SUCCEEDED(hk) && (got[0] & 0xFFFFFF) == 0x0000FF && nearRgb(got[1], 0) &&
+                          nearRgb(got[2], 0xFF0000),
+                      "YUY2 source key compared in YUV (0x%08lx 0x%08lx): %06lx %06lx %06lx", hr, hk, got[0] & 0xFFFFFF,
+                      got[1] & 0xFFFFFF, got[2] & 0xFFFFFF);
+                // The same key as the YUY2 destination's: white blitted onto black only, not
+                // onto below black (re-encoded from RGB after the blit, which keeps it dark:
+                // Y 16, not 10).
+                hr = yuy->SetColorKey(DDCKEY_DESTBLT, &k);
+                IDirectDrawSurface7* white = Make32(dd, 4, 1);
+                bfx.dwFillColor = 0xFFFFFF;
+                white->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &bfx);
+                RECT two = {0, 0, 2, 1};
+                const HRESULT hd = yuy->Blt(&two, white, &two, DDBLT_KEYDEST | DDBLT_WAIT, nullptr);
+                DDSURFACEDESC2 l2 = {};
+                l2.dwSize = sizeof(l2);
+                yuy->Lock(nullptr, &l2, DDLOCK_WAIT, nullptr);
+                BYTE yb[4];
+                memcpy(yb, l2.lpSurface, 4);
+                yuy->Unlock(nullptr);
+                white->Release();
+                CHECK(SUCCEEDED(hr) && SUCCEEDED(hd) && yb[0] >= 233 && yb[2] <= 20,
+                      "YUY2 destination key compared in YUV (0x%08lx 0x%08lx): Y %u %u", hr, hd, yb[0], yb[2]);
+            }
             rgb->Release();
             yuy->Release();
         } else {
@@ -604,6 +646,59 @@ static int RunUnit() {
                     yv->Unlock(nullptr);
                     CHECK(SUCCEEDED(hr) && same, "YV12 to YV12 copied as it is (0x%08lx)", hr);
                     yv2->Release();
+                }
+                // A YV12 source key, compared in Y, U and V. Four 2x2 blocks: (Y 235, U 110, V 150),
+                // the same with U and V swapped, white (Y 235, grey) and above white (Y 245, grey:
+                // the same RGB white once decoded). Keyed with the first: only it skipped (the
+                // planes and the key's bytes read the right way round). Keyed with white: the
+                // white block alone (the RGB comparison skipped the one above white too).
+                {
+                    DDSURFACEDESC2 kd = d;
+                    kd.dwWidth = 8;
+                    IDirectDrawSurface7* yk = nullptr;
+                    hr = dd->CreateSurface(&kd, &yk, nullptr);
+                    IDirectDrawSurface7* wide = Make32(dd, 8, 2);
+                    DDSURFACEDESC2 l = {};
+                    l.dwSize = sizeof(l);
+                    if (SUCCEEDED(hr) && SUCCEEDED(yk->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) {
+                        BYTE* yb = static_cast<BYTE*>(l.lpSurface);
+                        static const BYTE kY[4] = {235, 235, 235, 245}, kU[4] = {110, 150, 128, 128}, kV[4] = {150, 110, 128, 128};
+                        for (int y = 0; y < 2; y++)
+                            for (int x = 0; x < 8; x++) yb[y * l.lPitch + x] = kY[x / 2];
+                        BYTE* vp = yb + 2 * l.lPitch;  // (YV12: V plane first)
+                        BYTE* up = vp + l.lPitch / 2;
+                        for (int c = 0; c < 4; c++) vp[c] = kV[c], up[c] = kU[c];
+                        yk->Unlock(nullptr);
+                    }
+                    const DWORD keys[2] = {0x0096'6EEBu, 0x0080'80EBu};  // Y 235, U 110, V 150; Y 235, U 128, V 128
+                    const int skipped[2] = {0, 2};
+                    for (int t = 0; t < 2 && yk; t++) {
+                        DDCOLORKEY k = {keys[t], keys[t]};
+                        const HRESULT hs = yk->SetColorKey(DDCKEY_SRCBLT, &k);
+                        DDBLTFX bfx = {};
+                        bfx.dwSize = sizeof(bfx);
+                        bfx.dwFillColor = 0x0000FF;
+                        wide->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &bfx);
+                        const HRESULT hk = wide->Blt(nullptr, yk, nullptr, DDBLT_KEYSRC | DDBLT_WAIT, nullptr);
+                        DWORD px[8] = {};
+                        DDSURFACEDESC2 w = {};
+                        w.dwSize = sizeof(w);
+                        if (SUCCEEDED(wide->Lock(nullptr, &w, DDLOCK_WAIT, nullptr))) {
+                            memcpy(px, static_cast<BYTE*>(w.lpSurface) + w.lPitch, sizeof(px));
+                            wide->Unlock(nullptr);
+                        }
+                        bool ok = SUCCEEDED(hs) && SUCCEEDED(hk);
+                        for (int blk = 0; blk < 4; blk++) {
+                            const bool blue = (px[2 * blk] & 0xFFFFFF) == 0x0000FF && (px[2 * blk + 1] & 0xFFFFFF) == 0x0000FF;
+                            ok = ok && blue == (blk == skipped[t]);
+                        }
+                        CHECK(ok, "YV12 source key %s compared in YUV (0x%08lx 0x%08lx): %06lx %06lx %06lx %06lx",
+                              t ? "white" : "(235, 110, 150)", hs, hk, px[0] & 0xFFFFFF, px[2] & 0xFFFFFF, px[4] & 0xFFFFFF,
+                              px[6] & 0xFFFFFF);
+                    }
+                    CHECK(yk != nullptr, "YV12 8x2 surface -> 0x%08lx", hr);
+                    if (yk) yk->Release();
+                    wide->Release();
                 }
                 rgb->Release();
                 yv->Release();
@@ -1793,9 +1888,17 @@ static int RunFuzz() {
             const bool same = Rand() % 8 == 0;  // within one surface (overlapping copies)
             FuzzSurface& src = surf[same ? 1 : 0];
             FuzzSurface& dst = surf[1];
+            // A range refused (DDERR_NOCOLORKEYHW: ddraw.dll's software blitter has none, nor
+            // has dd2d9): its low value alone, as a game falling back would set it.
             DDCOLORKEY sk = {skLo, skHi}, dk = {dkLo, dkHi};
-            src.s->SetColorKey(DDCKEY_SRCBLT | (skHi != skLo ? DDCKEY_COLORSPACE : 0), &sk);
-            dst.s->SetColorKey(DDCKEY_DESTBLT | (dkHi != dkLo ? DDCKEY_COLORSPACE : 0), &dk);
+            if (FAILED(src.s->SetColorKey(DDCKEY_SRCBLT | (skHi != skLo ? DDCKEY_COLORSPACE : 0), &sk))) {
+                sk.dwColorSpaceHighValue = skHi = skLo;
+                src.s->SetColorKey(DDCKEY_SRCBLT, &sk);
+            }
+            if (FAILED(dst.s->SetColorKey(DDCKEY_DESTBLT | (dkHi != dkLo ? DDCKEY_COLORSPACE : 0), &dk))) {
+                dk.dwColorSpaceHighValue = dkHi = dkLo;
+                dst.s->SetColorKey(DDCKEY_DESTBLT, &dk);
+            }
 
             const int sw = RandIn(1, std::min(src.w, 70)), sh = RandIn(1, std::min(src.h, 30));
             const bool stretch = Rand() % 4 == 0;

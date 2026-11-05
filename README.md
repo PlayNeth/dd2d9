@@ -24,7 +24,7 @@ dd2d9 is a reimplementation of Windows XP SP3's `ddraw.dll`: DirectDraw 1–7 an
 ## Requirements
 
 - A **32-bit game** that uses DirectDraw (DirectX 1–7), with or without Direct3D 3–7.
-- **Windows** with Direct3D 9, or **Linux** with Wine or Proton. Under Wine, dd2d9 presents through the prefix's Direct3D 9: Wine's own (wined3d), or DXVK if it's installed in the prefix.
+- **Windows Vista or later** with Direct3D 9, or **Linux** with Wine or Proton. (Not Windows XP: dd2d9 uses Vista's locks and timers.) Under Wine, dd2d9 presents through the prefix's Direct3D 9: Wine's own (wined3d), or DXVK if it's installed in the prefix.
 - **For games that also use 3dfx Glide** (Need for Speed III, High Stakes, NFS4 and others of the Voodoo era): [gl2d9](https://github.com/PlayNeth/gl2d9) for the Glide part. Its README's [Using gl2d9 with dd2d9](https://github.com/PlayNeth/gl2d9#using-gl2d9-with-dd2d9) has the recommended settings for running both.
 
 ## Installing
@@ -229,7 +229,7 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 - `ddtest win` runs a windowed primary with a clipper;
 - `ddtest mouse` checks the mouse translation (run it with `display=borderless`);
 - `ddtest audit borderless` and `ddtest audit window` (run with that `display` in `dd2d9.ini`) take fullscreen the ways games do and check where the picture lands on the real screen, and that every way of asking for the screen's size gives the game's mode;
-- `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys and key ranges, mirroring, stretching, overlapping copies) against a reference implementation.
+- `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys (key ranges where `SetColorKey` takes them: dd2d9, as `ddraw.dll`'s software blitter, takes single colours), mirroring, stretching, overlapping copies) against a reference implementation.
 
 `build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp. It writes `d3d7test.txt`.
 
@@ -240,6 +240,8 @@ All checks pass under Wine 11 (wined3d, Xvfb).
 `tests/sdk/` runs the DirectX 7 SDK's samples with dd2d9 and with Wine's own ddraw and compares screenshots of the two (`run.sh`, then `compare.py`; the samples' locations are set in `run.sh`).
 
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small updates to a windowed primary), `ddbench zlock [w h]` (Direct3D frames with small and whole locks of the Z buffer). With `log=1`, the presenter logs every 10 seconds how much of the frame it converted and how long the game waited for it.
+
+`build/d3dimbench.exe [seconds]` checks and times Direct3D 3-6's CPU vertex pipeline: ProcessVertices with lights, fog and clipping (and odd vertices: NaN, infinities, zero normals), a lit sphere drawn with DrawIndexedPrimitive, 2048 small DrawPrimitive calls of transformed vertices a frame (the cost of a draw), and execute buffers (a TRIANGLE instruction per row, per triangle, and cut by the near plane), and checks that consecutive TRIANGLE instructions draw the same pixels as drawn one by one. It writes `d3dimbench.txt` with a hash of each part's output, the time spent in the drawing calls, the transformed vertices (`d3dimbench-tl-*.bin`) and images (`d3dimbench-*.raw`, 256x256 32-bit): two builds meant to give the same output are compared by those.
 
 `build/reloadtest.exe [dll]` frees and reloads dd2d9 (by default `ddraw_.dll`) while the game window stays subclassed, as a wrapper loading dd2d9 under another name may do.
 
