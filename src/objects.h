@@ -588,6 +588,7 @@ public:
     HRESULT TestCooperativeLevel();
     HRESULT RestoreAllSurfaces();
     bool Suspended() const { return suspended_; }  // the game is in the background (focus lost)
+    bool Away() const { return suspended_ && !restoring_; }  // ...and not coming back now (OnActivate)
     // Another DirectDraw object has exclusive mode: this one's primary isn't shown.
     bool Superseded() const;
     bool OtherExclusive() const;  // another DirectDraw object has exclusive mode

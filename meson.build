@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.4.0',
+  version : '1.4.1',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -47,6 +47,12 @@ executable('ddbench', 'tests/ddbench.cpp',
 # Reload test: the DLL freed and loaded again while the window stays subclassed.
 executable('reloadtest', 'tests/reloadtest.cpp',
   dependencies : [cpp.find_library('user32')],
+  link_args : static_link + ['-mwindows'],
+  install : false)
+
+# Focus test: an exclusive-mode flip chain switched away from and back ("paintfg" arg).
+executable('focustest', 'tests/focustest.cpp',
+  dependencies : [cpp.find_library('user32'), cpp.find_library('ddraw')],
   link_args : static_link + ['-mwindows'],
   install : false)
 

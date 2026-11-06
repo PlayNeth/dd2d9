@@ -527,6 +527,18 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc);
 // showed its top left corner, enlarged.
 volatile LONG g_toldSize = -1;
 
+// A message of dd2d9's own posted again, the display lock being held by another thread (a
+// DirectDraw call on another of the game's threads, or the topmost timer): retried a
+// millisecond apart, not at once. Posted messages come back straight away: retried at once,
+// 500 tries took a millisecond, and the window's thread spinning on them kept the thread
+// holding the lock from running (cpus=1: one processor), so the focus change was dropped.
+// first: the message that found the lock busy was the original (sent, maybe by the thread
+// holding the lock, waiting for it): posted without waiting.
+void RetryLater(HWND h, UINT msg, WPARAM wp, LPARAM lp, bool first) {
+    if (!first) Sleep(1);
+    PostMessageW(h, msg, wp, lp);
+}
+
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
     switch (msg) {  // where the game's image is on the screen may have changed (GameImage)
@@ -541,9 +553,9 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->CheckCover(h, lp != 0);
             LeaveCriticalSection(&g_displayLock);
         } else if (wp < 500) {
-            // Another thread has the display (the presenter setting a device up or down):
-            // later, rather than never.
-            PostMessageW(h, checkCover, wp + 1, lp);
+            // Another thread has the display (a DirectDraw call on another of the game's
+            // threads, or the topmost timer): later, rather than never.
+            RetryLater(h, checkCover, wp + 1, lp, false);
         }
         return 0;
     }
@@ -564,20 +576,22 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // thread (SetWindowPos on our window): never block here, retry later. A retry
         // takes the activation as it is by then (the foreground window's process), not as
         // the message said: a deactivation retried behind a later activation would
-        // otherwise run last and minimize a game in front. At most ~500 tries.
-        static LONG retries;
+        // otherwise run last and minimize a game in front. For up to two seconds, a
+        // millisecond between tries (RetryLater).
+        static DWORD since;
         if (msg == deferred) {
             DWORD pid = 0;
             const HWND fg = GetForegroundWindow();
             wp = fg && (GetWindowThreadProcessId(fg, &pid), pid == GetCurrentProcessId());
         } else {
-            InterlockedExchange(&retries, 0);
+            since = GetTickCount();
         }
         if (TryEnterCriticalSection(&g_displayLock)) {
             if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->OnActivate(wp != 0, DWORD(lp));
             LeaveCriticalSection(&g_displayLock);
-        } else if (deferred && InterlockedIncrement(&retries) < 500) {
-            PostMessageW(h, deferred, wp, lp);
+        } else if (deferred) {
+            if (GetTickCount() - since < 2000) RetryLater(h, deferred, wp, lp, msg != deferred);
+            else DD2D9_LOG("focus change dropped: the display busy for two seconds");
         }
         if (msg == deferred) return 0;
     } else if (msg == WM_DISPLAYCHANGE || (DeferredDisplayChangeMsg() && msg == DeferredDisplayChangeMsg())) {
@@ -590,7 +604,7 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // The owner only under the display lock: TearDown unhooks under it, then frees it.
         // (Held by another thread now: usually dd2d9 changing the mode, but also the topmost
         // timer or SetCooperativeLevel on another thread, while someone else changes it: the
-        // check is posted again, at most ~500 times, rather than dropped.)
+        // check is posted again, at most ~500 times a millisecond apart, rather than dropped.)
         const UINT again = DeferredDisplayChangeMsg();
         if (TryEnterCriticalSection(&g_displayLock)) {
             DDraw* owner = g_hook.owner;
@@ -601,7 +615,7 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             LeaveCriticalSection(&g_displayLock);
         } else if (again && (msg != again || wp < 500)) {
-            PostMessageW(h, again, msg == again ? wp + 1 : 0, 0);
+            RetryLater(h, again, msg == again ? wp + 1 : 0, 0, msg != again);
         }
         if (msg == again) return 0;  // (dd2d9's own: not the game's)
     } else if (msg == WM_WINDOWPOSCHANGING && lp && h == g_hook.hwnd && g_hook.owner && !g_hook.owner->QuietMove()) {
@@ -622,6 +636,27 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // dd2d9 covering the screen again behind the game's back (see CheckCover): the
         // window's own handling only, so that the game doesn't size it back.
         return g_hook.unicode ? DefWindowProcW(h, msg, wp, lp) : DefWindowProcA(h, msg, wp, lp);
+    } else if (msg == WM_PAINT && h == g_hook.hwnd && g_hook.owner) {
+        // Covering the screen with the focus lost (OnActivate): painted here, not by the game.
+        // A game may take the foreground back as it paints (Need for Speed III's menus:
+        // SetForegroundWindow in its WM_PAINT while fullscreen), and switching away paints
+        // the window (Alt+Tab's switcher over it): the desktop flashed and the game came
+        // back. Also where the window stays visible in the background (DDSCL_NOWINDOWCHANGES,
+        // a hidden owner): ddraw.dll would let the game paint it, but what a fullscreen game
+        // paints is its screen, shown again when it is back (invalidated then: see
+        // OnActivate). Not while coming back (restoring_): its own paints then are the game's.
+        // (The display busy: the game's, as before.)
+        bool away = false;
+        if (TryEnterCriticalSection(&g_displayLock)) {
+            away = h == g_hook.hwnd && g_hook.owner && g_hook.owner->Away();
+            LeaveCriticalSection(&g_displayLock);
+        }
+        if (away) {
+            PAINTSTRUCT ps;
+            if (BeginPaint(h, &ps)) EndPaint(h, &ps);
+            else ValidateRect(h, nullptr);  // (or WM_PAINT comes again and again)
+            return 0;
+        }
     } else if (msg == WM_GETMINMAXINFO) {
         // A window covering its monitor has its frame outside the screen (see CoverMonitor):
         // the default maximum tracking size would shrink it.
@@ -912,6 +947,8 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // a device (it would make a windowed one, then replace it right away).
         suspended_ = false;
         restoring_ = false;
+        // Painted by the game again: what dd2d9 answered for it while away (see HookProc).
+        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
         UpdateDeviceWindow();
         GameImageChanged();
         MarkDirty();
@@ -1267,6 +1304,7 @@ void DDraw::RestoreDisplay() {
         switched_ = false;
         UpdateRefreshRate();
     }
+    if (suspended_ && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);  // (see HookProc's WM_PAINT)
     suspended_ = false;
     GameImageChanged();
 }
@@ -1624,6 +1662,7 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
             RestoreDisplay();
             RestoreSavedWindow(restack);
         } else {
+            if (suspended_ && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);  // (see HookProc's WM_PAINT)
             suspended_ = false;
             GameImageChanged();
             // The cursor is let go and the foreground unlocked as in ddraw.dll's leaving (even
@@ -1723,7 +1762,10 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
         modeH_ = h;
         modeBpp_ = bpp;
         modeRefresh_ = rr;
-        if (!away) suspended_ = false;
+        if (!away) {
+            if (suspended_ && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);  // (see HookProc's WM_PAINT)
+            suspended_ = false;
+        }
         GameImageChanged();
     }
     if (away) {
@@ -1868,6 +1910,7 @@ void DDraw::TakeOverExclusive(DDraw* prev, HWND hwnd) {
         prev->coverHwnd_ = nullptr;
         prev->coverSize_ = {};
     }
+    if (prev->suspended_ && prev->hwnd_) InvalidateRect(prev->hwnd_, nullptr, FALSE);  // (see HookProc's WM_PAINT)
     prev->suspended_ = false;
     GameImageChanged();
     Guard l;

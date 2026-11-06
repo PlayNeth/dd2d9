@@ -3,6 +3,21 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.4.1
+Alt+Tab out of a fullscreen game stays out (Need for Speed III's menus).
+
+- **A game that takes the foreground as it paints stays in the background.** Need for
+  Speed III calls `SetForegroundWindow` in its `WM_PAINT` while fullscreen, and switching away
+  paints the window (Alt+Tab's switcher over it): the desktop flashed and the game came back.
+  While a covering game has lost the focus, dd2d9 now answers `WM_PAINT` itself (the window
+  is invalidated when the game is back, so the game paints it again).
+- **A focus change is no longer dropped while the display is busy.** With the display lock
+  held by another thread (a DirectDraw call on another of the game's threads, or the topmost
+  timer), the focus change (and the cover and display-change checks) was posted to the window
+  again at once, up to 500 times, which took about a millisecond; the window's thread
+  spinning on them kept that thread from running (`cpus=1`). A millisecond now passes between
+  tries, the focus change tried for up to two seconds (and logged if dropped).
+
 ## 1.4.0
 Direct3D 3-6 games get faster vertex processing and lighting and far fewer draws from
 execute buffers, every draw costs a little less, Bejeweled 2's menu is fixed, and colour keys

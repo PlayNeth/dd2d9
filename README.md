@@ -231,6 +231,8 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 - `ddtest audit borderless` and `ddtest audit window` (run with that `display` in `dd2d9.ini`) take fullscreen the ways games do and check where the picture lands on the real screen, and that every way of asking for the screen's size gives the game's mode;
 - `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys (key ranges where `SetColorKey` takes them: dd2d9, as `ddraw.dll`'s software blitter, takes single colours), mirroring, stretching, overlapping copies) against a reference implementation.
 
+`build/focustest.exe [paintfg]` runs a 640×480×16 exclusive-mode flip chain for a minute, to be switched away from and back to (Alt+Tab); each second it writes the frames flipped and whether the window is minimized to `focustest.txt`. `paintfg` takes the foreground back in the window's `WM_PAINT`, as Need for Speed III does: switched away, it must stay away.
+
 `build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp. It writes `d3d7test.txt`.
 
 All checks pass under Wine 11 (wined3d, Xvfb).
