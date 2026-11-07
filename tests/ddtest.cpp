@@ -1736,6 +1736,47 @@ static int RunCoopModes() {
         DestroyWindow(owner);
     }
     {
+        // A 16-bit bitmap the game makes (CreateBitmapIndirect) in a 16-bit mode, selected into
+        // a memory DC (CreateCompatibleDC(NULL)) and blitted into a 16-bit surface's DC: its
+        // pixels arrive unchanged, as on XP's 16-bit screen. Sakura Taisen draws each letter
+        // so; on Windows' 32-bit screen the bitmap couldn't be selected and nothing arrived.
+        HWND w = MakeWindow(WS_POPUP | WS_VISIBLE, 640, 480);
+        IDirectDraw7* dd = nullptr;
+        DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+        if (!dd) return 1;
+        dd->SetCooperativeLevel(w, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        dd->SetDisplayMode(640, 480, 16, 0, 0);
+        IDirectDrawSurface7* s = MakeSurface(dd, 8, 2, 16, 0xF800, 0x7E0, 0x1F);
+        WORD px[16];
+        for (int i = 0; i < 16; i++) px[i] = WORD(0x07FF + i * 0x0841);  // the key colour, then others
+        BITMAP bm = {0, 8, 2, 16, 1, 16, px};
+        HBITMAP b = CreateBitmapIndirect(&bm);
+        HDC mem = CreateCompatibleDC(nullptr);
+        const HGDIOBJ old = mem && b ? SelectObject(mem, b) : nullptr;
+        HDC dc = nullptr;
+        if (s && old && SUCCEEDED(s->GetDC(&dc))) {
+            BitBlt(dc, 0, 0, 8, 2, mem, 0, 0, SRCCOPY);
+            s->ReleaseDC(dc);
+        }
+        int same = 0;
+        DDSURFACEDESC2 sd = {};
+        sd.dwSize = sizeof(sd);
+        if (s && SUCCEEDED(s->Lock(nullptr, &sd, DDLOCK_WAIT, nullptr))) {
+            for (int y = 0; y < 2; y++)
+                for (int x = 0; x < 8; x++)
+                    same += reinterpret_cast<const WORD*>(static_cast<const BYTE*>(sd.lpSurface) + y * sd.lPitch)[x] == px[y * 8 + x];
+            s->Unlock(nullptr);
+        }
+        CHECK(b && old && same == 16, "16-bit mode: a 16-bit CreateBitmapIndirect bitmap goes into a memory DC (%d) and "
+              "blits into a 16-bit surface unchanged (%d of 16)", old != nullptr, same);
+        if (old) SelectObject(mem, old);
+        if (mem) DeleteDC(mem);
+        if (b) DeleteObject(b);
+        if (s) s->Release();
+        dd->Release();
+        DestroyWindow(w);
+    }
+    {
         // A tool window (no taskbar button, no place in Alt+Tab): minimized with a taskbar
         // button given to it, and its own style back with the focus. (Pal95's window, which
         // the taskbar had no button for, Windows minimized onto the desktop: Wine doesn't

@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.4.2
+Sakura Taisen's text (letters drawn into 16-bit bitmaps of the game's own).
+
+- **A 16-bit bitmap the game makes goes into a memory DC in a 16-bit mode.** Sakura Taisen
+  builds each letter of its text as a 16-bit picture of its own, makes it a bitmap
+  (`CreateBitmapIndirect`), selects it into a memory DC (`CreateCompatibleDC(NULL)`) and blits
+  it into a surface's DC. On XP the screen really was 16-bit, so the bitmap was the screen's
+  own format; with dd2d9 the screen stays 32-bit, Windows refuses to select a 16-bit
+  device-dependent bitmap into a DC made for it (`SelectObject` fails), and the blit copied
+  nothing: every letter came out empty. While the game is in a 16-bit mode, `CreateBitmap`
+  and `CreateBitmapIndirect` now make a 16-bit bitmap as a DIB section in the mode's 5:6:5
+  format with the game's pixels, which goes into any memory DC and copies to a 16-bit surface
+  pixel for pixel. New ddtest check (the game's steps, in a 16-bit mode): the bitmap couldn't
+  be selected and none of its 16 pixels arrived before, all of them now (Wine refuses the
+  bitmap as Windows does). Confirmed in the game.
+
 ## 1.4.1
 Alt+Tab out of a fullscreen game stays out (Need for Speed III's menus).
 

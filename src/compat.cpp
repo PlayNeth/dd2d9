@@ -543,9 +543,67 @@ BOOL WINAPI HookLockWindowUpdate(HWND hwnd) {
     return g_lockWindowUpdate(hwnd);
 }
 
+// A 16-bit bitmap made with CreateBitmap or CreateBitmapIndirect while the game is in a 16-bit
+// mode of its own: made as a DIB section in the mode's format (5:6:5, as dd2d9's 16-bit
+// surfaces) with the game's pixels. On XP the screen really was 16-bit, so such a bitmap was
+// the screen's own format and went into any memory DC; here the screen stays 32-bit, and
+// Windows refuses to select a 16-bit device-dependent bitmap into a DC made for it
+// (SelectObject fails), so what the game then blits from that DC never arrives. Sakura Taisen
+// builds each letter of its text that way (CreateBitmapIndirect, CreateCompatibleDC(NULL),
+// BitBlt into the surface's DC) and its text came out empty. A DIB section goes into any
+// memory DC and copies to a 16-bit surface pixel for pixel.
+using CreateBitmapFn = HBITMAP(WINAPI*)(int, int, UINT, UINT, const void*);
+using CreateBitmapIndirectFn = HBITMAP(WINAPI*)(const BITMAP*);
+CreateBitmapFn g_createBitmap;
+CreateBitmapIndirectFn g_createBitmapIndirect;
+
+// The DIB section for a w x h 16-bit bitmap whose rows are `stride` bytes apart (null bits: left
+// zeroed); nullptr if this isn't such a bitmap (the real call then).
+HBITMAP ModeBitmap16(int w, int h, UINT planes, UINT bpp, const void* bits, LONG stride) {
+    if (bpp != 16 || planes != 1 || w <= 0 || h <= 0 || w > 32767 || h > 32767 || ShownDisplayBpp() != 16) return nullptr;
+    struct {
+        BITMAPINFOHEADER h;
+        DWORD masks[3];
+    } bi = {};
+    bi.h.biSize = sizeof(bi.h);
+    bi.h.biWidth = w;
+    bi.h.biHeight = -h;  // top-down, as a bitmap's bits are
+    bi.h.biPlanes = 1;
+    bi.h.biBitCount = 16;
+    bi.h.biCompression = BI_BITFIELDS;
+    bi.masks[0] = 0xF800;
+    bi.masks[1] = 0x07E0;
+    bi.masks[2] = 0x001F;
+    void* dst = nullptr;
+    HBITMAP b = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &dst, nullptr, 0);
+    if (!b || !dst) return nullptr;
+    if (bits) {
+        const size_t row = size_t(w) * 2, dstStride = (row + 3) & ~size_t(3);
+        for (int y = 0; y < h; y++)
+            memcpy(static_cast<BYTE*>(dst) + size_t(y) * dstStride, static_cast<const BYTE*>(bits) + size_t(y) * size_t(stride), row);
+    }
+    return b;
+}
+
+HBITMAP WINAPI HookCreateBitmap(int w, int h, UINT planes, UINT bpp, const void* bits) {
+    // (CreateBitmap's rows are a whole number of 16-bit words: 16-bit pixels, packed.)
+    if (HBITMAP b = ModeBitmap16(w, h, planes, bpp, bits, LONG(w) * 2)) return b;
+    return g_createBitmap(w, h, planes, bpp, bits);
+}
+
+HBITMAP WINAPI HookCreateBitmapIndirect(const BITMAP* bm) {
+    if (bm && int64_t(bm->bmWidthBytes) >= int64_t(bm->bmWidth) * 2)  // (rows that hold the pixels)
+        if (HBITMAP b = ModeBitmap16(bm->bmWidth, bm->bmHeight, bm->bmPlanes, bm->bmBitsPixel, bm->bmBits, bm->bmWidthBytes))
+            return b;
+    return g_createBitmapIndirect(bm);
+}
+
 ImportHook kWindowHooks[] = {
     {"user32", "LockWindowUpdate", reinterpret_cast<void*>(HookLockWindowUpdate), reinterpret_cast<void**>(&g_lockWindowUpdate)},
     {"gdi32", "GetDeviceCaps", reinterpret_cast<void*>(HookGetDeviceCaps), reinterpret_cast<void**>(&g_getDeviceCaps)},
+    {"gdi32", "CreateBitmap", reinterpret_cast<void*>(HookCreateBitmap), reinterpret_cast<void**>(&g_createBitmap)},
+    {"gdi32", "CreateBitmapIndirect", reinterpret_cast<void*>(HookCreateBitmapIndirect),
+     reinterpret_cast<void**>(&g_createBitmapIndirect)},
 };
 
 // Memory from the process heap comes zeroed, as fresh heap memory did on Windows 9x, where
