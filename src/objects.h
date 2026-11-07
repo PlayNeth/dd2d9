@@ -422,6 +422,7 @@ private:
     volatile bool dropRequest_ = false;
     volatile bool running_ = false;
     volatile bool active_ = false;
+    int64_t lastPresent_ = 0;  // QueryPerformanceCounter at the last present (the presenter's thread)
 
     bool usingGpu_ = false;            // presenting through the shared device (an owner of it)
     IDirect3DSurface9* staging_ = nullptr;
@@ -699,6 +700,7 @@ private:
     DWORD refresh_ = 60;
     LARGE_INTEGER qpcFreq_, qpcBase_;
     int64_t lastFlip_ = 0;
+    int64_t paceNext_ = 0;  // under the compositor: when the next frame is due (PaceFlip)
     Presenter* presenter_ = nullptr;
     Gpu* gpu_ = nullptr;  // the Direct3D 9 device (gpu.h)
     volatile LONG deviceState_ = kDevOk;

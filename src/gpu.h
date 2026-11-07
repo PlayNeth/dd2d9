@@ -67,6 +67,14 @@ public:
     bool PrepareTarget(HWND hwnd, UINT w, UINT h);
     IDirect3DSurface9* TargetBackBuffer();  // referenced; nullptr if it can't be had
     HRESULT PresentTarget();
+    // Vsync under the desktop compositor (see gpu.cpp): Present doesn't wait, dd2d9 paces
+    // the frames itself. Asks the compositor each time (logs a change). Any thread; static:
+    // no device needed.
+    static bool CompositorPaced();
+    // Its clock: QueryPerformanceCounter's value at the last vblank, and the refresh period
+    // in its units. False with vsync=off, under Wine, while composition is off, or when the
+    // compositor won't tell.
+    static bool CompositorClock(int64_t* vblank, int64_t* period);
     void DropSwapChain();  // Lock held: another device (a wrapper's) presents into the window
 
     // Counts device creations and resets: the device's states and D3DPOOL_DEFAULT resources

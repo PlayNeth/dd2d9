@@ -63,19 +63,22 @@ void RectToGame(RECT* rc, const RECT& r, SIZE m) {
 }
 
 BOOL WINAPI HookGetCursorPos(POINT* p) {
-    const BOOL ok = g_getCursorPos(p);
+    DD2D9_PASS_WINDOWS(g_getCursorPos, p);
+    const BOOL ok = DD2D9_NEXT(g_getCursorPos)(p);
     if (ok && p) MouseToGame(p);
     return ok;
 }
 
 BOOL WINAPI HookSetCursorPos(int x, int y) {
+    DD2D9_PASS_WINDOWS(g_setCursorPos, x, y);
     POINT p = {x, y};
     MouseFromGame(&p);
-    return g_setCursorPos(p.x, p.y);
+    return DD2D9_NEXT(g_setCursorPos)(p.x, p.y);
 }
 
 DWORD WINAPI HookGetMessagePos() {
-    const DWORD v = g_getMessagePos();
+    DD2D9_PASS_WINDOWS(g_getMessagePos);
+    const DWORD v = DD2D9_NEXT(g_getMessagePos)();
     POINT p = {static_cast<short>(LOWORD(v)), static_cast<short>(HIWORD(v))};
     if (!MouseToGame(&p)) return v;
     return MAKELONG(static_cast<short>(p.x), static_cast<short>(p.y));
@@ -83,16 +86,18 @@ DWORD WINAPI HookGetMessagePos() {
 
 // A game confining the cursor to its screen confines it to the image.
 BOOL WINAPI HookClipCursor(const RECT* rc) {
+    DD2D9_PASS_WINDOWS(g_clipCursor, rc);
     RECT r;
     SIZE m;
-    if (!rc || !GameImage(&r, &m)) return g_clipCursor(rc);
+    if (!rc || !GameImage(&r, &m)) return DD2D9_NEXT(g_clipCursor)(rc);
     RECT real = *rc;
     RectFromGame(&real, r, m);
-    return g_clipCursor(&real);
+    return DD2D9_NEXT(g_clipCursor)(&real);
 }
 
 BOOL WINAPI HookGetClipCursor(RECT* rc) {
-    const BOOL ok = g_getClipCursor(rc);
+    DD2D9_PASS_WINDOWS(g_getClipCursor, rc);
+    const BOOL ok = DD2D9_NEXT(g_getClipCursor)(rc);
     RECT r;
     SIZE m;
     if (ok && rc && GameImage(&r, &m)) RectToGame(rc, r, m);
@@ -101,32 +106,36 @@ BOOL WINAPI HookGetClipCursor(RECT* rc) {
 
 // The screen is the game's display mode, as with a real mode switch.
 int WINAPI HookGetSystemMetrics(int index) {
+    DD2D9_PASS_WINDOWS(g_getSystemMetrics, index);
     if (index == SM_CXSCREEN || index == SM_CYSCREEN) {
         RECT r;
         SIZE m;
         if (GameImage(&r, &m)) return index == SM_CXSCREEN ? m.cx : m.cy;
     }
-    return g_getSystemMetrics(index);
+    return DD2D9_NEXT(g_getSystemMetrics)(index);
 }
 
 BOOL WINAPI HookScreenToClient(HWND h, POINT* p) {
+    DD2D9_PASS_WINDOWS(g_screenToClient, h, p);
     if (p && IsGameWindow(h)) return TRUE;
-    return g_screenToClient(h, p);
+    return DD2D9_NEXT(g_screenToClient)(h, p);
 }
 
 BOOL WINAPI HookClientToScreen(HWND h, POINT* p) {
+    DD2D9_PASS_WINDOWS(g_clientToScreen, h, p);
     if (p && IsGameWindow(h)) return TRUE;
-    return g_clientToScreen(h, p);
+    return DD2D9_NEXT(g_clientToScreen)(h, p);
 }
 
 int WINAPI HookMapWindowPoints(HWND from, HWND to, POINT* p, UINT n) {
+    DD2D9_PASS_WINDOWS(g_mapWindowPoints, from, to, p, n);
     // Between the game's window and the screen (NULL or the desktop): nothing moves.
     const HWND desktop = GetDesktopWindow();
     if ((IsGameWindow(from) && (!to || to == desktop)) || (IsGameWindow(to) && (!from || from == desktop))) {
         SetLastError(0);  // 0 with no error: nothing moved (0 with an error is a failure)
         return 0;
     }
-    return g_mapWindowPoints(from, to, p, n);
+    return DD2D9_NEXT(g_mapWindowPoints)(from, to, p, n);
 }
 
 // The desktop window is the screen, the game's mode's size, as after a real switch (a game
@@ -137,21 +146,23 @@ bool IsDesktopShownAsMode(HWND h, SIZE* mode) {
 }
 
 BOOL WINAPI HookGetClientRect(HWND h, RECT* rc) {
+    DD2D9_PASS_WINDOWS(g_getClientRect, h, rc);
     SIZE m;
     if (rc && (IsGameWindow(h, &m) || IsDesktopShownAsMode(h, &m))) {
         *rc = RECT{0, 0, m.cx, m.cy};
         return TRUE;
     }
-    return g_getClientRect(h, rc);
+    return DD2D9_NEXT(g_getClientRect)(h, rc);
 }
 
 BOOL WINAPI HookGetWindowRect(HWND h, RECT* rc) {
+    DD2D9_PASS_WINDOWS(g_getWindowRect, h, rc);
     SIZE m;
     if (rc && (IsGameWindow(h, &m) || IsDesktopShownAsMode(h, &m))) {
         *rc = RECT{0, 0, m.cx, m.cy};
         return TRUE;
     }
-    return g_getWindowRect(h, rc);
+    return DD2D9_NEXT(g_getWindowRect)(h, rc);
 }
 
 // The monitor the game's screen is on: the mode's size at 0,0, work area and all (a switched
@@ -170,12 +181,14 @@ void MonitorAsMode(HMONITOR mon, MONITORINFO* mi, BOOL ok) {
     mi->rcMonitor = mi->rcWork = RECT{0, 0, m.cx, m.cy};
 }
 BOOL WINAPI HookGetMonitorInfoA(HMONITOR mon, MONITORINFO* mi) {
-    const BOOL ok = g_getMonitorInfoA(mon, mi);
+    DD2D9_PASS_WINDOWS(g_getMonitorInfoA, mon, mi);
+    const BOOL ok = DD2D9_NEXT(g_getMonitorInfoA)(mon, mi);
     MonitorAsMode(mon, mi, ok);
     return ok;
 }
 BOOL WINAPI HookGetMonitorInfoW(HMONITOR mon, MONITORINFO* mi) {
-    const BOOL ok = g_getMonitorInfoW(mon, mi);
+    DD2D9_PASS_WINDOWS(g_getMonitorInfoW, mon, mi);
+    const BOOL ok = DD2D9_NEXT(g_getMonitorInfoW)(mon, mi);
     MonitorAsMode(mon, mi, ok);
     return ok;
 }
@@ -209,19 +222,22 @@ bool ClientRectToGame(HWND h, RECT* rc) {
 }
 
 HDC WINAPI HookBeginPaint(HWND h, PAINTSTRUCT* ps) {
-    const HDC dc = g_beginPaint(h, ps);
+    DD2D9_PASS_WINDOWS(g_beginPaint, h, ps);
+    const HDC dc = DD2D9_NEXT(g_beginPaint)(h, ps);
     if (dc && ps) ClientRectToGame(h, &ps->rcPaint);
     return dc;
 }
 
 BOOL WINAPI HookGetUpdateRect(HWND h, RECT* rc, BOOL erase) {
-    const BOOL any = g_getUpdateRect(h, rc, erase);
+    DD2D9_PASS_WINDOWS(g_getUpdateRect, h, rc, erase);
+    const BOOL any = DD2D9_NEXT(g_getUpdateRect)(h, rc, erase);
     if (any && rc) ClientRectToGame(h, rc);
     return any;
 }
 
 int WINAPI HookGetUpdateRgn(HWND h, HRGN rgn, BOOL erase) {
-    const int type = g_getUpdateRgn(h, rgn, erase);
+    DD2D9_PASS_WINDOWS(g_getUpdateRgn, h, rgn, erase);
+    const int type = DD2D9_NEXT(g_getUpdateRgn)(h, rgn, erase);
     if (type != SIMPLEREGION && type != COMPLEXREGION) return type;
     RECT image;
     SIZE m;
@@ -249,16 +265,17 @@ int WINAPI HookGetUpdateRgn(HWND h, HRGN rgn, BOOL erase) {
 }
 
 BOOL WINAPI HookInvalidateRect(HWND h, const RECT* rc, BOOL erase) {
+    DD2D9_PASS_WINDOWS(g_invalidateRect, h, rc, erase);
     RECT image;
     SIZE m;
     HWND w;
-    if (!rc || !h || !GameImage(&image, &m, &w) || h != w) return g_invalidateRect(h, rc, erase);
+    if (!rc || !h || !GameImage(&image, &m, &w) || h != w) return DD2D9_NEXT(g_invalidateRect)(h, rc, erase);
     RECT r = *rc;
     RectFromGame(&r, image, m);  // (screen coordinates: into the client's)
     POINT o = {0, 0};
     ClientToScreen(h, &o);
     OffsetRect(&r, -o.x, -o.y);
-    return g_invalidateRect(h, &r, erase);
+    return DD2D9_NEXT(g_invalidateRect)(h, &r, erase);
 }
 
 // A popup window the game makes over its screen, in its mode's coordinates: Road Rash plays
@@ -322,16 +339,18 @@ void RememberPopup(HWND h) {
 
 HWND WINAPI HookCreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD style, int x, int y, int w, int h, HWND parent,
                                 HMENU menu, HINSTANCE inst, LPVOID param) {
+    DD2D9_PASS_WINDOWS(g_createWindowExA, ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
     const bool popup = PopupRect(style, parent, &x, &y, &w, &h);
-    const HWND r = g_createWindowExA(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
+    const HWND r = DD2D9_NEXT(g_createWindowExA)(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
     if (popup) RememberPopup(r);
     return r;
 }
 
 HWND WINAPI HookCreateWindowExW(DWORD ex, LPCWSTR cls, LPCWSTR name, DWORD style, int x, int y, int w, int h, HWND parent,
                                 HMENU menu, HINSTANCE inst, LPVOID param) {
+    DD2D9_PASS_WINDOWS(g_createWindowExW, ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
     const bool popup = PopupRect(style, parent, &x, &y, &w, &h);
-    const HWND r = g_createWindowExW(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
+    const HWND r = DD2D9_NEXT(g_createWindowExW)(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
     if (popup) RememberPopup(r);
     return r;
 }

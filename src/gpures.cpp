@@ -878,7 +878,48 @@ struct GpuTex final : Gpu::Owner {
         rtLevelSerial.clear();
     }
 
+    // The other managed copy of a texture drawn with the colour key on and off by turns: the
+    // key made alpha in one and not in the other, both kept and switched (SwapAlt) instead of
+    // made again at every change. N.I.C.E. 2 draws two of its race textures so, several
+    // times a frame: a new texture and a whole upload each time cost it 4-8 ms a frame.
+    struct Alt {
+        IDirect3DTexture9* tex = nullptr;
+        UINT levels = 0;
+        D3DFORMAT fmt = D3DFMT_UNKNOWN;
+        bool convert = false, keyed = false, autogen = false;
+        const Palette* pal = nullptr;
+        DWORD palVersion = 0, key = 0;
+        int w = 0, h = 0;
+        Format made = {};
+        std::vector<Buffer*> levelBufs;
+        std::vector<unsigned> levelSerials;
+    } alt;
+    void SwapAlt() {
+        std::swap(tex, alt.tex);
+        std::swap(levels, alt.levels);
+        std::swap(fmt, alt.fmt);
+        std::swap(convert, alt.convert);
+        std::swap(keyed, alt.keyed);
+        std::swap(autogen, alt.autogen);
+        std::swap(pal, alt.pal);
+        std::swap(palVersion, alt.palVersion);
+        std::swap(key, alt.key);
+        std::swap(w, alt.w);
+        std::swap(h, alt.h);
+        std::swap(made, alt.made);
+        levelBufs.swap(alt.levelBufs);
+        levelSerials.swap(alt.levelSerials);
+    }
+    void DropAlt() {
+        if (alt.tex) alt.tex->Release();
+        alt = Alt();
+    }
+
     GpuTex(Gpu* g, Surface* s) : gpu(g), top(s) {}
+    void DropAll() {
+        Drop();
+        DropAlt();
+    }
     void Drop() {
         if (tex) tex->Release();
         tex = nullptr;
@@ -890,9 +931,9 @@ struct GpuTex final : Gpu::Owner {
         if (keyPs) keyPs->Release();
         keyPs = nullptr;
     }
-    void ReleaseGpuResources() override { Drop(); }
+    void ReleaseGpuResources() override { DropAll(); }
     void GpuReleased() override {
-        Drop();
+        DropAll();
         gpu = nullptr;
     }
 };
@@ -1224,11 +1265,18 @@ static IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* 
     const DWORD key = keyed ? s->ck[kCkSrcBlt].dwColorSpaceLowValue : 0;
     // Levels rendered into by Direct3D and not touched by the CPU since: copied on the GPU.
     if (IDirect3DTexture9* rt = RtTexture(gpu, d, t, chain.l, chain.n, s->buf->fmt, keyed, key)) {
-        t->levelBufs.assign(chain.size(), nullptr);  // the managed copy is behind now
+        t->levelBufs.assign(chain.size(), nullptr);  // the managed copies are behind now
+        t->alt.levelBufs.assign(t->alt.levelBufs.size(), nullptr);
         t->shownKeyed = keyed;
         return rt;
     }
     bool all = false;
+    // The colour key turned on or off since: the other copy, made now if there is none (or
+    // none for this state); the one in use kept for the next change back.
+    if (t->tex && keyed != t->keyed) {
+        if (t->alt.tex && t->alt.keyed != keyed) t->DropAlt();
+        t->SwapAlt();
+    }
     // (Made with GPU mipmaps and given alpha since, by a palette with alpha: made again without.)
     if (!t->tex || t->levels != chain.size() || keyed != t->keyed || t->w != s->buf->w || t->h != s->buf->h ||
         !(t->made == s->buf->fmt) || (t->autogen && TextureHasAlpha(s))) {
@@ -1310,7 +1358,7 @@ void GpuSurfaceGone(Surface* s) {
     s->gpuTex = nullptr;
     if (t->gpu) {
         GpuGuard l(*t->gpu);
-        t->Drop();
+        t->DropAll();
         t->gpu->RemoveOwner(t);
     }
     delete t;

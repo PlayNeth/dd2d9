@@ -427,6 +427,84 @@ static int RunD3D6(IDirectDraw4* dd, IDirectDrawSurface4* rt) {
         if (ts) ts->Release();
     }
 
+    // One colour-keyed 16-bit texture drawn with D3DRENDERSTATE_COLORKEYENABLE on and off by
+    // turns, 256 quads a frame (N.I.C.E. 2 switches it around two of its race textures several
+    // times a frame). Its left half is the key colour: keyed out with the key on, red with it
+    // off. Timed, and checked in a quad of each.
+    {
+        DDSURFACEDESC2 td = {};
+        td.dwSize = sizeof(td);
+        td.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        td.dwWidth = td.dwHeight = 256;
+        td.ddsCaps.dwCaps = DDSCAPS_TEXTURE;
+        td.ddpfPixelFormat.dwSize = sizeof(td.ddpfPixelFormat);
+        td.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        td.ddpfPixelFormat.dwRGBBitCount = 16;
+        td.ddpfPixelFormat.dwRBitMask = 0xF800;
+        td.ddpfPixelFormat.dwGBitMask = 0x07E0;
+        td.ddpfPixelFormat.dwBBitMask = 0x001F;
+        IDirectDrawSurface4* ts = nullptr;
+        IDirect3DTexture2* tex = nullptr;
+        if (SUCCEEDED(dd->CreateSurface(&td, &ts, nullptr))) {
+            DDSURFACEDESC2 l = {};
+            l.dwSize = sizeof(l);
+            ts->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+            for (int y = 0; y < 256; y++)
+                for (int x = 0; x < 256; x++)
+                    reinterpret_cast<uint16_t*>(static_cast<uint8_t*>(l.lpSurface) + y * l.lPitch)[x] = x < 128 ? 0xF800 : 0x07E0;
+            ts->Unlock(nullptr);
+            DDCOLORKEY key = {0xF800, 0xF800};
+            ts->SetColorKey(DDCKEY_SRCBLT, &key);
+            ts->QueryInterface(IID_IDirect3DTexture2, reinterpret_cast<void**>(&tex));
+        }
+        auto frame = [&] {
+            D3DRECT r = {0, 0, kW, kH};
+            vp->Clear2(1, &r, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
+            dev->BeginScene();
+            dev->SetTexture(0, tex);
+            const double c0 = Now();
+            for (int q = 0; q < 256; q++) {
+                const float x = float((q % 16) * 16), y = float((q / 16) * 16);
+                D3DTLVERTEX v[4] = {{x, y, 0.5f, 1, 0xFFFFFFFF, 0, 0, 0}, {x + 16, y, 0.5f, 1, 0xFFFFFFFF, 0, 1, 0},
+                                    {x, y + 16, 0.5f, 1, 0xFFFFFFFF, 0, 0, 1}, {x + 16, y + 16, 0.5f, 1, 0xFFFFFFFF, 0, 1, 1}};
+                dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, (q & 1) ? FALSE : TRUE);
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_TLVERTEX, v, 4, 0);
+            }
+            g_callTime += Now() - c0;
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+            dev->SetTexture(0, nullptr);
+            dev->EndScene();
+        };
+        frame();
+        const uint32_t hk = Pixels(rt, "keyed");
+        DWORD on = 0xFFFFFFFF, off = 0xFFFFFFFF;  // quad 0 (key on) and quad 1 (off), in their left half
+        {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            if (SUCCEEDED(rt->Lock(nullptr, &d, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                const auto* row = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(d.lpSurface) + 8 * d.lPitch);
+                on = row[4] & 0xFFFFFF;
+                off = row[16 + 4] & 0xFFFFFF;
+                rt->Unlock(nullptr);
+            }
+        }
+        const bool right = on == 0 && (off >> 16) >= 0xF0 && (off & 0xFFFF) == 0;
+        if (!right) fails++;
+        g_callTime = 0;
+        frames = 0;
+        const double k0 = Now();
+        double k1 = k0;
+        while (k1 - k0 < g_seconds) {
+            frame();
+            frames++;
+            k1 = Now();
+        }
+        Log("keyed toggle    hash %08x  %7.1f frames/s, %7.1f us a frame in the calls (key on %06lx, off %06lx)%s", hk,
+            frames / (k1 - k0), g_callTime / frames * 1e6, on, off, right ? "" : " FAIL");
+        if (tex) tex->Release();
+        if (ts) ts->Release();
+    }
+
     src->Release();
     dst->Release();
     mat->Release();

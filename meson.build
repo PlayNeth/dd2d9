@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.4.2',
+  version : '1.5.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -36,6 +36,11 @@ executable('ddtest', 'tests/ddtest.cpp',
                   cpp.find_library('user32'), cpp.find_library('winmm'), cpp.find_library('vfw32')],
   link_args : static_link + ['-mwindows'],
   install : false)
+# ddtest's stand-in for a Windows module calling a dd2d9 hook (copied into the Windows folder).
+shared_library('wincaller', 'tests/wincaller.cpp',
+  name_prefix : '',
+  link_args : static_link + ['-Wl,--kill-at'],
+  install : false)
 
 # Performance benchmark (blitter throughput, flip loop, windowed updates).
 executable('ddbench', 'tests/ddbench.cpp',
@@ -60,6 +65,17 @@ executable('focustest', 'tests/focustest.cpp',
 executable('d3d7test', 'tests/d3d7test.cpp',
   dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
                   cpp.find_library('user32')],
+  link_args : static_link + ['-mwindows'],
+  install : false)
+
+# Shim test: dd2d9 under a stand-in for Windows' compatibility shims (fakeshim.dll hooks
+# ddraw.dll's GetProcAddress import as it loads, before it starts, as the shim engine does).
+fakeshim = shared_library('fakeshim', 'tests/fakeshim.cpp',
+  name_prefix : '',
+  link_args : static_link,
+  install : false)
+executable('shimtest', 'tests/shimtest.cpp',
+  link_with : fakeshim,
   link_args : static_link + ['-mwindows'],
   install : false)
 

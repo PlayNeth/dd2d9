@@ -719,6 +719,13 @@ void Presenter::Loop() {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         if (!running_) break;
+        // Under the compositor Present doesn't wait (see gpu.cpp): presents at least half a
+        // refresh apart, for a game that blits to its primary as fast as it can. (Half: a
+        // game that flips, a period apart, is never held back by it.)
+        if (lastPresent_) {
+            int64_t vblank, period;
+            if (Gpu::CompositorClock(&vblank, &period)) SleepUntilQpc(lastPresent_ + period / 2);
+        }
         if (dropRequest_) {
             LeaveGpu();
             dropRequest_ = false;
@@ -1041,6 +1048,11 @@ void Presenter::Loop() {
         const HRESULT hr = gpu.PresentTarget();
         if (heldRt) heldRt->Release();
         gpu.Unlock();
+        if (SUCCEEDED(hr)) {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            lastPresent_ = now.QuadPart;
+        }
         active_ = SUCCEEDED(hr);
         if (FAILED(hr)) DD2D9_LOG("Present failed: 0x%08lx", hr);
         else if (!IsRectEmpty(&area)) ClaimWindow(hwnd, this);  // a changed frame: the window shows this one

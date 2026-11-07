@@ -96,7 +96,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 
 ### Options beyond the original
 
-- **Scaling:** keep the aspect ratio, fill the screen or scale by whole numbers, with point, linear or sharp-bilinear filtering.
+- **Scaling:** keep the aspect ratio, fill the screen or scale by whole numbers, with sharp-bilinear (the default), point or linear filtering.
 - **3D quality:** antialiasing, anisotropic filtering, mipmaps for textures that have none, linear filtering of point-filtered textures, 32-bit rendering of 16-bit targets (no banding) and 24-bit Z buffers.
 - **Old-hardware fixes:** emulated W buffering (no z-fighting of light maps on roads in NFS III), and light maps and decals pulled forward as 16-bit depth buffers rounded them.
 - **A frame limiter** for games that run too fast or use a whole processor core.
@@ -147,8 +147,8 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | --- | --- |
 | `display` | `switch` (real mode switches), `window`, `borderless` |
 | `stretch` | `aspect`, `fill`, `integer` |
-| `filter` | `point`, `linear`, `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges) |
-| `vsync` | `auto` (the game decides), `on`, `off` |
+| `filter` | `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges), `point`, `linear` |
+| `vsync` | `auto` (the game decides), `on`, `off`. Under Windows' desktop compositor dd2d9 paces the frames to the screen's refresh itself; elsewhere (Wine, no compositor) Direct3D 9's vsync does |
 | `d3d` | `auto`: dd2d9's own Direct3D 3–7; `off`: no Direct3D (2D only) |
 | `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
 | `fpslimit` | `0` (off); frames per second at most |
@@ -169,6 +169,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth |
 | `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside what it locked |
 | `zaccess` | `on`: Z buffers can be locked and blitted by DirectDraw where the GPU allows it; `off`: on the GPU only, for a driver that misbehaves with it |
+| `palettizedtextures` | `on`: 8-bit palettized textures offered to Direct3D 3–7, as most cards of the time; `off`: not offered, as Matrox's G200/G400 (N.I.C.E. 2 then loads its 16-bit textures instead of its 256-colour ones) |
 | `videooverlay` | `on`: overlay surfaces offered and laid over the primary when shown; `off`: no overlay hardware, so games blit instead |
 | `log` | `0`; `1` (info); `2` (every blit, lock, flip, palette change, Direct3D 3 execute buffer, window message and failed call) |
 | `drawtrace` | `off`; `on`: one frame's Direct3D draws logged every 600 scenes (about 10 s) |
@@ -194,6 +195,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 - **Z-fighting (hatched light maps or decals):** try `wbuffer=force` or a higher `overlaybias`, and `depth24=on`.
 - **Display mode switches are a problem:** `display=borderless` or `display=window` avoid them.
 - **Under Wine with DXVK in the game's folder:** `d3d9=system`, the default, presents through the prefix's own Direct3D 9; `d3d9=game` uses the game folder's.
+- **The mouse freezes, or a game's own cursor sticks in a corner, in a game that reads the mouse through DirectInput 1–7** (N.I.C.E. 2): DirectInput's older versions get the mouse through a low-level hook that today's Windows can drop, and some games then use whatever their failed read left behind. Put [dinputto8](https://github.com/elishacloud/dinputto8) (its `dinput.dll`) next to the game, which passes DirectInput 1–7 on to DirectInput 8.
 - **Something else:** set `log=2` and look for failed calls in `dd2d9.log`. Please report problems with the log.
 
 ## Building from source
@@ -227,7 +229,7 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 - with no argument, pixel-exact checks of blits, keys, conversion, GDI, interface versions, palettes, object lifetimes and cooperative levels;
 - `ddtest fs8` runs a 640×480×8 exclusive-mode flip-chain animation and checks the pacing;
 - `ddtest win` runs a windowed primary with a clipper;
-- `ddtest mouse` checks the mouse translation (run it with `display=borderless`);
+- `ddtest mouse` checks the mouse translation (run it with `display=borderless`; with `wincaller.dll` next to it and the Windows folder writable, it also checks that a Windows module's call reaching dd2d9's hook isn't translated);
 - `ddtest audit borderless` and `ddtest audit window` (run with that `display` in `dd2d9.ini`) take fullscreen the ways games do and check where the picture lands on the real screen, and that every way of asking for the screen's size gives the game's mode;
 - `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys (key ranges where `SetColorKey` takes them: dd2d9, as `ddraw.dll`'s software blitter, takes single colours), mirroring, stretching, overlapping copies) against a reference implementation.
 
@@ -243,9 +245,11 @@ All checks pass under Wine 11 (wined3d, Xvfb).
 
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small updates to a windowed primary), `ddbench zlock [w h]` (Direct3D frames with small and whole locks of the Z buffer). With `log=1`, the presenter logs every 10 seconds how much of the frame it converted and how long the game waited for it.
 
-`build/d3dimbench.exe [seconds]` checks and times Direct3D 3-6's CPU vertex pipeline: ProcessVertices with lights, fog and clipping (and odd vertices: NaN, infinities, zero normals), a lit sphere drawn with DrawIndexedPrimitive, 2048 small DrawPrimitive calls of transformed vertices a frame (the cost of a draw), and execute buffers (a TRIANGLE instruction per row, per triangle, and cut by the near plane), and checks that consecutive TRIANGLE instructions draw the same pixels as drawn one by one. It writes `d3dimbench.txt` with a hash of each part's output, the time spent in the drawing calls, the transformed vertices (`d3dimbench-tl-*.bin`) and images (`d3dimbench-*.raw`, 256x256 32-bit): two builds meant to give the same output are compared by those.
+`build/d3dimbench.exe [seconds]` checks and times Direct3D 3-6's CPU vertex pipeline: ProcessVertices with lights, fog and clipping (and odd vertices: NaN, infinities, zero normals), a lit sphere drawn with DrawIndexedPrimitive, 2048 small DrawPrimitive calls of transformed vertices a frame (the cost of a draw), one texture drawn with colour keying on and off in turn (and the key checked transparent only with it), and execute buffers (a TRIANGLE instruction per row, per triangle, and cut by the near plane), and checks that consecutive TRIANGLE instructions draw the same pixels as drawn one by one. It writes `d3dimbench.txt` with a hash of each part's output, the time spent in the drawing calls, the transformed vertices (`d3dimbench-tl-*.bin`) and images (`d3dimbench-*.raw`, 256x256 32-bit): two builds meant to give the same output are compared by those.
 
 `build/reloadtest.exe [dll]` frees and reloads dd2d9 (by default `ddraw_.dll`) while the game window stays subclassed, as a wrapper loading dd2d9 under another name may do.
+
+`build/shimtest.exe [call]`, with `build/fakeshim.dll` beside it, runs dd2d9 under a stand-in for Windows' compatibility shims: `fakeshim.dll` hooks ddraw.dll's `GetProcAddress` import as it loads and, when called, patches the program's import again and passes calls on to what it found there, as the shim engine did to N.I.C.E. 2's setup (with a jump, or with a call given `call`). It writes `shimtest.txt` (`shimtest-call.txt`), which ends in `ALL PASSED` when `GetProcAddress` calls return with the shim's answers; a file that stops before its last line means the process died in a loop between the two hooks.
 
 ### Reverse-engineering notes
 

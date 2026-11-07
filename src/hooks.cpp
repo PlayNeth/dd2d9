@@ -5,6 +5,8 @@
 #include <winternl.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <string>
@@ -45,6 +47,111 @@ bool WriteSlot(void** slot, void* value) {
     InterlockedExchangePointer(slot, value);
     VirtualProtect(slot, sizeof(void*), old, &old);
     return true;
+}
+
+// A DLL's own export of `name`, read from its export table, forwarders followed: the real
+// function even where GetProcAddress has been hooked (see NextFunction). nullptr: not found.
+void* OwnExport(HMODULE m, const char* name, int depth = 0) {
+    if (!m || depth > 8) return nullptr;
+    auto* base = reinterpret_cast<const uint8_t*>(m);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    const DWORD image = nt->OptionalHeader.SizeOfImage;
+    if (!dir.VirtualAddress || dir.VirtualAddress >= image || dir.Size > image - dir.VirtualAddress) return nullptr;
+    const auto* ed = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + dir.VirtualAddress);
+    const auto* names = reinterpret_cast<const DWORD*>(base + ed->AddressOfNames);
+    const auto* ords = reinterpret_cast<const WORD*>(base + ed->AddressOfNameOrdinals);
+    const auto* funcs = reinterpret_cast<const DWORD*>(base + ed->AddressOfFunctions);
+    DWORD index = DWORD(-1);
+    if (IS_INTRESOURCE(name)) {
+        const DWORD ord = DWORD(reinterpret_cast<uintptr_t>(name));
+        if (ord >= ed->Base) index = ord - ed->Base;
+    } else {
+        // Names are sorted (the loader searches them so too).
+        DWORD lo = 0, hi = ed->NumberOfNames;
+        while (lo < hi) {
+            const DWORD mid = lo + (hi - lo) / 2;
+            const int c = strcmp(reinterpret_cast<const char*>(base + names[mid]), name);
+            if (c == 0) {
+                index = ords[mid];
+                break;
+            }
+            if (c < 0) lo = mid + 1;
+            else hi = mid;
+        }
+    }
+    if (index >= ed->NumberOfFunctions || !funcs[index]) return nullptr;
+    const DWORD rva = funcs[index];
+    if (rva < dir.VirtualAddress || rva >= dir.VirtualAddress + dir.Size) return const_cast<uint8_t*>(base + rva);
+    // A forwarder, "dll.function" or "dll.#ordinal" (the dll an API set name on Windows 10
+    // and later, which GetModuleHandle resolves to its host). Only a DLL already loaded:
+    // this may run in DllMain.
+    const char* fwd = reinterpret_cast<const char*>(base + rva);
+    const char* dot = strrchr(fwd, '.');
+    if (!dot || dot == fwd || size_t(dot - fwd) >= MAX_PATH) return nullptr;
+    char dll[MAX_PATH + 4];
+    memcpy(dll, fwd, size_t(dot - fwd));
+    dll[dot - fwd] = 0;
+    HMODULE target = GetModuleHandleA(dll);
+    if (!target) return nullptr;
+    if (dot[1] == '#') return OwnExport(target, MAKEINTRESOURCEA(atoi(dot + 2)), depth + 1);
+    return OwnExport(target, dot + 1, depth + 1);
+}
+
+// For NextFunction: each hook's original, the module it lies in and the real function.
+// Written once per original (under g_hookLock), read without the lock: an entry is filled
+// before its `original` is published.
+struct Next {
+    void* const* volatile original;
+    void* real;
+    uintptr_t base, size;  // the module holding *original (size 0: none)
+};
+uintptr_t g_selfBase, g_selfSize;  // dd2d9's own image (set with the first entry)
+constexpr size_t kNextSlots = 256;  // a power of two, well over the hooks there are
+Next g_next[kNextSlots];
+
+size_t NextSlot(void* const* original) { return (reinterpret_cast<uintptr_t>(original) >> 2) * 2654435761u % kNextSlots; }
+
+// The image holding `p`: base and size (0, 0: none).
+void ImageOf(const void* p, uintptr_t* base, uintptr_t* size) {
+    *base = *size = 0;
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(p), &m) ||
+        !m)
+        return;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const uint8_t*>(m) + dos->e_lfanew);
+    *base = reinterpret_cast<uintptr_t>(m);
+    *size = nt->OptionalHeader.SizeOfImage;
+}
+
+void Remember(void* const* original, void* real) {
+    uintptr_t base, size;
+    ImageOf(*original, &base, &size);
+    if (!g_selfSize) {
+        uintptr_t sb, ss;
+        ImageOf(reinterpret_cast<const void*>(&Remember), &sb, &ss);
+        g_selfBase = sb;
+        MemoryBarrier();
+        g_selfSize = ss;
+    }
+    AcquireSRWLockExclusive(&g_hookLock);
+    for (size_t i = NextSlot(original), n = 0; n < kNextSlots; i = (i + 1) % kNextSlots, n++) {
+        Next& e = g_next[i];
+        if (e.original == original) break;  // (resolved once: *original never changes after)
+        if (e.original) continue;
+        e.real = real;
+        e.base = base;
+        e.size = size;
+        MemoryBarrier();
+        e.original = original;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_hookLock);
 }
 
 // "user32", "USER32.dll", "user32.DLL" all match "user32".
@@ -164,11 +271,104 @@ void ModulesFromSnapshot(std::vector<std::pair<HMODULE, std::wstring>>* out) {
 
 }  // namespace
 
+void* NextFunction(void* const* original, const void* caller) {
+    void* const next = *original;
+    const uintptr_t at = reinterpret_cast<uintptr_t>(caller);
+    for (size_t i = NextSlot(original), n = 0; n < kNextSlots; i = (i + 1) % kNextSlots, n++) {
+        const Next& e = g_next[i];
+        void* const* const o = e.original;
+        if (!o) break;
+        if (o != original) continue;
+        MemoryBarrier();
+        // Called from the module of the function it would call (that function passed the
+        // call here, and would get it back), or from dd2d9 itself, which never calls its
+        // hooks: the function this hook called jumped straight back into it (a tail call).
+        if (e.real && (at - e.base < e.size || at - g_selfBase < g_selfSize)) return e.real;
+        break;
+    }
+    return next;
+}
+
+namespace {
+// The modules hooks were called from, and whether each is Windows' (CalledFromWindows). A
+// module unloaded and another loaded at its place keeps the first one's answer: rare, and
+// at worst one module's calls translated or not as the other's.
+struct Caller {
+    uintptr_t base, size;
+    bool windows;
+};
+constexpr size_t kCallers = 32;
+Caller g_callers[kCallers];  // g_callerLock
+size_t g_callerCount, g_callerNext;
+SRWLOCK g_callerLock = SRWLOCK_INIT;
+
+// Windows' compatibility shims, which pass a game's calls on: the shim engine and its shim
+// DLLs, in the AppPatch folder (Windows 7) or the system folder (Windows 8 and later).
+bool IsShimModule(const wchar_t* path) {
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    static const wchar_t* kShims[] = {L"apphelp.dll",  L"aclayers.dll", L"acgenral.dll",
+                                      L"acspecfc.dll", L"acxtrnal.dll", L"acwinrt.dll"};
+    for (const wchar_t* s : kShims)
+        if (_wcsicmp(name, s) == 0) return true;
+    wchar_t dir[MAX_PATH];
+    const UINT n = GetWindowsDirectoryW(dir, MAX_PATH);
+    if (!n || n >= MAX_PATH - 10) return false;
+    lstrcatW(dir, dir[n - 1] == L'\\' ? L"AppPatch\\" : L"\\AppPatch\\");
+    return _wcsnicmp(path, dir, wcslen(dir)) == 0;
+}
+}  // namespace
+
+bool CalledFromWindows(const void* caller) {
+    const uintptr_t at = reinterpret_cast<uintptr_t>(caller);
+    AcquireSRWLockShared(&g_callerLock);
+    for (size_t i = 0; i < g_callerCount; i++) {
+        if (at - g_callers[i].base < g_callers[i].size) {
+            const bool windows = g_callers[i].windows;
+            ReleaseSRWLockShared(&g_callerLock);
+            return windows;
+        }
+    }
+    ReleaseSRWLockShared(&g_callerLock);
+    uintptr_t base, size;
+    ImageOf(caller, &base, &size);
+    if (!size) return false;  // not in a module (code the game generated): the game's
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(reinterpret_cast<HMODULE>(base), path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return false;
+    AcquireSRWLockExclusive(&g_hookLock);  // (LeaveAlone's)
+    // (dd2d9 itself too: its own calls want the real answers, and come here when a shim that
+    // patched its imports took a hook as the function it passes them on to)
+    const bool windows = base == g_selfBase || (LeaveAlone(path) && !IsShimModule(path));
+    ReleaseSRWLockExclusive(&g_hookLock);
+    bool added = false;
+    AcquireSRWLockExclusive(&g_callerLock);
+    size_t i = 0;
+    while (i < g_callerCount && g_callers[i].base != base) i++;
+    if (i == g_callerCount) {  // (not added meanwhile by another thread)
+        if (g_callerCount < kCallers) i = g_callerCount++;
+        else i = g_callerNext++ % kCallers;  // full: one goes, in turn
+        g_callers[i] = {base, size, windows};
+        added = true;
+    }
+    ReleaseSRWLockExclusive(&g_callerLock);
+    if (added && windows && base != g_selfBase) {
+        const wchar_t* name = wcsrchr(path, L'\\');
+        DD2D9_LOG("mouse: %ls calls dd2d9's cursor and window hooks (through another hooker's patch): passed on as they are",
+                  name ? name + 1 : path);
+    }
+    return windows;
+}
+
 unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) {
     for (size_t h = 0; h < n; h++) {
         if (*hooks[h].original) continue;
-        if (HMODULE dll = GetModuleHandleA(hooks[h].dll))
+        if (HMODULE dll = GetModuleHandleA(hooks[h].dll)) {
+            // GetProcAddress's answer: another hooker's (a compatibility shim's) where there
+            // is one, so calls still go through it.
             *hooks[h].original = reinterpret_cast<void*>(GetProcAddress(dll, hooks[h].name));
+            if (*hooks[h].original) Remember(hooks[h].original, OwnExport(dll, hooks[h].name));
+        }
     }
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,

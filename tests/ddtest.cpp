@@ -2114,6 +2114,48 @@ static int RunMouse() {
     CHECK(got.left == 0 && got.top == 0 && got.right == 640 && got.bottom == 480, "ClipCursor/GetClipCursor (%ld,%ld-%ld,%ld)",
           got.left, got.top, got.right, got.bottom);
     ClipCursor(nullptr);
+    {
+        // One of Windows' own modules whose call reaches dd2d9's hook through another hooker's
+        // patch (Windows' DirectInput 1-7 in Nerf Arena Blast and Unreal Tournament: its mouse
+        // came back in the game's coordinates, the camera turning on its own) gets the real
+        // screen's answer; the game still its mode's. wincaller.dll, copied into the Windows
+        // folder, calls the hook ddtest's own import points at.
+        char dir[MAX_PATH], src[MAX_PATH], dst[MAX_PATH];
+        const UINT nd = GetWindowsDirectoryA(dir, MAX_PATH);
+        const DWORD ns = GetModuleFileNameA(nullptr, src, MAX_PATH);
+        char* slash = ns && ns < MAX_PATH ? strrchr(src, '\\') : nullptr;
+        HMODULE wc = nullptr;
+        bool copied = false;
+        if (nd && nd < MAX_PATH - 32 && slash && size_t(slash - src) < MAX_PATH - 16) {
+            strcpy(slash + 1, "wincaller.dll");
+            snprintf(dst, sizeof(dst), "%s\\dd2d9test-wincaller.dll", dir);
+            copied = CopyFileA(src, dst, FALSE) != 0;
+            if (copied) wc = LoadLibraryA(dst);
+        }
+        using PointFn = BOOL(WINAPI*)(POINT*);
+        using CallFn = BOOL(WINAPI*)(PointFn, POINT*);
+        const auto call = wc ? reinterpret_cast<CallFn>(reinterpret_cast<void*>(GetProcAddress(wc, "CallPointFn"))) : nullptr;
+        if (call) {
+            const PointFn hook = &GetCursorPos;  // (read from ddtest's import: dd2d9's)
+            const auto real =
+                reinterpret_cast<PointFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorPos")));
+            SetCursorPos(320, 240);
+            POINT game = {}, windows = {}, truth = {};
+            GetCursorPos(&game);
+            call(hook, &windows);
+            real(&truth);
+            CHECK(hook != real && game.x == 320 && game.y == 240 && windows.x == truth.x && windows.y == truth.y &&
+                      (truth.x != 320 || truth.y != 240),
+                  "a Windows module's call through dd2d9's hook: the real cursor (%ld,%ld; real %ld,%ld), the game's "
+                  "translated (%ld,%ld)",
+                  windows.x, windows.y, truth.x, truth.y, game.x, game.y);
+        } else {
+            fprintf(g_out, "SKIP a Windows module's call through dd2d9's hook: wincaller.dll not next to ddtest, or the "
+                           "Windows folder not writable\n");
+        }
+        if (wc) FreeLibrary(wc);
+        if (copied) DeleteFileA(dst);
+    }
     // A mouse message at the real middle of the screen arrives at the mode's middle.
     g_lastMouseMove = -1;
     SendMessageA(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(sw / 2, sh / 2));

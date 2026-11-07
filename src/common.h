@@ -17,7 +17,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.4.2"
+#define DD2D9_VERSION "1.5.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -27,7 +27,7 @@ enum { kD3DAuto, kD3DOn, kD3DOff };
 struct Config {
     int display = kDisplaySwitch;  // exclusive-mode games: real mode switch / centered window / borderless scaled
     int stretch = 0;               // window & borderless scaling: 0 aspect, 1 fill, 2 integer
-    int filter = 0;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear)
+    int filter = 2;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear; default)
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
@@ -46,6 +46,7 @@ struct Config {
     bool render32 = false;         // 16-bit render targets drawn in 32 bits on the GPU
     bool depth24 = false;          // 16-bit Z buffers made 24-bit on the GPU
     bool overlays = true;          // videooverlay=on: overlay surfaces offered (emulated: laid over the primary when shown)
+    bool palTextures = true;       // palettizedtextures=off: no 8-bit palettized texture format offered to Direct3D
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s
     int overlayBias = 1;           // passes laid on drawn surfaces pulled forward N 16-bit depth steps (gpures.cpp)
     int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too
@@ -223,6 +224,8 @@ bool ShownImage(RECT* image, SIZE* mode, HWND* window);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.
 void LimitFrame();
+// Sleeps until QueryPerformanceCounter reaches `target` (ddraw.cpp).
+void SleepUntilQpc(int64_t target);
 // The game's view of a point on the real screen and back; false when 1:1.
 bool MouseToGame(POINT* p, bool wait = true);
 bool MouseFromGame(POINT* p);

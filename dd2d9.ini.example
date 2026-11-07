@@ -20,17 +20,20 @@ display=switch
 stretch=aspect
 
 ; Scaling filter:
-;   point  - sharp pixels, but uneven at non-integer scales (default)
-;   linear - smooth, but blurry
-;   sharp  - in between (also bilinear-sharp): each pixel a flat block, blended with its
+;   sharp  - (default, also bilinear-sharp) each pixel a flat block, blended with its
 ;            neighbour only over one screen pixel at the edge; crisp and even at any scale
-filter=point
+;   point  - sharp pixels, but uneven at non-integer scales (the default before 1.5.0)
+;   linear - smooth, but blurry
+filter=sharp
 
 ; Vertical sync:
 ;   auto - the game decides: Flip() waits for vblank unless the game passes DDFLIP_NOVSYNC,
 ;          as DirectDraw does (default)
 ;   on   - every Flip() waits for vblank
 ;   off  - never wait (uncapped, may tear)
+; On Windows with the desktop compositor (Windows 8 and later; 7 with Aero), dd2d9 waits
+; itself, one frame per refresh, rather than Direct3D 9 (smoother; less CPU on some
+; drivers). Under Wine, or without the compositor, Direct3D 9's vsync waits.
 vsync=auto
 
 ; Direct3D (3D games):
@@ -88,6 +91,14 @@ zaccess=on
 ; over the screen's image when shown, as the hardware of the era did; off reports no overlay
 ; hardware, as before 1.1.0 (games then blit their video instead).
 videooverlay=on
+
+; 8-bit palettized textures for Direct3D 3-7: on (default) offers them, as most 3D cards of
+; the time did (dd2d9 converts them through their palette); off leaves them out of the
+; formats a game is offered, as Matrox's G200 and G400 and today's drivers do. Some games
+; pick their textures by it: N.I.C.E. 2 loads its 256-colour textures when they are
+; offered and its 16-bit ones otherwise (off for those). A game that asks for one anyway
+; still gets it.
+palettizedtextures=on
 
 ; Frame-rate limit: 0 (off, default) or the most frames per second. For games that run too
 ; fast without vsync or busy a whole core. Paced at Flip, and at blits covering half the

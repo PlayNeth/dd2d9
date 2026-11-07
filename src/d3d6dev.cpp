@@ -1078,7 +1078,11 @@ HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) {
     rgb(16, 0x0F00, 0x00F0, 0x000F, 0xF000);
     rgb(32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
     rgb(32, 0xFF0000, 0xFF00, 0xFF, 0);
-    {  // palettized: converted through the palette on the way to the GPU
+    // Palettized: converted through the palette on the way to the GPU. Not offered with
+    // palettizedtextures=off, as on a card without them (Matrox's G200 and G400, today's
+    // drivers): N.I.C.E. 2 loads its 256-colour textures when it finds this format listed,
+    // its 16-bit ones otherwise. (Still made if a game asks for one anyway.)
+    if (g_config.palTextures) {
         DDPIXELFORMAT f = {};
         f.dwSize = sizeof(f);
         f.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;

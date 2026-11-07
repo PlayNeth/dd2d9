@@ -2,6 +2,7 @@
 #include "gpu.h"
 
 #include <d3d9.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 
@@ -79,8 +80,71 @@ static SIZE LargestMonitor() {
     return m;
 }
 
+// Vsync under the desktop compositor (Windows 8 and later; Windows 7 with Aero on). A
+// windowed frame is shown at the compositor's next pass whenever it is presented, so the
+// pacing that matters is one frame a refresh, which dd2d9 keeps itself (DDraw::PaceFlip):
+// Direct3D 9's own windowed vsync makes Present wait for a vblank, and Intel's driver
+// spins the CPU for it (N.I.C.E. 2 on a UHD 620: Present 7-8 ms a frame, the game's own
+// work slowed from 3-5 to 7-10 ms on the shared power budget, a frame now and then a
+// refresh late; at once and paced by dd2d9, all 600 frames of 10 s on time). Not under
+// Wine, whose compositor isn't Windows' (Present's vsync as before), nor without one: asked
+// again at each device creation and reset (Windows 7's can be turned off while a game runs;
+// then the timing call fails and PaceFlip keeps its old fallback until then).
+namespace {
+using DwmTimingFn = HRESULT(WINAPI*)(HWND, DWM_TIMING_INFO*);
+using DwmEnabledFn = HRESULT(WINAPI*)(BOOL*);
+struct Dwm {
+    DwmTimingFn timing = nullptr;
+    DwmEnabledFn enabled = nullptr;
+};
+const Dwm& DwmFunctions() {
+    static const Dwm dwm = [] {
+        Dwm r;
+        if (g_config.vsync == kVSyncOff) return r;
+        if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return r;
+        wchar_t path[MAX_PATH];
+        const UINT n = GetSystemDirectoryW(path, MAX_PATH);
+        if (!n || n >= MAX_PATH - 12) return r;
+        lstrcatW(path, L"\\dwmapi.dll");
+        const HMODULE m = LoadLibraryW(path);
+        if (!m) return r;
+        r.enabled = reinterpret_cast<DwmEnabledFn>(reinterpret_cast<void*>(GetProcAddress(m, "DwmIsCompositionEnabled")));
+        r.timing = reinterpret_cast<DwmTimingFn>(reinterpret_cast<void*>(GetProcAddress(m, "DwmGetCompositionTimingInfo")));
+        if (!r.enabled || !r.timing) r = Dwm();
+        return r;
+    }();
+    return dwm;
+}
+}  // namespace
+
+bool Gpu::CompositorPaced() {
+    if (g_config.vsync == kVSyncOff) return false;
+    const Dwm& dwm = DwmFunctions();
+    BOOL on = FALSE;
+    const bool paced = dwm.enabled && SUCCEEDED(dwm.enabled(&on)) && on;
+    static volatile LONG logged = -1;  // what the log said last (-1: nothing yet)
+    if (InterlockedExchange(&logged, paced) != LONG(paced))
+        DD2D9_LOG(paced ? "vsync: frames paced by dd2d9 to the desktop compositor's refresh"
+                        : "vsync: Direct3D 9's (Wine, or no desktop compositor)");
+    return paced;
+}
+
+bool Gpu::CompositorClock(int64_t* vblank, int64_t* period) {
+    const Dwm& dwm = DwmFunctions();
+    if (!dwm.timing) return false;
+    DWM_TIMING_INFO t = {};
+    t.cbSize = sizeof(t);
+    // (nullptr: the whole desktop's timing, as Windows 8.1 and later require; fails while
+    // composition is off)
+    if (FAILED(dwm.timing(nullptr, &t)) || !t.qpcRefreshPeriod || !t.qpcVBlank) return false;
+    *vblank = int64_t(t.qpcVBlank);
+    *period = int64_t(t.qpcRefreshPeriod);
+    return true;
+}
+
 static UINT PresentInterval() {
-    return g_config.vsync == kVSyncOff ? D3DPRESENT_INTERVAL_IMMEDIATE : D3DPRESENT_INTERVAL_ONE;
+    return g_config.vsync == kVSyncOff || Gpu::CompositorPaced() ? D3DPRESENT_INTERVAL_IMMEDIATE
+                                                                  : D3DPRESENT_INTERVAL_ONE;
 }
 
 // The device's own presentation parameters: windowed, on `window` (the game's, see

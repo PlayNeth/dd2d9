@@ -1358,7 +1358,7 @@ double DDraw::VBlankPhase() const {
 // (Windows 10 1803 and later) for all but the last half millisecond, which is spun; without
 // one, Sleep for all but the last ~1.5 ms. (Spinning the last 2 ms on Sleep(0) cost the game
 // its only core with cpus=1.)
-static void SleepUntilQpc(int64_t target) {
+void SleepUntilQpc(int64_t target) {
     static LARGE_INTEGER freq;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     // One timer per thread, closed with the thread (a game thread ending no longer leaks it).
@@ -1398,11 +1398,29 @@ void DDraw::SleepUntilVBlank(int count) {
 }
 
 void DDraw::PaceFlip() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    // Under the desktop compositor Present doesn't wait (see gpu.cpp): frames one refresh
+    // period apart, on a schedule as fpslimit's. A frame late by less than a period doesn't
+    // move the next one: snapping to the vblank after it instead (DwmFlush, as tried) had
+    // N.I.C.E. 2 two or three refreshes a frame for good, the game's timing catching up. The
+    // schedule leans toward the vblanks, an eighth of the way a frame: the game starts its
+    // frame at one and its present is shown at the next, whatever the clocks' drift.
+    int64_t vblank, period;
+    if (Gpu::CompositorClock(&vblank, &period)) {
+        int64_t due = paceNext_;
+        if (!due || now.QuadPart > due + period) due = now.QuadPart;  // the first, or a whole period late
+        int64_t off = ((due - vblank) % period + period) % period;  // due is off past a vblank
+        if (off > period / 2) off -= period;                          // or -off before the next
+        due -= off / 8;
+        SleepUntilQpc(due);
+        paceNext_ = due + period;
+        lastFlip_ = due;
+        return;
+    }
     // Fallback for when Present() does not block on vblank (vsync off or not
     // honored by the driver/compositor). 98% of a period leaves room for real
     // vsync jitter, so with working vsync this never sleeps.
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
     const int64_t minGap = qpcFreq_.QuadPart * 98 / (100 * int64_t(refresh_));
     if (lastFlip_ && now.QuadPart < lastFlip_ + minGap) {
         SleepUntilQpc(lastFlip_ + minGap);

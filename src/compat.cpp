@@ -49,7 +49,7 @@ FakeMemory Fake(uint64_t realAvailPhys, uint64_t realAvailPage) {
 }
 
 void WINAPI HookGlobalMemoryStatus(MEMORYSTATUS* s) {
-    g_globalMemoryStatus(s);
+    DD2D9_NEXT(g_globalMemoryStatus)(s);
     if (!s) return;
     const FakeMemory m = Fake(s->dwAvailPhys, s->dwAvailPageFile);
     s->dwMemoryLoad = m.load;
@@ -61,7 +61,7 @@ void WINAPI HookGlobalMemoryStatus(MEMORYSTATUS* s) {
 }
 
 BOOL WINAPI HookGlobalMemoryStatusEx(MEMORYSTATUSEX* s) {
-    if (!g_globalMemoryStatusEx(s)) return FALSE;
+    if (!DD2D9_NEXT(g_globalMemoryStatusEx)(s)) return FALSE;
     const FakeMemory m = Fake(s->ullAvailPhys, s->ullAvailPageFile);
     s->dwMemoryLoad = m.load;
     s->ullTotalPhys = m.totalPhys;
@@ -195,16 +195,16 @@ LONG Opened(LONG r, HKEY parent, std::wstring sub, PHKEY out) {
 }
 
 LONG WINAPI HookRegOpenKeyExA(HKEY k, LPCSTR sub, DWORD opt, REGSAM sam, PHKEY out) {
-    return Opened(g_regOpenKeyExA(k, sub, opt, sam, out), k, Wide(sub), out);
+    return Opened(DD2D9_NEXT(g_regOpenKeyExA)(k, sub, opt, sam, out), k, Wide(sub), out);
 }
 LONG WINAPI HookRegOpenKeyExW(HKEY k, LPCWSTR sub, DWORD opt, REGSAM sam, PHKEY out) {
-    return Opened(g_regOpenKeyExW(k, sub, opt, sam, out), k, sub ? sub : L"", out);
+    return Opened(DD2D9_NEXT(g_regOpenKeyExW)(k, sub, opt, sam, out), k, sub ? sub : L"", out);
 }
 LONG WINAPI HookRegOpenKeyA(HKEY k, LPCSTR sub, PHKEY out) {
-    return Opened(g_regOpenKeyA(k, sub, out), k, Wide(sub), out);
+    return Opened(DD2D9_NEXT(g_regOpenKeyA)(k, sub, out), k, Wide(sub), out);
 }
 LONG WINAPI HookRegOpenKeyW(HKEY k, LPCWSTR sub, PHKEY out) {
-    return Opened(g_regOpenKeyW(k, sub, out), k, sub ? sub : L"", out);
+    return Opened(DD2D9_NEXT(g_regOpenKeyW)(k, sub, out), k, sub ? sub : L"", out);
 }
 
 // RegCreateKey(Ex) opens existing keys too (some games open the processor keys that way).
@@ -219,19 +219,21 @@ RegCreateKeyWFn g_regCreateKeyW;
 
 LONG WINAPI HookRegCreateKeyExA(HKEY k, LPCSTR sub, DWORD res, LPSTR cls, DWORD opt, REGSAM sam,
                                 const SECURITY_ATTRIBUTES* sa, PHKEY out, LPDWORD disp) {
-    return Opened(g_regCreateKeyExA(k, sub, res, cls, opt, sam, sa, out, disp), k, Wide(sub), out);
+    return Opened(DD2D9_NEXT(g_regCreateKeyExA)(k, sub, res, cls, opt, sam, sa, out, disp), k, Wide(sub), out);
 }
 LONG WINAPI HookRegCreateKeyExW(HKEY k, LPCWSTR sub, DWORD res, LPWSTR cls, DWORD opt, REGSAM sam,
                                 const SECURITY_ATTRIBUTES* sa, PHKEY out, LPDWORD disp) {
-    return Opened(g_regCreateKeyExW(k, sub, res, cls, opt, sam, sa, out, disp), k, sub ? sub : L"", out);
+    return Opened(DD2D9_NEXT(g_regCreateKeyExW)(k, sub, res, cls, opt, sam, sa, out, disp), k, sub ? sub : L"", out);
 }
-LONG WINAPI HookRegCreateKeyA(HKEY k, LPCSTR sub, PHKEY out) { return Opened(g_regCreateKeyA(k, sub, out), k, Wide(sub), out); }
+LONG WINAPI HookRegCreateKeyA(HKEY k, LPCSTR sub, PHKEY out) {
+    return Opened(DD2D9_NEXT(g_regCreateKeyA)(k, sub, out), k, Wide(sub), out);
+}
 LONG WINAPI HookRegCreateKeyW(HKEY k, LPCWSTR sub, PHKEY out) {
-    return Opened(g_regCreateKeyW(k, sub, out), k, sub ? sub : L"", out);
+    return Opened(DD2D9_NEXT(g_regCreateKeyW)(k, sub, out), k, sub ? sub : L"", out);
 }
 
 LONG WINAPI HookRegCloseKey(HKEY k) {
-    const LONG r = g_regCloseKey(k);
+    const LONG r = DD2D9_NEXT(g_regCloseKey)(k);
     if (r == ERROR_SUCCESS) Forget(k);
     return r;
 }
@@ -258,12 +260,12 @@ LONG FakeMHz(LPDWORD type, LPBYTE data, LPDWORD cb) {
 
 LONG WINAPI HookRegQueryValueExA(HKEY k, LPCSTR name, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD cb) {
     if (name && _stricmp(name, "~MHz") == 0 && IsCpuHandle(k)) return FakeMHz(type, data, cb);
-    return g_regQueryValueExA(k, name, reserved, type, data, cb);
+    return DD2D9_NEXT(g_regQueryValueExA)(k, name, reserved, type, data, cb);
 }
 
 LONG WINAPI HookRegQueryValueExW(HKEY k, LPCWSTR name, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD cb) {
     if (name && _wcsicmp(name, L"~MHz") == 0 && IsCpuHandle(k)) return FakeMHz(type, data, cb);
-    return g_regQueryValueExW(k, name, reserved, type, data, cb);
+    return DD2D9_NEXT(g_regQueryValueExW)(k, name, reserved, type, data, cb);
 }
 
 ImportHook kCpuHooks[] = {
@@ -290,7 +292,7 @@ DWORD_PTR g_affinity;  // the processors the game was given (0: not set)
 int g_cpuCount;
 
 void WINAPI HookGetSystemInfo(SYSTEM_INFO* si) {
-    g_getSystemInfo(si);
+    DD2D9_NEXT(g_getSystemInfo)(si);
     if (!si || !g_affinity) return;
     si->dwNumberOfProcessors = DWORD(g_cpuCount);
     si->dwActiveProcessorMask = g_affinity;
@@ -365,13 +367,13 @@ int ShownBppOrZero() {
 // other games) set up their DirectDraw palette only when the screen is one, and showed
 // dd2d9's grey ramp instead of their colours.
 int WINAPI HookGetDeviceCaps(HDC dc, int index) {
-    const int real = g_getDeviceCaps(dc, index);
+    const int real = DD2D9_NEXT(g_getDeviceCaps)(dc, index);
     const bool size = index == HORZRES || index == VERTRES || index == DESKTOPHORZRES || index == DESKTOPVERTRES;
     if (!size && index != BITSPIXEL && index != NUMCOLORS && index != RASTERCAPS && index != SIZEPALETTE &&
         index != NUMRESERVED && index != COLORRES)
         return real;
     const DWORD type = GetObjectType(dc);
-    if ((type != OBJ_DC && type != OBJ_MEMDC) || g_getDeviceCaps(dc, TECHNOLOGY) != DT_RASDISPLAY) return real;
+    if ((type != OBJ_DC && type != OBJ_MEMDC) || DD2D9_NEXT(g_getDeviceCaps)(dc, TECHNOLOGY) != DT_RASDISPLAY) return real;
     if (size) {
         // The screen's size: the mode's, as GetSystemMetrics answers it (input.cpp).
         int w, h;
@@ -428,22 +430,22 @@ void FixDepth(const Ch* device, DWORD mode, Dev* dm, BOOL ok) {
 }
 
 BOOL WINAPI HookEnumDisplaySettingsA(LPCSTR device, DWORD mode, DEVMODEA* dm) {
-    const BOOL ok = g_enumDisplaySettingsA(device, mode, dm);
+    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsA)(device, mode, dm);
     FixDepth(device, mode, dm, ok);
     return ok;
 }
 BOOL WINAPI HookEnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW* dm) {
-    const BOOL ok = g_enumDisplaySettingsW(device, mode, dm);
+    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsW)(device, mode, dm);
     FixDepth(device, mode, dm, ok);
     return ok;
 }
 BOOL WINAPI HookEnumDisplaySettingsExA(LPCSTR device, DWORD mode, DEVMODEA* dm, DWORD flags) {
-    const BOOL ok = g_enumDisplaySettingsExA(device, mode, dm, flags);
+    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsExA)(device, mode, dm, flags);
     FixDepth(device, mode, dm, ok);
     return ok;
 }
 BOOL WINAPI HookEnumDisplaySettingsExW(LPCWSTR device, DWORD mode, DEVMODEW* dm, DWORD flags) {
-    const BOOL ok = g_enumDisplaySettingsExW(device, mode, dm, flags);
+    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsExW)(device, mode, dm, flags);
     FixDepth(device, mode, dm, ok);
     return ok;
 }
@@ -484,23 +486,25 @@ template <typename Dev> bool AlreadyShown(const Dev* dm) {
 LONG WINAPI HookChangeDisplaySettingsA(DEVMODEA* dm, DWORD flags) {
     if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEA c;
-    return g_changeDisplaySettingsA(const_cast<DEVMODEA*>(RealDepth(dm, &c)), flags);
+    return DD2D9_NEXT(g_changeDisplaySettingsA)(const_cast<DEVMODEA*>(RealDepth(dm, &c)), flags);
 }
 LONG WINAPI HookChangeDisplaySettingsW(DEVMODEW* dm, DWORD flags) {
     if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEW c;
-    return g_changeDisplaySettingsW(const_cast<DEVMODEW*>(RealDepth(dm, &c)), flags);
+    return DD2D9_NEXT(g_changeDisplaySettingsW)(const_cast<DEVMODEW*>(RealDepth(dm, &c)), flags);
 }
 // (A display named: only the primary's depth is made up; the name left to the system.)
 LONG WINAPI HookChangeDisplaySettingsExA(LPCSTR device, DEVMODEA* dm, HWND h, DWORD flags, LPVOID p) {
     if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEA c;
-    return g_changeDisplaySettingsExA(device, device && device[0] ? dm : const_cast<DEVMODEA*>(RealDepth(dm, &c)), h, flags, p);
+    DEVMODEA* const sent = device && device[0] ? dm : const_cast<DEVMODEA*>(RealDepth(dm, &c));
+    return DD2D9_NEXT(g_changeDisplaySettingsExA)(device, sent, h, flags, p);
 }
 LONG WINAPI HookChangeDisplaySettingsExW(LPCWSTR device, DEVMODEW* dm, HWND h, DWORD flags, LPVOID p) {
     if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEW c;
-    return g_changeDisplaySettingsExW(device, device && device[0] ? dm : const_cast<DEVMODEW*>(RealDepth(dm, &c)), h, flags, p);
+    DEVMODEW* const sent = device && device[0] ? dm : const_cast<DEVMODEW*>(RealDepth(dm, &c));
+    return DD2D9_NEXT(g_changeDisplaySettingsExW)(device, sent, h, flags, p);
 }
 
 ImportHook kDepthHooks[] = {
@@ -540,7 +544,7 @@ BOOL WINAPI HookLockWindowUpdate(HWND hwnd) {
     }
     if (!hwnd && InterlockedExchange(&g_lockSkipped, 0)) return TRUE;
     if (hwnd) InterlockedExchange(&g_lockSkipped, 0);
-    return g_lockWindowUpdate(hwnd);
+    return DD2D9_NEXT(g_lockWindowUpdate)(hwnd);
 }
 
 // A 16-bit bitmap made with CreateBitmap or CreateBitmapIndirect while the game is in a 16-bit
@@ -588,14 +592,14 @@ HBITMAP ModeBitmap16(int w, int h, UINT planes, UINT bpp, const void* bits, LONG
 HBITMAP WINAPI HookCreateBitmap(int w, int h, UINT planes, UINT bpp, const void* bits) {
     // (CreateBitmap's rows are a whole number of 16-bit words: 16-bit pixels, packed.)
     if (HBITMAP b = ModeBitmap16(w, h, planes, bpp, bits, LONG(w) * 2)) return b;
-    return g_createBitmap(w, h, planes, bpp, bits);
+    return DD2D9_NEXT(g_createBitmap)(w, h, planes, bpp, bits);
 }
 
 HBITMAP WINAPI HookCreateBitmapIndirect(const BITMAP* bm) {
     if (bm && int64_t(bm->bmWidthBytes) >= int64_t(bm->bmWidth) * 2)  // (rows that hold the pixels)
         if (HBITMAP b = ModeBitmap16(bm->bmWidth, bm->bmHeight, bm->bmPlanes, bm->bmBitsPixel, bm->bmBits, bm->bmWidthBytes))
             return b;
-    return g_createBitmapIndirect(bm);
+    return DD2D9_NEXT(g_createBitmapIndirect)(bm);
 }
 
 ImportHook kWindowHooks[] = {
@@ -617,7 +621,7 @@ using HeapAllocFn = LPVOID(WINAPI*)(HANDLE, DWORD, SIZE_T);
 HeapAllocFn g_heapAlloc;
 
 LPVOID WINAPI HookHeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes) {
-    return g_heapAlloc(heap, flags | HEAP_ZERO_MEMORY, bytes);
+    return DD2D9_NEXT(g_heapAlloc)(heap, flags | HEAP_ZERO_MEMORY, bytes);
 }
 
 ImportHook kHeapHooks[] = {
@@ -636,7 +640,7 @@ struct HookTable {
 HookTable g_tables[6];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
-    const FARPROC p = g_getProcAddress(m, name);
+    const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
     if (p)
         for (const HookTable& t : g_tables)
             for (size_t i = 0; t.on && i < t.n; i++)

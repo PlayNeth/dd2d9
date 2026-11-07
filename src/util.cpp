@@ -150,6 +150,10 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         int b;
         if (ParseBool(v, &b)) g_config.aa2d = b != 0;
         else ok = false;
+    } else if (key == "palettizedtextures") {
+        int b;
+        if (ParseBool(v, &b)) g_config.palTextures = b != 0;
+        else ok = false;
     } else if (key == "videooverlay" || key == "videooverlays") {
         int b;
         if (ParseBool(v, &b)) g_config.overlays = b != 0;
@@ -363,11 +367,11 @@ void LogInit() {
     Log(1, "settings: display=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s log=%d",
         kDisplay[g_config.display], kStretch[g_config.stretch], kFilter[g_config.filter], kVSync[g_config.vsync], kD3D[g_config.d3d],
         g_config.systemD3D9 ? "system" : "game", g_config.log);
-    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s zaccess=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d antialias2d=%s texfilter=%s wbuffer=%s overlaybias=%d videooverlay=%s", g_config.fpsLimit, g_config.ramMB,
+    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s zaccess=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d antialias2d=%s texfilter=%s wbuffer=%s overlaybias=%d videooverlay=%s palettizedtextures=%s", g_config.fpsLimit, g_config.ramMB,
         g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.desktopBpp, g_config.lockWhole ? "on" : "off", g_config.zAccess ? "on" : "off", g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
         g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa, g_config.aa2d ? "on" : "off",
         g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off",
-        g_config.overlayBias, g_config.overlays ? "on" : "off");
+        g_config.overlayBias, g_config.overlays ? "on" : "off", g_config.palTextures ? "on" : "off");
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }

@@ -781,6 +781,28 @@ static int Run(int w, int h, int bpp) {
                   "clip status with vertex blending and a clip plane: 0x%08lx (LEFT | GEN0 in both)", got.dwStatus);
         }
 
+        // The 8-bit palettized texture format: listed, with D3DPTEXTURECAPS_ALPHAPALETTE, unless
+        // palettizedtextures=off (N.I.C.E. 2 then loads its 16-bit textures).
+        {
+            char v[16] = "";
+            GetPrivateProfileStringA("dd2d9", "palettizedtextures", "on", v, sizeof(v), ".\\dd2d9.ini");
+            const bool want = !(!_stricmp(v, "off") || !strcmp(v, "0") || !_stricmp(v, "false") || !_stricmp(v, "no"));
+            int pal8 = 0;
+            struct Cb {
+                static HRESULT WINAPI Fn(DDPIXELFORMAT* f, void* c) {
+                    if ((f->dwFlags & DDPF_PALETTEINDEXED8) && f->dwRGBBitCount == 8) ++*static_cast<int*>(c);
+                    return D3DENUMRET_OK;
+                }
+            };
+            dev->EnumTextureFormats(Cb::Fn, &pal8);
+            D3DDEVICEDESC7 dc = {};
+            dev->GetCaps(&dc);
+            const bool alphaPal = (dc.dpcTriCaps.dwTextureCaps & D3DPTEXTURECAPS_ALPHAPALETTE) != 0;
+            CHECK(want ? pal8 == 1 : pal8 == 0 && !alphaPal,
+                  "palettized textures %s: 8-bit palettized formats listed %d (want %d), ALPHAPALETTE %d", want ? "on" : "off",
+                  pal8, want ? 1 : 0, alphaPal);
+        }
+
         // Bump maps (environment-mapped bump mapping): listed with the bump-mapping operations,
         // made as textures, their format kept.
         {

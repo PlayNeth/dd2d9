@@ -3,6 +3,111 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.5.0
+Vsync paced by dd2d9 under Windows' desktop compositor (N.I.C.E. 2 a steady 60 fps), the
+mouse in Unreal engine games in borderless (Windows' DirectInput given the real screen),
+colour keying switched on and off without remaking textures, N.I.C.E. 2's setup opens (Windows'
+compatibility shims), a setting to hide palettized textures from Direct3D (N.I.C.E. 2's
+16-bit textures), and sharp scaling by default.
+
+- **Vsync under the desktop compositor: frames paced by dd2d9, Present doesn't wait.**
+  dd2d9 presents into a window, which Windows' compositor (DWM) shows at its next pass; with
+  vsync, Direct3D 9 made each Present wait for a vblank of its own, and Intel's driver spins
+  the CPU for it. N.I.C.E. 2 on a laptop's UHD 620 (Windows 11): Present took 7–8 ms a frame,
+  the game's own work slowed from 3–5 ms to 7–10 ms on the CPU and GPU's shared power budget,
+  and of each 10 s's 600 frames 40–220 came 1–3 ms late and some a whole refresh late; it
+  looked choppy beside Windows' ddraw. Where composition is on (Windows 8 and later, Windows 7
+  with Aero) and `vsync` isn't `off`, Present no longer waits, and a Flip that waits for vsync
+  waits instead for its slot on a schedule one refresh period apart (the compositor's own
+  period, not a rounded rate), as `fpslimit` does: a frame late by less than a period doesn't
+  move the next one. The schedule leans toward the compositor's vblanks, an eighth of the way
+  a frame, so the game starts each frame at one whatever the clocks' drift. The presenter
+  presents at least half a refresh apart (a game that blits to its primary as fast as it can,
+  without Flip, is presented about twice a refresh, not hundreds of times). N.I.C.E. 2: every
+  10 s window after the start 600 frames, all of them one refresh apart, 595–600 within
+  16.2–17.1 ms; Present 0.4–0.6 ms. A first try that presented at once and then waited for the
+  compositor's pass (`DwmFlush`) made it worse: a frame that missed a pass by a little waited
+  a whole refresh, the game's timing caught up with more work a frame, and from 20 s in every
+  frame took two or three refreshes. Not under Wine (its compositor isn't Windows') nor
+  without composition: Present's vsync, as before. Asked again at each device creation and
+  reset (Windows 7's composition can be turned off while a game runs); the log says which
+  (`vsync: frames paced by dd2d9 to the desktop compositor's refresh`, or `vsync: Direct3D
+  9's`).
+- **Windows' own modules get the real screen from dd2d9's cursor and window hooks.** In a
+  mode dd2d9 shows scaled (borderless, windowed), the game asks for and sets the cursor in its
+  mode's coordinates, and dd2d9's hooks on its imports translate. dd2d9 never patches Windows'
+  modules, but another hooker's patch (Windows' compatibility shims, most likely) sent
+  Windows' DirectInput 1–7 calls through those hooks too. Nerf Arena Blast and Unreal
+  Tournament (DirectInput mouse, `display=borderless`) turned on their own, the camera
+  spinning and Windows' cursor in the middle of the screen: DirectInput reads the mouse by
+  putting the cursor at the window's middle and reading where it is. It put it at the game's
+  512,384 (683,384 on the real screen), held it where it was, and read it back as the game's
+  600,410 at every poll, 88,26 from the middle with the mouse still. A switched display
+  translates nothing, and dinputto8 doesn't read the mouse so, which is why both played
+  right. dd2d9's 19 mouse and window hooks now pass a call on unchanged when it comes from a
+  module dd2d9 doesn't patch (Windows', but for its compatibility shims, which pass the
+  game's own calls on: `apphelp.dll`, the `Ac*.dll` shim DLLs, anything in `AppPatch`; other
+  wrappers) or from dd2d9 itself; the log names each
+  such module once (`mouse: dinput.dll calls dd2d9's cursor and window hooks`). Found with a
+  diagnostic build logging every cursor call and its caller (in 1.4.2 too). New ddtest check
+  (`mouse`): `wincaller.dll`, copied into the Windows folder, calls dd2d9's `GetCursorPos`
+  hook: 1.5.0 before this gave it the game's 320,240, now the real 640,360 (the game still
+  gets 320,240). Confirmed in Nerf Arena Blast and Unreal Tournament.
+- **A texture drawn with colour keying and then without isn't made again each time.** dd2d9
+  makes a colour-keyed texture with the key's texels transparent; drawn without the key it
+  needs the texels as they are. N.I.C.E. 2 draws two of its race textures keyed and unkeyed in
+  turn several times a frame, and each switch made the texture again (4–8 ms of a frame). The
+  texture now keeps both copies and swaps between them; a copy made for an older version of the
+  surface's pixels or palette is still made again. New d3dimbench test, "keyed toggle" (256
+  quads a frame on one texture, keying on and off in turn, its key colour checked transparent
+  with the key and shown without): about 150 ms a frame before, 5–7 ms now, the same picture.
+
+- **dd2d9's hooks and Windows' compatibility shims no longer pass calls to each other
+  forever.** Windows runs every exe with "setup" in its name as an installer, as
+  administrator and with compatibility shims (`VistaSetup DetectorsAdminProtection
+  Installer`); shims patch the imports of every DLL outside the Windows folder, dd2d9's
+  among them, and Windows applies them to many old games from its compatibility database
+  too. N.I.C.E. 2's `bn_setup.exe` died at start (a stack overflow, with no window and no
+  crash logged): asked for `GetProcAddress`, the shim gave dd2d9 its own hook, which dd2d9
+  kept as the function its hook passes calls on to; when the setup loaded `d3d9.dll`, the
+  shim engine patched the setup's imports again and kept dd2d9's hook as the function *it*
+  passes calls on to, and the next `GetProcAddress` call went round the two until the stack
+  ran out. A hook still passes calls on to the function it replaced (a shim's, where there
+  is one, so the shim keeps working), except when it was called from that function's own
+  module, or from dd2d9 itself (a shim that passes the call on with a jump): then to the real
+  function, read from its DLL's export table (forwarders followed into DLLs already loaded),
+  which a shim can't redirect. Found with diagnostic builds on the player's Windows 11 (a
+  watchdog thread and a first-chance exception log); under Wine, which has no shims, the
+  setup always opened. New `shimtest`, with a stand-in shim (`fakeshim.dll`) that hooks
+  ddraw.dll's imports as it loads and patches the program's again as the shim engine did,
+  passing calls on with a jump or with a call: 1.4.2 died in both; a first fix that always
+  called the real functions survived, but the shim's own answers no longer reached the
+  program; now both pass. The export table reading gives what `GetProcAddress` gives for
+  all 6257 exports of kernel32, kernelbase, ntdll, gdi32, user32 and advapi32 under Wine and
+  the 9121 of the player's Windows 11 (none differ; 1 and 30 forwarders into DLLs not loaded
+  aren't followed). Confirmed on the player's Windows 11: the setup opens (its log goes on
+  past where it died, as under Wine).
+- **`palettizedtextures=off`: no 8-bit palettized texture format for Direct3D 3–7.** Some
+  games choose their textures by the formats offered: N.I.C.E. 2 loads its 256-colour
+  textures (`Textures\256col`) when an 8-bit palettized format is listed and its 16-bit ones
+  otherwise, which is why players of the time found the game looked better on Matrox's G200
+  and G400 (no palettized textures). With `off`, `EnumTextureFormats` (Direct3D 3–7) leaves
+  the format out and the device caps drop `D3DPTEXTURECAPS_ALPHAPALETTE`; a game that asks
+  for a palettized texture anyway still gets one. Default `on`, as before. New d3d7test check
+  (the format listed with `on`; absent, and the cap off, with `off`). Confirmed in N.I.C.E. 2:
+  with `off` it loads its 16-bit textures.
+- **`filter=sharp` is the default** (it was `point`). A scaled image (borderless, windowed,
+  a mode the monitor lacks) keeps its pixels as flat blocks, blended with their neighbours
+  only over one screen pixel at their edges, so they come out even at any scale instead of
+  some rows and columns doubled; at whole-number scales it looks as `point` did. Shrinking
+  (an image larger than the space it gets) is linear, as before. `filter=point` gives the
+  old look.
+- **README: dinputto8 for games whose DirectInput 1–7 mouse freezes.** N.I.C.E. 2 sometimes
+  froze the mouse at start, its own cursor stuck in the bottom-right corner: when its
+  `GetDeviceState` on the mouse fails with anything but `DIERR_INPUTLOST`, it uses the
+  uninitialized buffer as the mouse's movement and buttons. Not dd2d9's to fix; the
+  Troubleshooting section points to dinputto8.
+
 ## 1.4.2
 Sakura Taisen's text (letters drawn into 16-bit bitmaps of the game's own).
 

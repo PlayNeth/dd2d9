@@ -210,24 +210,24 @@ void BeforeStringCommand(const std::string& cmd);
 void AfterStringCommand(const std::string& cmd, MCIERROR e);
 
 MCIERROR WINAPI HookSendStringA(LPCSTR cmd, LPSTR ret, UINT len, HWND callback) {
-    if (!cmd) return g_sendStringA(cmd, ret, len, callback);
+    if (!cmd) return DD2D9_NEXT(g_sendStringA)(cmd, ret, len, callback);
     std::string natural;
     HWND naturalWindow = nullptr;
     const std::string sent = Translate(cmd, &natural, &naturalWindow);
     if (!natural.empty()) PlaceNatural(natural, naturalWindow);
     BeforeStringCommand(cmd);
-    const MCIERROR e = g_sendStringA(sent.c_str(), ret, len, callback);
+    const MCIERROR e = DD2D9_NEXT(g_sendStringA)(sent.c_str(), ret, len, callback);
     AfterStringCommand(cmd, e);
     return e;
 }
 
 MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback) {
-    if (!cmd) return g_sendStringW(cmd, ret, len, callback);
+    if (!cmd) return DD2D9_NEXT(g_sendStringW)(cmd, ret, len, callback);
     // Commands are ASCII (aliases and file names aside, passed on as they were): translated
     // only when every character is.
     std::string a;
     for (const wchar_t* p = cmd; *p; p++) {
-        if (*p > 0x7F) return g_sendStringW(cmd, ret, len, callback);
+        if (*p > 0x7F) return DD2D9_NEXT(g_sendStringW)(cmd, ret, len, callback);
         a += char(*p);
     }
     std::string natural;
@@ -237,10 +237,10 @@ MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback
     BeforeStringCommand(a);
     MCIERROR e;
     if (sent == a) {
-        e = g_sendStringW(cmd, ret, len, callback);
+        e = DD2D9_NEXT(g_sendStringW)(cmd, ret, len, callback);
     } else {
         const std::wstring w(sent.begin(), sent.end());
-        e = g_sendStringW(w.c_str(), ret, len, callback);
+        e = DD2D9_NEXT(g_sendStringW)(w.c_str(), ret, len, callback);
     }
     AfterStringCommand(a, e);
     return e;
@@ -567,7 +567,7 @@ BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
         if (DeviceWindowToReal(h, r)) {
             DD2D9_LOG("video window %p: %d,%d %dx%d in the game's coordinates, %ld,%ld %ldx%ld on the screen",
                       static_cast<void*>(h), x, y, w, ht, r[0], r[1], r[2], r[3]);
-            return g_moveWindow(h, int(r[0]), int(r[1]), int(r[2]), int(r[3]), repaint);
+            return DD2D9_NEXT(g_moveWindow)(h, int(r[0]), int(r[1]), int(r[2]), int(r[3]), repaint);
         }
     }
     if (const HWND parent = MciWndParent(h)) {
@@ -575,10 +575,10 @@ BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
         if (ToReal(parent, r)) {
             DD2D9_LOG("video window %p: %d,%d %dx%d in the game's coordinates, %ld,%ld %ldx%ld on the screen",
                       static_cast<void*>(h), x, y, w, ht, r[0], r[1], r[2], r[3]);
-            return g_moveWindow(h, int(r[0]), int(r[1]), int(r[2]), int(r[3]), repaint);
+            return DD2D9_NEXT(g_moveWindow)(h, int(r[0]), int(r[1]), int(r[2]), int(r[3]), repaint);
         }
     }
-    return g_moveWindow(h, x, y, w, ht, repaint);
+    return DD2D9_NEXT(g_moveWindow)(h, x, y, w, ht, repaint);
 }
 
 BOOL WINAPI HookSetWindowPos(HWND h, HWND after, int x, int y, int w, int ht, UINT flags) {
@@ -591,7 +591,7 @@ BOOL WINAPI HookSetWindowPos(HWND h, HWND after, int x, int y, int w, int ht, UI
             if (!(flags & SWP_NOSIZE)) w = int(r[2]), ht = int(r[3]);
         }
     }
-    return g_setWindowPos(h, after, x, y, w, ht, flags);
+    return DD2D9_NEXT(g_setWindowPos)(h, after, x, y, w, ht, flags);
 }
 
 // MCIWNDM_PUT_DEST: the picture's rectangle in the MCIWnd window's client area, scaled as the
@@ -611,11 +611,11 @@ LRESULT SendPutDest(SendMessageFn send, HWND h, UINT msg, WPARAM wp, LPARAM lp) 
 }
 
 LRESULT WINAPI HookSendMessageA(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    return msg == kPutDest ? SendPutDest(g_sendMessageA, h, msg, wp, lp) : g_sendMessageA(h, msg, wp, lp);
+    return msg == kPutDest ? SendPutDest(DD2D9_NEXT(g_sendMessageA), h, msg, wp, lp) : DD2D9_NEXT(g_sendMessageA)(h, msg, wp, lp);
 }
 
 LRESULT WINAPI HookSendMessageW(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    return msg == kPutDest ? SendPutDest(g_sendMessageW, h, msg, wp, lp) : g_sendMessageW(h, msg, wp, lp);
+    return msg == kPutDest ? SendPutDest(DD2D9_NEXT(g_sendMessageW), h, msg, wp, lp) : DD2D9_NEXT(g_sendMessageW)(h, msg, wp, lp);
 }
 
 ImportHook kHooks[] = {
