@@ -121,11 +121,11 @@ static int Run(int w, int h, int bpp) {
         IDirectDrawSurface7* tex = nullptr;
         hr = dd->CreateSurface(&t, &tex, nullptr);
         CHECK(SUCCEEDED(hr) && tex, "render-target texture -> 0x%08lx", hr);
-        auto pixel = [&](int x, int y) {
+        auto pixelOf = [&](IDirectDrawSurface7* s, int x, int y) {
             DDSURFACEDESC2 l = {};
             l.dwSize = sizeof(l);
             DWORD c = 0;
-            if (SUCCEEDED(back->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+            if (SUCCEEDED(s->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
                 const BYTE* row = static_cast<BYTE*>(l.lpSurface) + y * l.lPitch;
                 if (l.ddpfPixelFormat.dwRGBBitCount == 16) {  // 565 to 888 (bits replicated)
                     const DWORD v = reinterpret_cast<const WORD*>(row)[x];
@@ -134,10 +134,11 @@ static int Run(int w, int h, int bpp) {
                 } else {
                     c = reinterpret_cast<const DWORD*>(row)[x] & 0xFFFFFF;
                 }
-                back->Unlock(nullptr);
+                s->Unlock(nullptr);
             }
             return c;
         };
+        auto pixel = [&](int x, int y) { return pixelOf(back, x, y); };
         struct TV { float x, y, z, rhw; DWORD c; float u, v; };
         for (int pass = 0; tex && pass < 2; pass++) {
             const DWORD col = pass ? 0x0000FF : 0x00FF00;
@@ -203,8 +204,76 @@ static int Run(int w, int h, int bpp) {
             tex->SetColorKey(DDCKEY_SRCBLT, nullptr);
             const DWORD l = pixel(16, 64), r = pixel(112, 64);
             CHECK(l == 0x00FF00 && r == 0, "colour-keyed render-target texture: left 0x%06lx, right 0x%06lx (keyed out)", l, r);
+            // The key works on the texel alone (Wine's test_colorkey_precision): with the
+            // stage's alpha from a vertex alpha of 0 and no blending, the rest is still drawn.
+            tex->SetColorKey(DDCKEY_SRCBLT, &red);
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, TRUE);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->SetTexture(0, tex);
+            dev->BeginScene();
+            TV clear[4] = {{0, 0, 0.5f, 1, 0x00FFFFFF, 0, 0}, {128, 0, 0.5f, 1, 0x00FFFFFF, 1, 0},
+                           {0, 128, 0.5f, 1, 0x00FFFFFF, 0, 1}, {128, 128, 0.5f, 1, 0x00FFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, clear, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_CURRENT);
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+            tex->SetColorKey(DDCKEY_SRCBLT, nullptr);
+            const DWORD l2 = pixel(16, 64), r2 = pixel(112, 64);
+            CHECK(l2 == 0x00FF00 && r2 == 0, "colour key with a vertex alpha of 0: left 0x%06lx, right 0x%06lx (keyed out)", l2, r2);
+            // Stage 0's alpha from the vertices read by stage 1 (BLENDCURRENTALPHA: a splat's
+            // blend weight) stays the vertices' with the key on: a weight of 1/255 shows stage
+            // 1's blue, not the texture's green.
+            tex->SetColorKey(DDCKEY_SRCBLT, &red);
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, TRUE);
+            dev->SetRenderState(D3DRENDERSTATE_TEXTUREFACTOR, 0xFF0000FF);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+            dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_BLENDCURRENTALPHA);
+            dev->SetTextureStageState(1, D3DTSS_COLORARG1, D3DTA_CURRENT);
+            dev->SetTextureStageState(1, D3DTSS_COLORARG2, D3DTA_TFACTOR);
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->SetTexture(0, tex);
+            dev->BeginScene();
+            TV weight[4] = {{0, 0, 0.5f, 1, 0x01FFFFFF, 0, 0}, {128, 0, 0.5f, 1, 0x01FFFFFF, 1, 0},
+                            {0, 128, 0.5f, 1, 0x01FFFFFF, 0, 1}, {128, 128, 0.5f, 1, 0x01FFFFFF, 1, 1}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, weight, 4, 0);
+            dev->EndScene();
+            dev->SetTexture(0, nullptr);
+            dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+            dev->SetTextureStageState(1, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            dev->SetTextureStageState(1, D3DTSS_COLORARG2, D3DTA_CURRENT);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+            dev->SetRenderState(D3DRENDERSTATE_TEXTUREFACTOR, 0xFFFFFFFF);
+            dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+            tex->SetColorKey(DDCKEY_SRCBLT, nullptr);
+            const DWORD l3 = pixel(16, 64);
+            CHECK((l3 & 0xFF) >= 0xF0 && ((l3 >> 8) & 0xFF) < 0x10,
+                  "colour key with stage 0's vertex alpha read by stage 1: left 0x%06lx (stage 1's blue)", l3);
         }
         if (tex) tex->Release();
+        // A viewport larger than the render target (kept from the back buffer, S
+        // §SetRenderTarget): untransformed vertices mapped by it, the target cutting what is
+        // outside. A quad over the viewport's top-left quarter covers all of the 64x64 target.
+        {
+            IDirectDrawSurface7* small = nullptr;
+            if (SUCCEEDED(dd->CreateSurface(&t, &small, nullptr))) {
+                struct V { float x, y, z; DWORD c; };
+                const V q[4] = {{-1.0f, 1.0f, 0.5f, 0xFF00FF00}, {-0.5f, 1.0f, 0.5f, 0xFF00FF00},
+                                {-1.0f, 0.5f, 0.5f, 0xFF00FF00}, {-0.5f, 0.5f, 0.5f, 0xFF00FF00}};
+                dev->SetRenderTarget(small, 0);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZ | D3DFVF_DIFFUSE, const_cast<V*>(q), 4, 0);
+                dev->EndScene();
+                dev->SetRenderTarget(back, 0);
+                const DWORD a = pixelOf(small, 8, 8), b = pixelOf(small, 56, 56);
+                CHECK(a == 0x00FF00 && b == 0x00FF00, "viewport larger than the render target: %06lx %06lx (all drawn)", a, b);
+                small->Release();
+            }
+        }
         // A render target drawn into, blitted to the back buffer (copied on the GPU): as is, and
         // stretched 2x.
         {
@@ -607,6 +676,27 @@ static int Run(int w, int h, int bpp) {
                     if (pixel(x, y) & 0xFF0000) red++;
             CHECK(true, "coplanar floor cut two ways (%s): %d of 4802 sampled pixels lost to z-fighting",
                   wcap ? "W buffering" : "Z buffering", red);
+            if (wcap) {
+                // A vertex with a huge rhw (KOF 99 Evolution's low-life warning lines, drawn
+                // first in the frame with an rhw of 13131952) is the nearest there can be and
+                // nothing more: what is drawn after keeps its order. A near square (green,
+                // w 50), then a far one over it (red, w 200): green stays, and the blue one
+                // with the huge rhw, drawn first, stays in front of both.
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                auto square = [&](float x0, float y0, float x1, float y1, float z, float rhw, DWORD c) {
+                    Vertex q[4] = {{x0, y0, z, rhw, c}, {x1, y0, z, rhw, c}, {x0, y1, z, rhw, c}, {x1, y1, z, rhw, c}};
+                    dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, q, 4, 0);
+                };
+                dev->BeginScene();
+                square(400, 200, 420, 220, 0.0f, 13131952.0f, 0xFF0000FF);
+                square(300, 150, 500, 250, 0.98f, 0.02f, 0xFF00FF00);
+                square(300, 150, 500, 250, 0.995f, 0.005f, 0xFFFF0000);
+                dev->EndScene();
+                const DWORD nearPx = pixel(350, 180), hugePx = pixel(410, 210);
+                CHECK((nearPx & 0x00FF00) && !(nearPx & 0xFF0000) && (hugePx & 0x0000FF) && !(hugePx & 0xFFFF00),
+                      "W buffering after a vertex with a huge rhw: the near square 0x%06lx (green), the huge one 0x%06lx (blue)",
+                      nearPx & 0xFFFFFF, hugePx & 0xFFFFFF);
+            }
             // NFS III's light maps: everything alpha blended with depth writes on, the road a
             // grid (red), then two lights added on top (green, blue), each cut differently and
             // writing depth too. Their depths differ from the road's only by rounding (affine
@@ -992,9 +1082,98 @@ static int Run(int w, int h, int bpp) {
                 }
                 CHECK(SUCCEEDED(hr) && differ == 0, "ProcessVertices(CLIP) then DrawPrimitiveVB: %d of 24 samples differ from the direct draw (hr 0x%08lx)",
                       differ, hr);
+                // With a user clip plane (world space, x >= 0): the left half cut off.
+                D3DVALUE plane[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+                dev->SetClipPlane(0, plane);
+                dev->SetRenderState(D3DRENDERSTATE_CLIPPLANEENABLE, 1);
+                hr = dst->ProcessVertices(D3DVOP_TRANSFORM | D3DVOP_CLIP, 0, 3, src, 0, dev, 0);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                dev->DrawPrimitiveVB(D3DPT_TRIANGLELIST, dst, 0, 3, 0);
+                dev->EndScene();
+                dev->SetRenderState(D3DRENDERSTATE_CLIPPLANEENABLE, 0);
+                const DWORD left = pixel(w / 2 - 40, h - 80), right = pixel(w / 2 + 40, h - 80);
+                CHECK(SUCCEEDED(hr) && left == 0 && right != 0,
+                      "ProcessVertices(CLIP) with a clip plane, then DrawPrimitiveVB: left 0x%06lx (cut), right 0x%06lx", left, right);
             }
             if (src) src->Release();
             if (dst) dst->Release();
+
+            // A vertex buffer drawn from again and again: dd2d9 draws it from a Direct3D 9
+            // copy. Every draw must show what the buffer holds then: unchanged, drawn from an
+            // offset with indices, after the game wrote it again (Lock), written through the
+            // pointer an earlier Lock gave (as XP allows), and rewritten before every draw (a
+            // dynamic buffer).
+            D3DMATRIX one = {};
+            one._11 = one._22 = one._33 = one._44 = 1;
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &one);
+            DWORD lighting = TRUE;
+            dev->GetRenderState(D3DRENDERSTATE_LIGHTING, &lighting);
+            dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
+            DWORD zenable = FALSE;
+            dev->GetRenderState(D3DRENDERSTATE_ZENABLE, &zenable);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+            vd.dwCaps = 0;
+            vd.dwFVF = D3DFVF_XYZ | D3DFVF_DIFFUSE;
+            vd.dwNumVertices = 6;
+            IDirect3DVertexBuffer7* vb = nullptr;
+            d3d->CreateVertexBuffer(&vd, &vb, 0);
+            // Two triangles: the first over the left of the screen, the second over the right.
+            void* kept = nullptr;  // the pointer the last Lock gave
+            auto fill = [&](DWORD left, DWORD right, bool lock = true) {
+                const V3 v[6] = {{-1, -1, 0.5f, left}, {-1, 1, 0.5f, left}, {-0.1f, 0, 0.5f, left},
+                                 {1, 1, 0.5f, right}, {1, -1, 0.5f, right}, {0.1f, 0, 0.5f, right}};
+                if (lock && FAILED(vb->Lock(DDLOCK_WAIT, &kept, nullptr))) return false;
+                memcpy(kept, v, sizeof(v));
+                if (lock) vb->Unlock();
+                return true;
+            };
+            auto frame = [&](bool indexed) {
+                static WORD idx[3] = {0, 1, 2};
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                dev->DrawPrimitiveVB(D3DPT_TRIANGLELIST, vb, 0, 3, 0);
+                if (indexed) dev->DrawIndexedPrimitiveVB(D3DPT_TRIANGLELIST, vb, 3, 3, idx, 3, 0);
+                dev->EndScene();
+                return std::make_pair(pixel(w / 8, h / 2), pixel(w - w / 8, h / 2));
+            };
+            if (vb && fill(0xFF00FF00, 0xFF0000FF)) {
+                int wrong = 0;
+                char seen[256] = "";
+                auto expect = [&](std::pair<DWORD, DWORD> got, DWORD l, DWORD r) {
+                    sprintf(seen + strlen(seen), "%06lx/%06lx ", got.first, got.second);
+                    if (got.first != l || got.second != r) wrong++;
+                };
+                for (int i = 0; i < 3; i++) expect(frame(i == 2), 0x00FF00, i == 2 ? 0x0000FF : 0);
+                CHECK(wrong == 0, "video-memory vertex buffer drawn 3 times, then with indices from vertex 3: %d wrong (%s)",
+                      wrong, seen);
+                wrong = 0;
+                seen[0] = 0;
+                fill(0xFFFF0000, 0xFFFFFF00);
+                for (int i = 0; i < 2; i++) expect(frame(true), 0xFF0000, 0xFFFF00);
+                CHECK(wrong == 0, "the vertex buffer written again (Lock), drawn twice: %d wrong (%s)", wrong, seen);
+                wrong = 0;
+                seen[0] = 0;
+                fill(0xFF0000FF, 0xFF00FF00, false);
+                for (int i = 0; i < 2; i++) expect(frame(true), 0x0000FF, 0x00FF00);
+                CHECK(wrong == 0, "the vertex buffer written through an earlier Lock's pointer, drawn twice: %d wrong (%s)",
+                      wrong, seen);
+                wrong = 0;
+                seen[0] = 0;
+                for (int i = 0; i < 8; i++) {
+                    const DWORD c = i & 1 ? 0xFF00FFFF : 0xFFFF00FF;
+                    fill(c, c);
+                    expect(frame(true), c & 0xFFFFFF, c & 0xFFFFFF);
+                    expect(frame(true), c & 0xFFFFFF, c & 0xFFFFFF);
+                }
+                CHECK(wrong == 0, "the vertex buffer rewritten before every other draw, 8 times: %d wrong", wrong);
+            } else {
+                CHECK(false, "video-memory vertex buffer");
+            }
+            if (vb) vb->Release();
+            dev->SetRenderState(D3DRENDERSTATE_LIGHTING, lighting);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, zenable);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &proj);
         }
     }
 

@@ -5,6 +5,8 @@
 
 #include <d3d9.h>
 
+#include <algorithm>
+
 using namespace dd2d9;
 
 namespace {
@@ -14,7 +16,9 @@ HRESULT CreateDDraw(REFIID riid, void** out, bool initialized, const GUID* guid 
     InstallCompatHooks(false);
     auto* dd = new DDraw();
     dd->initialized = initialized;
-    dd->dd7 = IsEqualGUID(riid, IID_IDirectDraw7);  // Direct3D 7 (not 1-3) belongs to these
+    // Direct3D 7 (not 1-6) belongs to DirectDrawCreateEx's objects; the class factory's are
+    // decided by the interface Initialize is called on (DDraw::Initialize).
+    dd->dd7 = IsEqualGUID(riid, IID_IDirectDraw7);
     const ULONG_PTR special = reinterpret_cast<ULONG_PTR>(guid);
     if (special == DDCREATE_HARDWAREONLY) dd->capsSide = DDraw::kHardwareOnly;
     else if (special == DDCREATE_EMULATIONONLY) dd->capsSide = DDraw::kEmulationOnly;
@@ -138,34 +142,58 @@ struct Display {
     HMONITOR monitor;
 };
 Display g_displays[16];
+UINT g_displayCount;
+// The monitors the list was made for: it is made again only when they change. DirectShow's
+// Video Mixing Renderer 7 enumerates for every graph it builds (every movie), and a Direct3D 9
+// object costs tens to hundreds of milliseconds to make under DXVK.
+std::vector<HMONITOR> g_displaysFor;
+bool g_displaysMade;
 SRWLOCK g_displaysLock = SRWLOCK_INIT;
+
+BOOL CALLBACK AddMonitor(HMONITOR m, HDC, LPRECT, LPARAM out) {
+    reinterpret_cast<std::vector<HMONITOR>*>(out)->push_back(m);
+    return TRUE;
+}
 
 // After the primary display driver, ddraw.dll lists each display on the desktop by its own
 // GUID, its \\.\DISPLAYn name and its monitor (DDENUM_ATTACHEDSECONDARYDEVICES), even with
 // one monitor (as Wine does too). DirectShow's Video Mixing Renderer 7 builds its list of
 // monitors from these and makes a DirectDraw object for each. The GUIDs are Direct3D 9's,
 // as GetDeviceIdentifier reports them; DirectDrawCreate takes any of them. The callbacks
-// run outside the lock: another thread enumerating at the same time writes the same entries.
+// run outside the lock, on a copy.
 void EnumerateDisplays(LPDDENUMCALLBACKEXA cb, LPVOID ctx) {
-    IDirect3D9* d3d = CreateD3D9();
-    if (!d3d) return;
-    UINT n = 0;
+    std::vector<HMONITOR> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, AddMonitor, reinterpret_cast<LPARAM>(&monitors));
     AcquireSRWLockExclusive(&g_displaysLock);
-    const UINT adapters = d3d->GetAdapterCount();
-    for (UINT i = 0; i < adapters && n < sizeof(g_displays) / sizeof(g_displays[0]); i++) {
-        D3DADAPTER_IDENTIFIER9 id = {};
-        const HMONITOR monitor = d3d->GetAdapterMonitor(i);
-        if (!monitor || FAILED(d3d->GetAdapterIdentifier(i, 0, &id))) continue;
-        Display& d = g_displays[n++];
-        d.guid = id.DeviceIdentifier;
-        lstrcpynA(d.description, id.Description, sizeof(d.description));
-        lstrcpynA(d.name, id.DeviceName, sizeof(d.name));
-        d.monitor = monitor;
+    if (!g_displaysMade || monitors != g_displaysFor) {
+        g_displayCount = 0;
+        g_displaysMade = false;
+        if (IDirect3D9* d3d = CreateD3D9()) {
+            UINT n = 0;
+            const UINT adapters = d3d->GetAdapterCount();
+            for (UINT i = 0; i < adapters && n < sizeof(g_displays) / sizeof(g_displays[0]); i++) {
+                D3DADAPTER_IDENTIFIER9 id = {};
+                const HMONITOR monitor = d3d->GetAdapterMonitor(i);
+                if (!monitor || FAILED(d3d->GetAdapterIdentifier(i, 0, &id))) continue;
+                Display& d = g_displays[n++];
+                d.guid = id.DeviceIdentifier;
+                lstrcpynA(d.description, id.Description, sizeof(d.description));
+                lstrcpynA(d.name, id.DeviceName, sizeof(d.name));
+                d.monitor = monitor;
+            }
+            d3d->Release();
+            g_displayCount = n;
+            g_displaysFor = monitors;
+            g_displaysMade = true;
+        }
     }
+    // (Copied: another thread may make the list again while the callbacks run.)
+    Display list[sizeof(g_displays) / sizeof(g_displays[0])];
+    const UINT n = g_displayCount;
+    std::copy(g_displays, g_displays + n, list);
     ReleaseSRWLockExclusive(&g_displaysLock);
-    d3d->Release();
     for (UINT i = 0; i < n; i++) {
-        Display& d = g_displays[i];
+        Display& d = list[i];
         DD2D9_LOG("  display %s (%s), monitor %p", d.name, d.description, static_cast<void*>(d.monitor));
         if (!cb(&d.guid, d.description, d.name, ctx, d.monitor)) break;
     }
@@ -208,9 +236,9 @@ void WINAPI DD2D9_ReleaseDDThreadLock() {
     if (g_deferredCount && !LockHeldByMe()) RunDeferred();  // e.g. a DirectDraw object released meanwhile
 }
 
-// Internal exports used by d3dim.dll and display drivers. DD2D9 does not
-// provide Direct3D, so these only exist to keep the export table compatible.
-// Stack sizes match the original XP SP3 ddraw.dll.
+// Internal exports for d3dim.dll and display drivers. dd2d9's Direct3D is its own and nothing
+// else of a real driver stack loads, so nothing calls these: they keep the export table as
+// ddraw.dll's. Stack sizes match the original XP SP3 ddraw.dll.
 HRESULT WINAPI DD2D9_CheckFullscreen() { return 0; }
 HRESULT WINAPI DD2D9_CompleteCreateSysmemSurface(void*) { return DDERR_UNSUPPORTED; }
 HRESULT WINAPI DD2D9_D3DParseUnknownCommand(void*, void**) { return DDERR_UNSUPPORTED; }

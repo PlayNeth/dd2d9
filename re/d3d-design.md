@@ -1,7 +1,7 @@
 # dd2d9 Direct3D: design
 
-Status (0.9.1): Direct3D 7 (`src/d3d7.cpp`) and 3-6 (`src/d3d6*.cpp`, a CPU front end as XP's)
-done on `src/gpures.cpp`; frames presented from the GPU copy (gamma through a pixel shader);
+Status (0.9.1): Direct3D 7 (`src/d3d7*.cpp` today) and 3-6 (`src/d3d6*.cpp`, a CPU front end as
+XP's) done on `src/gpures.h` (`src/gpu*.cpp` today); frames presented from the GPU copy (gamma through a pixel shader);
 render targets used as textures copied on the GPU; D7VK support removed. Cube maps since 1.1.0
 (D3D9 cube textures, see the changelog).
 

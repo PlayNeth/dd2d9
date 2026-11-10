@@ -7,7 +7,8 @@
 #endif
 #include <windows.h>
 #include <ddraw.h>
-// d3d9.h is only included by gpu.cpp, gpures.cpp and presenter.cpp: it conflicts with d3d.h.
+// d3d9.h is only included by the Direct3D 9 side (gpu.cpp, gpuint.h, the presenter, quadpass.h,
+// devstate.h, main.cpp): it conflicts with d3d.h.
 
 #include <cstdint>
 #include <cstring>
@@ -17,7 +18,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.5.0"
+#define DD2D9_VERSION "1.6.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -31,7 +32,7 @@ struct Config {
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
-    // Compatibility (compat.cpp): what the game is told about the machine.
+    // Compatibility (compatsys.cpp): what the game is told about the machine.
     int ramMB = 1024;              // GlobalMemoryStatus(Ex) physical memory; 0: the real values
     int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
@@ -47,8 +48,10 @@ struct Config {
     bool depth24 = false;          // 16-bit Z buffers made 24-bit on the GPU
     bool overlays = true;          // videooverlay=on: overlay surfaces offered (emulated: laid over the primary when shown)
     bool palTextures = true;       // palettizedtextures=off: no 8-bit palettized texture format offered to Direct3D
+    bool heapZero = true;          // heapzero=on: the game's HeapAlloc memory comes zeroed (compat.cpp)
+    bool fairLocks = true;         // fairlocks=on: a released critical section goes to the thread waiting for it (compat.cpp)
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s
-    int overlayBias = 1;           // passes laid on drawn surfaces pulled forward N 16-bit depth steps (gpures.cpp)
+    int overlayBias = 1;           // passes laid on drawn surfaces pulled forward N 16-bit depth steps (gpudraw.cpp)
     int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too
     bool mipmaps = false;          // the GPU makes smaller levels for textures the game gave none
     int anisotropy = 0;            // anisotropic filtering forced on smooth (linear) textures: 2-16; 0/1 off
@@ -63,7 +66,7 @@ bool LoadedBehindWrapper();
 
 // ---------------------------------------------------------------- logging
 void LogInit();
-extern int g_logLevel;  // (util.cpp) read at every log and trace site: inline
+extern int g_logLevel;  // (log.cpp) read at every log and trace site: inline
 inline int LogLevel() { return g_logLevel; }
 void Log(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void LogFlush(bool processExit);
@@ -117,6 +120,22 @@ struct Guard {
     Guard& operator=(const Guard&) = delete;
 };
 
+// g_lock if it is free (owns()), for callers that must never wait for it.
+struct TryGuard {
+    TryGuard() : owns_(TryEnterCriticalSection(&g_lock) != FALSE) {}
+    ~TryGuard() {
+        if (!owns_) return;
+        LeaveCriticalSection(&g_lock);
+        if (g_deferredCount && !LockHeldByMe()) RunDeferred();
+    }
+    bool owns() const { return owns_; }
+    TryGuard(const TryGuard&) = delete;
+    TryGuard& operator=(const TryGuard&) = delete;
+
+private:
+    bool owns_;
+};
+
 // Serializes display-mode and window changes. Taken before g_lock, never while
 // holding it: those changes send messages to the game window's thread, whose
 // window procedure may call DirectDraw (and so take g_lock).
@@ -125,9 +144,12 @@ extern CRITICAL_SECTION g_displayLock;
 // may be in SetWindowPos on a window of this thread, waiting for it (a game with a render
 // thread changing the mode while its window thread calls DirectDraw).
 void EnterDisplayLock();
+// Lets go of it; once it is free, work the game's window procedure couldn't do meanwhile (it
+// never waits for the lock) is posted to the window (ddhook.cpp).
+void LeaveDisplayLock();
 struct DisplayGuard {
     DisplayGuard() { EnterDisplayLock(); }
-    ~DisplayGuard() { LeaveCriticalSection(&g_displayLock); }
+    ~DisplayGuard() { LeaveDisplayLock(); }
     DisplayGuard(const DisplayGuard&) = delete;
     DisplayGuard& operator=(const DisplayGuard&) = delete;
 };
@@ -201,7 +223,8 @@ void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interfac
 // ---------------------------------------------------------------- mouse (input.cpp)
 // The game's user32 imports of the cursor functions point at dd2d9's, which translate
 // between the real screen and the game's display mode while it is shown scaled or in a
-// window. Installed in every module loaded so far (each time exclusive mode starts).
+// window. Installed in every module loaded so far (each time exclusive mode starts), and in
+// those loaded later.
 void InstallMouseHooks();
 // Videos that Windows' player (MCI) draws into the game's window, placed where the image is
 // (video.cpp): installed with the mouse's, in a display mode of dd2d9's own.
@@ -209,22 +232,25 @@ void InstallVideoHooks();
 // Whether such a video draws into `hwnd` now (an MCI device "window ... handle" of it).
 bool VideoOnWindow(HWND hwnd);
 // A top-level window the game made in its mode's coordinates (a popup over its screen), shown
-// scaled over the image (input.cpp): the scale from the game's coordinates to its real ones.
+// scaled over the image (inputpaint.cpp): the scale from the game's coordinates to its real ones.
 bool ScaledPopup(HWND h, double* sx, double* sy);
 
 // ---------------------------------------------------------------- compatibility (compat.cpp)
 // ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
-// sets the affinity too) and again for each new DirectDraw object (DLLs loaded since).
+// sets the affinity too) and again for each new DirectDraw object (DLLs loaded since, where
+// the loader doesn't announce them: see PatchGameModules).
 void InstallCompatHooks(bool inLoaderLock);
-// Whether a DirectDraw object's primary is shown in `hwnd` (ddraw.cpp). Any thread.
+// Whether a DirectDraw object's primary is shown in `hwnd` (ddgdi.cpp). Any thread.
 bool PresentsOnWindow(HWND hwnd);
-// Where the exclusive object's display mode is shown on the real screen (screen
-// coordinates), its size and the window; false after a real mode switch.
-bool ShownImage(RECT* image, SIZE* mode, HWND* window);
+// The game's own GDI drawing into a window a normal-mode object shows its primary in (see
+// compatgdi.cpp's kWindowHooks): `draw` called with that primary's DC, set up as `dc` is
+// (origin, clipping, the state blits use), which then goes out with the primary's frames.
+// False, `draw` not called: `dc` isn't such a window's, or the primary gave no DC. Any thread.
+bool DrawIntoShownPrimary(HDC dc, void (*draw)(HDC, void*), void* ctx);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.
 void LimitFrame();
-// Sleeps until QueryPerformanceCounter reaches `target` (ddraw.cpp).
+// Sleeps until QueryPerformanceCounter reaches `target` (ddtiming.cpp).
 void SleepUntilQpc(int64_t target);
 // The game's view of a point on the real screen and back; false when 1:1.
 bool MouseToGame(POINT* p, bool wait = true);
@@ -236,6 +262,6 @@ bool GameImage(RECT* image, SIZE* mode, HWND* window = nullptr, bool wait = true
 void GameImageChanged();
 // desktopbpp=: the colour depth the game is told the screen has (its mode's, or desktopbpp=).
 int ShownDisplayBpp();
-bool ShownDisplaySize(int* w, int* h);  // a display mode of dd2d9's own (ddraw.cpp)
+bool ShownDisplaySize(int* w, int* h);  // a display mode of dd2d9's own (ddscreen.cpp)
 
 }  // namespace dd2d9

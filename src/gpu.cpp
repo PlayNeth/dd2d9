@@ -1,6 +1,8 @@
 // The Direct3D 9 device of a DirectDraw object (see gpu.h).
 #include "gpu.h"
 
+#include "gpures.h"
+
 #include <d3d9.h>
 #include <dwmapi.h>
 
@@ -178,6 +180,10 @@ Gpu::~Gpu() {
 // can be busy or waiting for one of dd2d9's locks, it could hold up whoever changes the
 // display mode, the game's own thread included (the likely cause of Nerf Arena Blast
 // freezing behind D7VK in 0.7.17, with display=switch).
+// Its class is the process's (registered on the program's module) with user32's
+// DefWindowProcW as its window procedure, nothing of dd2d9's: dd2d9 may be unloaded and
+// loaded again (a launcher, a DirectDrawEnumerate probe), and the class registered by the
+// first load is then the one the next load finds, and uses.
 namespace {
 
 struct WindowThread {
@@ -185,32 +191,24 @@ struct WindowThread {
     HANDLE ready = nullptr;
 };
 
-LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_CLOSE) {
-        DestroyWindow(h);
-        return 0;
-    }
-    if (m == WM_DESTROY) PostQuitMessage(0);
-    return DefWindowProcW(h, m, w, l);
-}
-
 DWORD WINAPI RunWindowThread(void* p) {
     auto* t = static_cast<WindowThread*>(p);
-    static const ATOM cls = [] {
+    static const bool registered = [] {
         WNDCLASSW wc = {};
-        wc.lpfnWndProc = WindowProc;
+        wc.lpfnWndProc = DefWindowProcW;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"DD2D9_Gpu";
-        return RegisterClassW(&wc);
+        return RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     }();
-    HWND h = cls ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DD2D9_Gpu", L"", WS_POPUP, 0, 0, 1, 1,
-                                   nullptr, nullptr, GetModuleHandleW(nullptr), nullptr)
-                 : nullptr;
+    HWND h = registered ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DD2D9_Gpu", L"", WS_POPUP, 0, 0, 1,
+                                          1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr)
+                        : nullptr;
     t->hwnd = h;
     SetEvent(t->ready);  // t isn't touched after this
     if (!h) return 0;
+    // Until the window is gone (WM_CLOSE, which DefWindowProcW answers with DestroyWindow).
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+    while (IsWindow(h) && GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
     return 0;
 }
 
@@ -221,11 +219,10 @@ HWND Gpu::MakeWindow() {
     t.ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!t.ready) return nullptr;
     HANDLE th = CreateThread(nullptr, 0, RunWindowThread, &t, 0, nullptr);
-    if (th) {
-        WaitForSingleObject(t.ready, INFINITE);
-        CloseHandle(th);  // it ends with its window (WM_CLOSE, see Release)
-    }
+    if (th) WaitForSingleObject(t.ready, INFINITE);
     CloseHandle(t.ready);
+    if (th && !t.hwnd) CloseHandle(th);  // (ended already)
+    else windowThread_ = th;  // it ends with its window (see Release)
     return t.hwnd;
 }
 
@@ -270,6 +267,7 @@ IDirect3DDevice9* Gpu::Ensure() {
                       static_cast<unsigned long>((caps.PixelShaderVersion >> 8) & 0xFF),
                       static_cast<unsigned long>(caps.PixelShaderVersion & 0xFF), devW_, devH_);
         }
+        immediateRefused_ = false;  // (a new device may present at once)
         generation_++;
         DeviceStateChanged();
         inScene_ = false;
@@ -313,20 +311,34 @@ HWND Gpu::DeviceWindow() {
     return h;
 }
 
-bool Gpu::PrepareTarget(HWND hwnd, UINT w, UINT h) {
+bool Gpu::PrepareTarget(HWND hwnd, UINT w, UINT h, bool immediate) {
     if (!dev_ || !hwnd || !w || !h) return false;
+    const bool fits = w <= devW_ && h <= devH_;
+    // The device's own swap chain presents at a vblank unless vsync=off or the compositor
+    // paces (PresentInterval): a game flipping without vsync gets a swap chain that doesn't
+    // wait. Otherwise its frames, drawn on the same device, would wait for those presents.
+    const UINT interval = immediate && !immediateRefused_ && PresentInterval() != D3DPRESENT_INTERVAL_IMMEDIATE
+                              ? D3DPRESENT_INTERVAL_IMMEDIATE
+                              : PresentInterval();
+    const bool own = !fits || interval != PresentInterval();
     if (hwnd != targetWnd_ || w != targetW_ || h != targetH_)
         DD2D9_LOG("presenting into window %p, %ux%u%s", static_cast<void*>(hwnd), w, h,
-                  w <= devW_ && h <= devH_ ? "" : " (larger than the device's back buffer: a swap chain of its own)");
+                  fits ? "" : " (larger than the device's back buffer: a swap chain of its own)");
     targetWnd_ = hwnd;
     targetW_ = w;
     targetH_ = h;
-    if (w <= devW_ && h <= devH_) {
+    if (!own) {
         DropSwapChain();
         return true;
     }
-    if (swap_ && swapWnd_ == hwnd && swapW_ == w && swapH_ == h) return true;
+    if (swap_ && swapWnd_ == hwnd && swapW_ == w && swapH_ == h && swapInterval_ == interval) return true;
     DropSwapChain();
+    // A failure isn't tried again every frame, but is after a while: it may have been
+    // passing (video memory another program held), and nothing is presented meanwhile
+    // (or, when the device's own fits, it presents, at a vblank).
+    const bool failedBefore =
+        swapFailWnd_ == hwnd && swapFailW_ == w && swapFailH_ == h && swapFailInterval_ == interval;
+    if (failedBefore && GetTickCount() - swapFailAt_ < 2000) return fits;
     D3DPRESENT_PARAMETERS pp = {};
     pp.Windowed = TRUE;
     pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
@@ -335,16 +347,29 @@ bool Gpu::PrepareTarget(HWND hwnd, UINT w, UINT h) {
     pp.BackBufferHeight = h;
     pp.BackBufferCount = 1;
     pp.hDeviceWindow = hwnd;
-    pp.PresentationInterval = PresentInterval();
+    pp.PresentationInterval = interval;
     const HRESULT hr = dev_->CreateAdditionalSwapChain(&pp, &swap_);
     if (FAILED(hr)) {
-        DD2D9_LOG("CreateAdditionalSwapChain(%ux%u) failed: 0x%08lx", w, h, hr);
+        if (!failedBefore) DD2D9_LOG("CreateAdditionalSwapChain(%ux%u) failed: 0x%08lx", w, h, hr);
         swap_ = nullptr;
-        return false;
+        swapFailAt_ = GetTickCount();
+        swapFailWnd_ = hwnd;
+        swapFailW_ = w;
+        swapFailH_ = h;
+        swapFailInterval_ = interval;
+        // Only made to present at once: the usual interval instead, from now on (DXVK may
+        // refuse a second swap chain on the window).
+        if (interval != PresentInterval()) {
+            immediateRefused_ = true;
+            return PrepareTarget(hwnd, w, h, false);
+        }
+        return fits;
     }
     swapWnd_ = hwnd;
     swapW_ = w;
     swapH_ = h;
+    swapInterval_ = interval;
+    swapFailWnd_ = nullptr;
     return true;
 }
 
@@ -360,13 +385,25 @@ HRESULT Gpu::PresentTarget() {
     // Overlay and capture tools that hook Present may draw with their own vertex format and
     // not put ours back: Draw sets its declaration again after every frame.
     DeviceStateChanged();
-    if (swap_) return swap_->Present(nullptr, nullptr, nullptr, nullptr, 0);
+    drew_ = false;
+    if (swap_) {
+        const HRESULT hr = swap_->Present(nullptr, nullptr, nullptr, nullptr, 0);
+        // A swap chain made only to present at once that can't present (other than a lost
+        // device): the device's own from the next frame on, at vblanks.
+        if (FAILED(hr) && hr != D3DERR_DEVICELOST && hr != D3DERR_DEVICENOTRESET && swapInterval_ != PresentInterval()) {
+            DD2D9_LOG("an immediate swap chain's Present failed (0x%08lx): presenting at vblanks", hr);
+            immediateRefused_ = true;
+            DropSwapChain();
+        }
+        return hr;
+    }
     if (!dev_ || !targetWnd_) return E_FAIL;
     const RECT src = {0, 0, LONG(targetW_), LONG(targetH_)};
     return dev_->Present(&src, nullptr, targetWnd_, nullptr);
 }
 
 void Gpu::OpenScene() {
+    drew_ = true;  // (every draw opens the scene first)
     if (inScene_ || !dev_) return;
     inScene_ = SUCCEEDED(dev_->BeginScene());
 }
@@ -382,7 +419,7 @@ void Gpu::DropSwapChain() {
     if (swap_) swap_->Release();
     swap_ = nullptr;
     swapWnd_ = nullptr;
-    swapW_ = swapH_ = 0;
+    swapW_ = swapH_ = swapInterval_ = 0;
 }
 
 void Gpu::AddOwner(Owner* o) {
@@ -413,6 +450,7 @@ void Gpu::ReleaseResources() {
     const std::vector<Owner*> owners = owners_;
     for (Owner* o : owners) o->ReleaseGpuResources();
     DropSwapChain();
+    swapFailWnd_ = nullptr;  // (the next device may make it)
 }
 
 void Gpu::Release() {
@@ -427,10 +465,99 @@ void Gpu::Release() {
     if (d3d_) d3d_->Release();
     d3d_ = nullptr;
     if (window_) {
-        PostMessageW(window_, WM_CLOSE, 0, 0);  // destroyed by its own thread, which then ends
+        // Destroyed by its own thread, which then ends: waited for, as dd2d9 may be unloaded
+        // next and the thread runs its code. The wait is capped for a release under the loader
+        // lock (a game DLL's static destructor at FreeLibrary): the thread's exit needs that
+        // lock, so there it always takes the 2 s.
+        PostMessageW(window_, WM_CLOSE, 0, 0);
         window_ = nullptr;
+        if (windowThread_ && WaitForSingleObject(windowThread_, 2000) != WAIT_OBJECT_0)
+            DD2D9_LOG("the device window's thread did not end in time");
     }
+    if (windowThread_) CloseHandle(windowThread_);
+    windowThread_ = nullptr;
+    swapFailWnd_ = nullptr;
     failed_ = false;
+}
+
+// What Direct3D 7 reports for its hardware devices (gpures.h), from the adapter.
+GpuCaps GpuGetCaps() {
+    static GpuCaps caps;
+    static LONG done = 0;
+    if (InterlockedCompareExchange(&done, 0, 0) == 2) return caps;
+    static CRITICAL_SECTION* cs = [] {
+        static CRITICAL_SECTION c;
+        InitializeCriticalSection(&c);
+        return &c;
+    }();
+    EnterCriticalSection(cs);
+    if (done != 2) {
+        if (IDirect3D9* d3d = CreateD3D9()) {
+            D3DCAPS9 c = {};
+            if (SUCCEEDED(d3d->GetDeviceCaps(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, &c))) {
+                caps.valid = true;
+                caps.devCaps = c.DevCaps;
+                caps.primMiscCaps = c.PrimitiveMiscCaps;
+                caps.rasterCaps = c.RasterCaps;
+                caps.zCmpCaps = c.ZCmpCaps;
+                caps.srcBlendCaps = c.SrcBlendCaps;
+                caps.destBlendCaps = c.DestBlendCaps;
+                caps.alphaCmpCaps = c.AlphaCmpCaps;
+                caps.shadeCaps = c.ShadeCaps;
+                caps.textureCaps = c.TextureCaps;
+                caps.textureFilterCaps = c.TextureFilterCaps;
+                caps.textureAddressCaps = c.TextureAddressCaps;
+                caps.maxTextureWidth = c.MaxTextureWidth;
+                caps.maxTextureHeight = c.MaxTextureHeight;
+                caps.maxTextureRepeat = c.MaxTextureRepeat;
+                caps.maxTextureAspectRatio = c.MaxTextureAspectRatio;
+                caps.maxAnisotropy = c.MaxAnisotropy;
+                caps.guardBandLeft = c.GuardBandLeft;
+                caps.guardBandTop = c.GuardBandTop;
+                caps.guardBandRight = c.GuardBandRight;
+                caps.guardBandBottom = c.GuardBandBottom;
+                caps.extentsAdjust = c.ExtentsAdjust;
+                caps.maxVertexW = c.MaxVertexW;
+                caps.stencilCaps = c.StencilCaps;
+                caps.fvfCaps = c.FVFCaps;
+                caps.textureOpCaps = c.TextureOpCaps;
+                caps.maxTextureBlendStages = c.MaxTextureBlendStages;
+                caps.maxSimultaneousTextures = c.MaxSimultaneousTextures;
+                caps.maxActiveLights = c.MaxActiveLights;
+                caps.maxUserClipPlanes = c.MaxUserClipPlanes;
+                caps.maxVertexBlendMatrices = c.MaxVertexBlendMatrices;
+                caps.vertexProcessingCaps = c.VertexProcessingCaps;
+                caps.hwTnL = (c.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) != 0;
+            }
+            D3DDISPLAYMODE mode = {};
+            d3d->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode);
+            const D3DFORMAT disp = mode.Format ? mode.Format : D3DFMT_X8R8G8B8;
+            auto depthOk = [&](D3DFORMAT f) {
+                return SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, disp,
+                                                        D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_SURFACE, f));
+            };
+            caps.depth16 = depthOk(D3DFMT_D16);
+            caps.depth24x8 = depthOk(D3DFMT_D24X8);
+            caps.depth24s8 = depthOk(D3DFMT_D24S8);
+            caps.depth32 = depthOk(D3DFMT_D32);
+            const D3DFORMAT dxt[5] = {D3DFMT_DXT1, D3DFMT_DXT2, D3DFMT_DXT3, D3DFMT_DXT4, D3DFMT_DXT5};
+            for (int i = 0; i < 5; i++)
+                caps.dxt[i] = SUCCEEDED(
+                    d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, disp, 0, D3DRTYPE_TEXTURE, dxt[i]));
+            auto texOk = [&](D3DFORMAT f) {
+                return SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, disp, 0, D3DRTYPE_TEXTURE, f));
+            };
+            // Bump maps only where the GPU also does the bump-mapping operations.
+            const bool bumpOps = (caps.textureOpCaps & (D3DTEXOPCAPS_BUMPENVMAP | D3DTEXOPCAPS_BUMPENVMAPLUMINANCE)) != 0;
+            caps.bumpV8U8 = bumpOps && texOk(D3DFMT_V8U8);
+            caps.bumpL6V5U5 = bumpOps && texOk(D3DFMT_L6V5U5);
+            caps.bumpX8L8V8U8 = bumpOps && texOk(D3DFMT_X8L8V8U8);
+            d3d->Release();
+        }
+        InterlockedExchange(&done, 2);
+    }
+    LeaveCriticalSection(cs);
+    return caps;
 }
 
 }  // namespace dd2d9

@@ -3,6 +3,273 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.6.0
+A windowed game's own GDI drawing into its window kept on screen beside dd2d9's frames
+(Swordman's windowed versions no longer flicker after a movie), then fixes across the whole
+code, each checked against XP's behaviour (DXT surfaces copied without loss, Direct3D 7's
+colour key and user clip planes, paint areas in scaled modes that never validated, DLLs
+loaded later patched as they load, a device-reset race in the presenter), workarounds replaced by fixes, faster Direct3D 2
+indexed draws, Direct3D 7 state changes, vertex buffers and converting blits, a `heapzero`
+setting, and the largest source files split. Every d3dimbench hash, every pixel check and the
+audits give what 1.5.1 gave, but where a bullet below says otherwise.
+(Prepared as 1.5.1, never released: all of it is in 1.6.0.)
+
+- **A windowed game's own drawing into its window goes into the primary shown there.**
+  `ddraw.dll`'s windowed primary was the screen itself, where a game's GDI drawing landed too;
+  dd2d9 shows its primary through the window instead, so what the game drew there with GDI was
+  covered by dd2d9's next frame (its refresh four times a second included), and with the
+  desktop compositor the two were shown in turn. Swordman (神魔至尊傳)'s windowed versions draw
+  the game with `StretchDIBits` and play their movies through Bink's DirectDraw primary: after
+  the first movie its last frame, on black, flashed over the game a few times a second. A
+  game's `StretchDIBits`, `SetDIBitsToDevice`, `BitBlt`, `StretchBlt` and `PatBlt` into a
+  window a normal-mode DirectDraw object shows its primary in now draw into that primary, as
+  they would have on the screen (the window's position, its visible area and the game's
+  clipping, the DC's stretch mode, colours and brush), and are shown with its frames. Calls
+  from Windows' modules, DIBs of palette indices and copies from the screen go to the window
+  as before, as do exclusive mode and windows without a primary shown in them. Confirmed in
+  Swordman (`Sm_win2.exe`, Windows 11): the game no longer flickers. `ddtest win` checks it
+  (a fill of the primary, then `StretchDIBits`, `StretchBlt` and `BitBlt` into the window: 1.5.0
+  showed the fill again 33 times in 40).
+- **A critical section the game releases goes to the thread waiting for it**, as on Windows
+  up to XP, where the waiter owned it from that moment; since Vista (and under Wine) it is
+  only woken, and a thread that releases a section and takes it again at once nearly always
+  gets it.
+  KOF 99 Evolution's main thread holds its movie renderer's section through the whole intro
+  and lets go of it once a frame, for the decoder's thread to copy a frame into the surface
+  the game draws: a player's logs show that surface written twice in an 18-second intro
+  with `cpus=0`, and never with `cpus=1`, so the intro was black. Now a
+  thread releasing a section another of the game's threads is waiting for stands aside
+  until the section has been taken (the `fairlocks` setting, on by default; the game's own
+  `EnterCriticalSection` and `LeaveCriticalSection` imports). `ddtest` checks the pattern
+  (100 releases: the waiter gets the section at each; at 0 to 2 with `fairlocks=off`, under
+  Wine 11). A waiter that was killed is dropped, and one that can't run is not waited for
+  again for a quarter second. Confirmed in the game by a player: the intro
+  plays.
+- **Emulated W buffering: a vertex with a huge rhw no longer flattens the frame's depth.**
+  The emulation takes depth from 1/w with a scale that fits the nearest vertex of the frame
+  so far. KOF 99 Evolution draws a blinking warning outline around a life bar that is low,
+  first in the frame, with an rhw of 13131952 (the rest of the game uses 0.005 to 0.02): the
+  scale it set gave every transformed vertex after it the same depth, so in each frame with
+  the outline the fighters and the whole HUD fell behind the stage, and flickered with the
+  outline's blinking until the round ended. A W buffer has a range, and such a vertex is just
+  the nearest in it: an rhw above 65536 now gets depth 0 and leaves the scale alone. Found in
+  a player's trace (the outline's lines are the first draws of those frames); d3d7test draws
+  the case (a near square stays in front of a far one drawn after such a vertex), failing
+  before. Confirmed in the game by a player.
+
+Other fixes:
+- **DXT surfaces are copied block for block between surfaces of one format.** A `Blt`,
+  `BltFast` or texture `Load` (Direct3D 3–7) from a DXT1–5 surface to another of the same
+  format was decoded and encoded again by dd2d9's own encoder, which changed the blocks (a
+  block using only interpolated colours came out different). Whole blocks with no clipper
+  and no effects are now copied as they are, mip chains included; anything else goes through
+  the decoding as before. New ddtest checks (Blt and BltFast): the blocks changed in 1.5.1,
+  they arrive unchanged now.
+- **`SetSurfaceDesc` gives a DXT surface the pitch of its blocks.** It kept the old format's
+  pitch (or took the description's, which for DXT is the linear size): a 16x16 surface
+  pointed at 128 bytes of DXT1 reported a linear size of 1024, and a blit into it wrote past
+  the game's memory. New ddtest check.
+- **A clipper released once too often leaves the surfaces it is set on**, which kept a
+  pointer to the freed clipper. `GetClipper` then gives `DDERR_NOCLIPPERATTACHED` and blits
+  behave as without a clipper, as Wine's `test_clipper_refcount` has Windows do. New ddtest
+  check.
+- **Direct3D 7's colour key drops the key's texels whatever stage 0's alpha ops say.** Only
+  the alpha test was set, on whatever alpha stage 0 gave: with the vertices' alpha in it,
+  keyed texels could be kept, or the whole texture dropped (a vertex alpha of 0). Stage 0's
+  alpha op is now changed where the game's would defeat the key and nothing else reads it
+  (a later stage through `D3DTA_CURRENT`, or a render target with alpha: there it is kept,
+  as in 1.5.1), an untextured pass (`COLOROP` `DISABLE`) gets no key, and a game alpha test
+  that lets alpha 0 through is replaced by the key's. New d3d7test checks (keyed texture,
+  vertex alpha 0: all black in 1.5.1, right now; stage 1 blending by stage 0's vertex alpha
+  with the key on: right in 1.5.1 and now).
+- **Direct3D 7: `ProcessVertices` with `D3DVOP_CLIP` clips against the user clip planes**
+  (only the frustum's six were coded, so a vertex buffer drawn afterwards wasn't cut by
+  them), with fixed-size vertices instead of a heap allocation each. The clip status follows
+  XP's `d3dim700.dll`: not tracked on the T&L HAL device; with `CLIPPING` off transformed
+  vertices still grow the extents; transformed vertices from the game's memory are coded.
+  New d3d7test check (a clip plane through ProcessVertices): the left half drawn in 1.5.1,
+  cut now.
+- **Direct3D 7: a viewport larger than a newer, smaller render target** (Direct3D 7 keeps
+  it, and doesn't check its Z range) reaches Direct3D 9 cut to the target, Z clamped to 0–1,
+  the difference folded into the projection so the vertices land on the same pixels. Native
+  Direct3D 9 refused such a viewport and kept the previous one. New d3d7test check (Wine's
+  Direct3D 9 accepts the viewport, so it passed before there too; it checks the fold). A
+  viewport wholly past the target draws and clears nothing, as on XP.
+- **Direct3D 2's `DrawIndexedPrimitive` transforms only the vertices its indices use**, as
+  XP's `DereferenceIndexedPrim` does with fewer indices than half the vertices: the clip
+  status and extents now come from those vertices only (a row of a sphere reported clip
+  codes of other rows). `IDirect3DDevice3`'s FVF version still transforms every vertex, as
+  XP.
+- **Direct3D 3–6:** `ProcessVertices` without `D3DVOP_CLIP` clears the destination's clip
+  codes (old ones were left there); devices and viewports still alive after their
+  DirectDraw object forget surfaces as they are destroyed (they kept pointers to them).
+- **Out of memory is returned, not thrown through COM** (blits, Direct3D 3–6 and 7):
+  `DDERR_OUTOFMEMORY`/`E_OUTOFMEMORY`, as XP does when its buffers can't grow.
+- **Paint areas are mapped both ways alike in a scaled mode.** `GetUpdateRect`,
+  `GetUpdateRgn` and `BeginPaint` gave the game its mode's coordinates and `InvalidateRect`
+  mapped them back, but `ValidateRect`, `ValidateRgn`, `InvalidateRgn` and `RedrawWindow`
+  were passed on as they were: a game validating the rectangle `GetUpdateRect` gave it
+  validated only that much of the real client area, and got `WM_PAINT` again forever. Paint
+  rectangles are rounded outward both ways, so one mapped to the mode and back covers all it
+  did (rounded down, an inner one at a scale such as 1.5 or 2.25 came back a pixel short),
+  and a strip beside the image is the mode's border pixel. New ddtest checks (`mouse`):
+  0,0-640,480 left to repaint in 1.5.1, nothing now; an odd inner rectangle and a strip
+  beside the image, a row or column left before, nothing now.
+- **A movie popup's black background is its own.** dd2d9 set the black brush on the popup's
+  window class (Road Rash), so every window of that class, the game's main window too when
+  it shares it, was erased black from then on. The popup's own erase is now done black where
+  its window procedure leaves it undone (returns 0 having drawn nothing); the class is left
+  alone. The ddtest check changed with it, and a new one has a popup that paints its own
+  background keep it.
+- **DLLs are patched as Windows loads them.** dd2d9 patched the modules it found when a
+  DirectDraw object was made, from a snapshot: a DLL loaded later wasn't patched until the
+  next one, and one listed while another thread was still loading it could be skipped for
+  good (and its import table written while the loader was writing it). dd2d9 now has the
+  loader tell it of each DLL as it loads (`LdrRegisterDllNotification`, after its imports
+  are bound and before its `DllMain`) and of each unloaded. Under Wine 11 a DLL loaded with
+  `LoadLibrary` after the start, with no DirectDraw object made after it, kept its real
+  `HeapAlloc` in 1.5.1 and is patched now, again after being freed and loaded again;
+  shimtest and reloadtest still pass. Not tried on Windows yet.
+- **Wrappers are left alone by what they export, not only their name**: a module exporting
+  `DirectDrawCreate`, `Direct3DCreate8`/`9`, `D3D11CreateDevice`, `CreateDXGIFactory`,
+  `wglGetProcAddress`, `vkGetInstanceProcAddr`, `DirectInputCreateA`, `DirectInput8Create`,
+  `DirectSoundCreate` or `grGlideInit` (DXVK, dinputto8 or gl2d9 under any name) isn't
+  patched and counts as Windows' for the cursor hooks.
+- **The DirectDraw object:** a second `SetCooperativeLevel` keeps `DDSCL_FPUSETUP`,
+  `DDSCL_FPUPRESERVE` and `DDSCL_MULTITHREADED`, as XP; an object from the class factory
+  initialized through `IDirectDraw7` is a DirectDraw 7 object (it offers `IDirect3D7`; XP
+  goes by the interface `Initialize` is called through); a surface in non-local video memory
+  no longer also reports `DDSCAPS_LOCALVIDMEM` (new ddtest checks for both, each failing in
+  1.5.1); a thread's wait timer is closed after each wait (one leaked per thread that waited,
+  thread exits not reaching dd2d9); the window procedure reads the object it serves under a
+  lock of its own (it raced with the object's teardown); the size last told the game is
+  forgotten for a new window.
+- **A focus or display change that finds the display busy waits for it, never dropped.**
+  The window procedure retried such a change from posted messages with a millisecond's
+  sleep, for up to two seconds (1.4.1); it now records it, and whoever releases the display
+  lock posts one message that does it. `GetScanLine`, `GetVerticalBlankStatus` and
+  `WaitForVerticalBlank` follow the desktop compositor's vblank wherever there is one
+  (Windows with composition on, `vsync=off` too), the clock `Flip` is paced by (1.5.0): one
+  clock instead of two.
+- **The presenter:** after a device reset the presenter thread wrote surface state the
+  game's threads guard with another lock; the loss is now taken over where both are held. A
+  frame the presenter skipped as unchanged (or couldn't show, the device lost) left a `Flip`
+  waiting for it up to 100 ms. More than 64 depth fills before a draw lost the oldest; a
+  fill now replaces only the earlier ones it covers. The device window's class no longer
+  points into dd2d9, and its thread is waited for, so no dd2d9 code runs once the DLL may be
+  unloaded. A swap chain, scaling texture or gamma texture that failed is no longer made
+  again every frame (the swap chain logged every 50 ms): the swap chain is tried again 2 s
+  on, the others with the next device or at another size.
+- **Smaller fixes:** a `GetSystemMetrics` in the game's mode also answers
+  `SM_CXFULLSCREEN`/`SM_CYFULLSCREEN`, `SM_CXMAXIMIZED`/`SM_CYMAXIMIZED` and, with one
+  monitor, the virtual screen in the mode's terms; `LockWindowUpdate`'s skipped and real locks
+  are kept apart (with a real lock held, a skipped one and then the unlock left the real one
+  in place); a `DEVMODE` copied for `desktopbpp` gives its copied size in `dmSize`; a
+  registry key is forgotten before it is closed; `DrawIndexedPrimitiveUP` with an index past
+  the vertices draws nothing instead of a wrong range (both Direct3D front ends already
+  replace such indices).
+
+Behaviour changes to watch:
+- **A Direct3D game flipping without vsync (`DDFLIP_NOVSYNC`) is presented at once where the
+  device waits for vblanks** (under Wine, or Windows without the desktop compositor, `vsync=auto`).
+  `Flip` already returned at once, but dd2d9's presents still waited for a vblank on the
+  device the game draws on, and its Direct3D frames waited with them: wrapbench's Direct3D 7
+  spheres ran at 120 fps under Wine and DXVK, 2491 with `vsync=off`. After 8 flips in a row
+  without vsync of a buffer Direct3D draws into (a 2D game's presents never held it back),
+  and without a `WaitForVerticalBlank`, `GetScanLine` or `GetVerticalBlankStatus` before them
+  (a game that waits for the blank itself and flips with the flag keeps its tear-free
+  presents), the frames are presented through a swap chain that doesn't wait, at most two a
+  refresh (the newest frame shown, not thousands); 8 flips otherwise put the vsync back, and so
+  does a quarter second without flips (a menu or movie blitted to the primary presents at
+  vblanks again). With that, the spheres ran at about 2600 fps under Wine and DXVK. Should that swap chain's `Present` fail, the
+  device's own presents again. The log says when (`vsync: the game flips without vsync
+  (DDFLIP_NOVSYNC): presented at once`). Tearing is what such a game asked for; `vsync=on`
+  still forces it.
+- **`vsync=off` presents at most two frames a refresh.** It presented after every flip,
+  thousands a second for a 2D game that flips as fast as it can, each one converted and
+  uploaded for nothing the display could show, taking that time from the game: wrapbench's 2D
+  tests under Wine and DXVK ran at 1645 fps colour fills and 2081 Lock frames with
+  `vsync=off`, 3922 and 11750 with `auto`; with this change `vsync=off` runs as fast as `auto`
+  (measured under Wine's own Direct3D 9 here). Presents still don't wait for a vblank (uncapped,
+  may tear), as before.
+- **A mode change loses every DirectDraw object's surfaces, as on XP.** A display change
+  made by one object (`SetDisplayMode`, `RestoreDisplayMode`, Alt+Tab out of a switched mode,
+  emulated modes included) now loses the surfaces of the process's other objects too (a
+  DirectShow movie's), and each object notices outside changes on its own. Games written for
+  XP restore them; a report of a movie or second window going black after a mode change
+  would point here.
+- **Direct3D 2–6's colour key now works as Direct3D 7's** (the same shared code): a stage 0
+  with `COLOROP` `DISABLE` gets no key, and a game alpha test that lets alpha 0 through
+  (`ALWAYS`, `GREATEREQUAL` 0) gives way to the key's, so keyed texels are dropped; stage
+  0's alpha op is no longer replaced where a later stage or a render target with alpha reads
+  it. No d3dimbench hash changed, nor Wine's colour key and alpha test results.
+- **`LockWindowUpdate` holds one lock at a time, as Windows**: a real lock of another window
+  while a skipped one holds now fails (it was passed on).
+- **`EnumSurfaces` with `DDENUMSURFACES_CANBECREATED`** describes each surface without
+  allocating it: a mode size whose memory couldn't be allocated is now listed.
+
+New settings:
+- **`heapzero`** (default `on`): the zeroing of the game's `HeapAlloc` memory Daytona USA
+  Deluxe needed (1.3.0) was always on; `heapzero=off` saves the clearing for a game that
+  allocates a lot. It covers the `HeapAlloc` imports of the game's own modules, as before.
+- **`fairlocks`** (default `on`): the critical sections handed to the waiting thread (above);
+  `fairlocks=off` leaves them as Windows has them now.
+
+Optimizations:
+- Direct3D 2's indexed draws (above): the sphere drawn a row at a time through
+  `IDirect3DDevice2` (d3dimbench's new `dip rows (dev2)`), 8–18 ms → 1.7–4 ms a frame in the
+  calls under Wine (noisy runs; about a fifth to a quarter of the time), the same pixels.
+- Direct3D 7's vertex buffers are drawn from a Direct3D 9 vertex buffer: a static mesh is
+  copied to the GPU once, not sent again with every draw, as all of them were (on native
+  Direct3D 9 also its slow path). Each draw compares the vertices it uses with the copy and
+  copies again those that changed, however the game wrote them (through `Lock`, through the
+  pointer an earlier `Lock` gave, as XP allows, or `ProcessVertices`). A buffer rewritten for
+  every draw, and transformed vertices, are sent as before. Not measured: Wine's Direct3D 9
+  doesn't show a GPU's upload cost.
+- Direct3D 7's state calls only store the state, and a draw or clear sends what changed (the
+  Direct3D 9 lock and the device check were taken at every call): 87–127 → 15–29 ns a call
+  under Wine. Direct3D 3–6 sends stage 0's alpha op and arguments once per draw (they went
+  twice with the default stage states and an opaque texture, a new shader key each under
+  DXVK; not measurable under Wine's own Direct3D 9).
+- Stretched and mirrored blits without keys write the source columns straight into the
+  destination row, in a loop of their own (they went through a row of their own and were
+  copied): ddbench's stretches and shrinks 4-22% faster (320x240 to 640x480 at 32 bits 4.3 →
+  5.2 Gpix/s, 640x480 to 400x300 2.3 → 2.8), measured with both builds' code alignment
+  pinned. Keyed blits run the same code as before.
+- Converting blits keep their row converter from one blit to the next (an 8-bit 16x16 sprite
+  onto a 16-bit surface 1.0–1.17 → 0.59–0.66 µs); an overlapping blit copies only its source
+  rectangle aside (a mirrored 64x600 column moved within a 1024x768x32 surface 204–213 →
+  29–30 µs); a FourCC blit decodes into memory the size of what it uses and frees more than
+  16 MB of it after (1170 random FourCC and RGB blits give the same hashes as before).
+- An 8-bit primary Direct3D drew into is matched back to its palette through a small table
+  instead of a hash map: 640x480 5.5 → 0.65 ms, 10.0 → 2.7 ms with a quarter of the colours
+  not in the palette (measured on the host).
+- Writes into render targets between draws upload through up to three surfaces, waiting only
+  when all are busy (not measured: a real GPU's stall doesn't show under Wine).
+  RivaTuner's empty draw call is made only in frames that drew nothing.
+- `DirectDrawEnumerateEx` keeps its display list until the monitors change (it made a
+  Direct3D 9 object at every call, slow under DXVK (not measured), once a movie for
+  DirectShow's Video Mixing Renderer 7). `EnumSurfaces`' `CANBECREATED` allocates nothing
+  (8 MB a mode for 1920x1080x32, back buffers and mip levels not counted). A GDI blit into a
+  window no primary is shown in (every one in exclusive mode) builds no regions. No module
+  snapshot at each `DirectDrawCreate` (the loader notification above).
+
+- **Source:** the largest files are split by subject, the code moved as it was: `ddraw.cpp`
+  (the DirectDraw object: `ddmode`, `ddwindow`, `ddhook`, `ddscreen`, `ddtiming`, `ddcaps`,
+  `ddcreate`, `ddgdi`), `surface.cpp` (`buffer`, `attach`, `lock`, `palette`, `clipper`),
+  `blit.cpp` (`blitcore`, `blitfourcc`; `dxt.cpp` is `fourcc.cpp`), `gpures.cpp` (`gpu*`),
+  `presenter.cpp` (`presentpass`, `presentconv`), `d3d7.cpp` (`d3d7obj`, `d3d7state`,
+  `d3d7sb`, `d3d7draw`, `d3d7pipe`), `d3d6pipe.cpp` and `d3d6dev.cpp` (`d3d6xform`,
+  `d3d6draw`, `d3d6exec`, `d3d6drv`), `util.cpp`, `compat.cpp` and `input.cpp` (`config`,
+  `log`, `format`, `compat*`, `inputpaint`); the classes in `objects.h` have headers of their
+  own. Duplicated code is merged (the full-screen passes in `quadpass.cpp`, the translation
+  Direct3D 3–6 and 7 share in `d3dxlate.cpp`), dead code is gone (the unused Direct3D stubs
+  and their generator among it).
+- **Tests:** ddtest 386 → 414 checks, d3d7test 44 → 53, d3dimbench's `dip rows (dev2)`
+  (the checks named above), all passing under Wine 11; the Wine ddraw sub-tests run for the
+  areas changed (blits, clippers, DXT, colour keys, viewports, lighting, `EnumSurfaces`) give
+  the same failures as with 1.5.1.
+
 ## 1.5.0
 Vsync paced by dd2d9 under Windows' desktop compositor (N.I.C.E. 2 a steady 60 fps), the
 mouse in Unreal engine games in borderless (Windows' DirectInput given the real screen),
@@ -365,11 +632,11 @@ brought back (Pal95).
   the game's mode is shown and the window was last told another size, dd2d9 tells it the
   mode's.
 - **A second DirectDraw object sees the display in the game's mode.** Another object of the
-  process (DirectShow's, playing a movie into the game's surfaces) was told the desktop's
+  process (DirectShow's, made as KOF 99's intro movie starts) was told the desktop's
   1920x1080x32 by `GetDisplayMode` (and made its surfaces in that format) while the game's
-  object had the display in 640x480x16, as a real switch would have shown it: KOF 99's
-  intro movie stayed black. Now the exclusive object's mode is the display's for every
-  object.
+  object had the display in 640x480x16, as a real switch would have shown it. Now the
+  exclusive object's mode is the display's for every object. (This was taken for the reason
+  KOF 99's intro stayed black; that was the game's critical section, fixed in 1.6.0.)
 - **The game's heap memory comes zeroed**, as fresh memory did on Windows 9x. Daytona USA
   Deluxe allocates its texture table with `HeapAlloc` and, before clearing it, releases
   every texture it finds there: today's heap hands back blocks freed with their old

@@ -1,7 +1,8 @@
 // dd2d9's Direct3D 3-6 (d3dim.dll's interfaces), internal declarations shared by d3d6obj.cpp
-// (the Direct3D object, lights, materials, textures, execute and vertex buffers, the
-// hand-off from DirectDraw), d3d6vp.cpp (viewports), d3d6dev.cpp (devices) and d3d6pipe.cpp
-// (the CPU vertex pipeline, Execute and the draws). Matched to XP SP3's d3dim.dll
+// (the Direct3D object, lights, materials, textures, vertex buffers, the hand-off from
+// DirectDraw), d3d6vp.cpp (viewports), d3d6dev.cpp (devices), d3d6drv.cpp (the emulated
+// driver), d3d6exec.cpp (execute buffers), d3d6xform.cpp (the CPU transform and lighting)
+// and d3d6draw.cpp (clipping and the draws). Matched to XP SP3's d3dim.dll
 // 5.1.2600.0; section numbers cite re/spec/: A = d3d6-direct3d.md, B = d3d6-device.md,
 // C = d3d6-objects.md.
 //
@@ -12,8 +13,10 @@
 #pragma once
 #include "d3d6.h"
 #include "d3dcommon.h"
+#include "d3dxlate.h"
 #include "gpu.h"
 
+#include <algorithm>
 #include <bitset>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +32,18 @@ class Material;
 class Texture;
 class ExecBuf;
 class VBuf;
+
+// x taken out of v, where it is.
+template <class T> void Unlink(std::vector<T>& v, const T& x) {
+    auto it = std::find(v.begin(), v.end(), x);
+    if (it != v.end()) v.erase(it);
+}
+
+// Every device and viewport alive, of any Direct3D object, those a teardown cut loose
+// included: a surface being destroyed is forgotten by all of them (D3DLegacySurfaceGone,
+// g_lock).
+inline std::vector<Device*> g_liveDevices;
+inline std::vector<Viewport*> g_liveViewports;
 
 // Not in mingw's dxguid.
 extern const GUID kIID_NullDevice;
@@ -75,6 +90,8 @@ struct SurfaceInfo {
     DWORD texHandle = 0;  // 0 until a GetHandle (one value per surface, as XP's DP2 handles)
 };
 SurfaceInfo* Info(Surface* s);  // created on demand
+// The surface interface version of a pointer the game passed (1 if it is none of s's).
+int VersionOfIface(Surface* s, void* iface);
 
 // Texture handles: one value per surface, the same on every device (XP: the surface's
 // kernel handle). Resolved at draw time; 0 or a dead handle draws untextured.
@@ -368,23 +385,22 @@ public:
     int bgDepthSlot = -1;
     void* bgDepthIface = nullptr;   // the interface pointer the game gave / GetBackgroundDepth returns
     std::vector<Light*> lights;     // in the order added (XP's list walked from the oldest)
-    bool lightsDirty = true;  // (with g_lightGen: what TransformVerts's light cache keys on)
     void Orphan();
 
 private:
-    HRESULT ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>* out) const;
+    void ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>* out) const;
     LONG ref_ = 1;
 };
 Viewport* VpFrom(IUnknown* p);  // any IDirect3DViewport version (one pointer)
 
-// ---------------------------------------------------------------- the CPU pipeline (d3d6pipe.cpp)
-// A vertex through the front end: XP's clip space (0 <= x', y', z' <= w inside, C §1.6),
-// the screen form (for outside vertices of a clipped batch, XP's TL buffer holds the clip
-// coordinates there instead), colours and texture coordinates.
+// ---------------------------------------------------------------- the CPU pipeline (d3d6xform.cpp, d3d6draw.cpp)
 // Counts changes to any light or viewport's light list (g_lock): the CPU pipeline's cached
 // list of active lights (TransformVerts) is made again when it moves.
 inline unsigned g_lightGen = 0;
 
+// A vertex through the front end: XP's clip space (0 <= x', y', z' <= w inside, C §1.6),
+// the screen form (for outside vertices of a clipped batch, XP's TL buffer holds the clip
+// coordinates there instead), colours and texture coordinates.
 struct PVert {
     float cx, cy, cz, cw;     // clip space
     float sx, sy, sz, rhw;    // screen
@@ -400,6 +416,14 @@ struct VpMap {
     D3DMATRIX mclip = kIdentity;             // projected point -> XP's clip space
     float cx = -1, cy = 1, cw = 2, ch = 2, zmin = 0, zmax = 1;
 };
+
+inline void Project(const VpMap& m, PVert* p) {
+    const float rhw = p->cw != 0.0f ? 1.0f / p->cw : 2097152.0f;
+    p->sx = m.X + m.W * p->cx * rhw;
+    p->sy = m.Y + m.H - m.H * p->cy * rhw;
+    p->sz = p->cz * rhw;
+    p->rhw = rhw;
+}
 
 std::unordered_map<DWORD, D3DMATRIX>& Matrices();
 DWORD NewMatrixHandle();
@@ -515,12 +539,12 @@ public:
     void DrvTexture(DWORD stage, Surface* s);
     void PushRS9(DWORD s);                   // to Direct3D 9 (driver values)
     void PushStage9(DWORD stage, DWORD t);
-    void PushAlpha9();                       // alpha test with COLORKEYENABLE's emulation
     void SetTSS9(DWORD stage, DWORD t, DWORD v);  // stages 0-1, ops and arguments (t < 32)
     void SetAlphaRS9(int i, DWORD v);              // ALPHATESTENABLE, ALPHAREF, ALPHAFUNC
     DWORD tssSent[2][32] = {}, tssSentMask[2] = {};
     DWORD alphaSent[3] = {}, alphaSentMask = 0;
-    void PushStageOps9();                    // stage 0/1 ops (legacy texture, MODULATE's alpha)
+    void PushStageOps9();                    // stage 0/1 ops and the alpha test (legacy texture,
+                                             // MODULATE's alpha, COLORKEYENABLE's emulation)
     Surface* StageSurface(DWORD stage) const;
     void BindTextures9();
 
@@ -538,12 +562,14 @@ public:
     void SetViewport9();               // Use held
     void RemoveViewport(Viewport* vp); // DeleteViewport's unlinking
     bool TargetsBusy() const;
+    // deref: Device2's DrawIndexedPrimitive, which transforms only the vertices its indices
+    // use when they are fewer than half (B §8.1).
     HRESULT DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT stride, DWORD n, const WORD* idx,
-                       DWORD ni, DWORD flags, const WORD* vbClip);
+                       DWORD ni, DWORD flags, const WORD* vbClip, bool deref = false);
     HRESULT ExecuteI(ExecBuf* eb, DWORD flags);
     void ForgetSurface(Surface* s);     // a surface it refers to is being destroyed
     void InvalidateTexHandles();        // SetRenderTarget (B §3.5)
-    HRESULT SetRenderTargetI(Surface* s, int sVersion);
+    HRESULT SetRenderTargetI(Surface* s);
     HRESULT GetCapsI(D3DDEVICEDESC* hal, D3DDEVICEDESC* hel);
     HRESULT EnumTexFormats(void* cb, void* ctx, bool v3);
     HRESULT BeginSceneI();
@@ -699,13 +725,14 @@ Device* DevFrom(IDirect3DDevice* p);
 Device* DevFrom(IDirect3DDevice2* p);
 Device* DevFrom(IDirect3DDevice3* p);
 
-// ---- the pipeline (d3d6pipe.cpp)
+// ---- the pipeline (d3d6xform.cpp, d3d6draw.cpp)
 // Transforms (and lights, fogs) untransformed vertices of a Direct3D 6 FVF into PVerts
 // with the device's current transforms and viewport mapping. clip: compute clip codes
 // (and merge them into the clip status); light: as B §2.3 decided. Only vertices lo..hi
 // (an indexed draw's) are lit, fogged and given colours and texture coordinates: the others
 // get their position and clip code only (for the clip status and extents, as XP's
-// transform of all of them made them), or nothing where neither is kept.
+// transform of all of them made them, except where Device2 dereferences: B §8.1), or
+// nothing where neither is kept.
 void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
                     bool extents, PVert* out, DWORD lo = 0, DWORD hi = 0xFFFFFFFF);
 // Draws PVerts (indexed or not): screen coordinates as they are where clip is false or every
@@ -716,10 +743,20 @@ void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WO
 // DrawPVerts draws it, in one draw where that changes nothing (GpuContext::Draw).
 void DrawPVertsBatch(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx,
                      const std::vector<std::pair<DWORD, DWORD>>& parts, bool clip);
+// Sutherland-Hodgman against the planes in `mask` (GbCode's guard-band planes, or with
+// `volume` VolumeDist's); the first vertex stays first when inside. A triangle gains at most
+// one vertex per plane: 9 at most (kMaxPoly).
+constexpr int kMaxPoly = 12;
+int ClipPoly(PVert (&poly)[kMaxPoly], int n, WORD mask, DWORD ntex, bool volume = false);
+// The statistics of a draw (GetStats, B §7).
+void CountPrims(Device* d, D3DPRIMITIVETYPE t, UINT prims, DWORD verts);
 // Direct3D 6 vertex size: texture coordinates are always two floats (no size bits in DX6).
 UINT FvfSize6(DWORD fvf);
 // A viewport's mapping (C §1.6); false (and *m untouched) for degenerate data.
 bool MakeMap(const D3DVIEWPORT2& v, VpMap* m);
+// Extents (minx, miny, maxx, maxy) as XP reports them: rounded, a pixel more on each side,
+// within the viewport (C §1.7, §6.2).
+void ExtentRect(const VpMap& m, const float ext[4], D3DRECT* r);
 // Viewport::Clear's pieces: a clear of rectangles already clipped (D3D9's viewport widened
 // to the render target for it), and the textured background fill (TriFillRectsTex).
 void ClearRects(Device* d, const std::vector<RECT>& rects, DWORD flags, DWORD color, float z, DWORD stencil);

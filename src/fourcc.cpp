@@ -1,7 +1,7 @@
-// DXT1-5 and YUY2/UYVY codecs (see dxt.h). DXT: Layout as Buffer::Create makes it: blocks of 4x4 pixels, a block
-// row of (width rounded up to 4) / 4 blocks, 8 bytes each for DXT1, 16 for DXT2-5; the
-// buffer's pitch is a block row's bytes / 4.
-#include "dxt.h"
+// The FourCC codecs (see fourcc.h): DXT1-5, YUY2/UYVY and YV12/I420. DXT: layout as
+// Buffer::Create makes it: blocks of 4x4 pixels, a block row of (width rounded up to 4) / 4
+// blocks, 8 bytes each for DXT1, 16 for DXT2-5; the buffer's pitch is a block row's bytes / 4.
+#include "fourcc.h"
 
 #include "objects.h"
 
@@ -171,7 +171,7 @@ inline int BlockBytes(DWORD fourCC) { return fourCC == kDxt1 ? 8 : 16; }
 }  // namespace
 
 // Rows y0..y1 (multiples of 4, or y1 the height), the blocks over columns x0..x1.
-static void DecodeDxt(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1, int x0, int x1) {
+static void DecodeDxt(const Buffer* b, const ArgbWindow& o, int y0, int y1, int x0, int x1) {
     const DWORD fc = b->fmt.fourCC;
     const int bs = BlockBytes(fc), bx1 = (x1 + 3) / 4;
     for (int by = y0 / 4; by * 4 < y1; by++) {
@@ -182,12 +182,12 @@ static void DecodeDxt(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1
             DecodeBlock(row + size_t(bx) * bs, fc, px);
             const int cols = std::min(4, b->w - bx * 4);
             for (int y = 0; y < rows; y++)
-                memcpy(argb + size_t(by * 4 + y) * pitch + size_t(bx) * 16, px + y * 4, size_t(cols) * 4);
+                memcpy(o.Row(by * 4 + y) + (bx * 4 - o.left), px + y * 4, size_t(cols) * 4);
         }
     }
 }
 
-static void EncodeDxt(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r) {
+static void EncodeDxt(const ArgbWindow& in, Buffer* b, const RECT& r) {
     const DWORD fc = b->fmt.fourCC;
     const int bs = BlockBytes(fc);
     const int bx0 = std::max<LONG>(r.left, 0) / 4, by0 = std::max<LONG>(r.top, 0) / 4;
@@ -199,10 +199,22 @@ static void EncodeDxt(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r)
             for (int y = 0; y < 4; y++)
                 for (int x = 0; x < 4; x++) {
                     const int xx = std::min(bx * 4 + x, b->w - 1), yy = std::min(by * 4 + y, b->h - 1);
-                    px[y * 4 + x] = reinterpret_cast<const uint32_t*>(argb + size_t(yy) * pitch)[xx];
+                    px[y * 4 + x] = in.Row(yy)[xx - in.left];
                 }
             EncodeBlock(px, fc, row + size_t(bx) * bs);
         }
+    }
+}
+
+void CopyBlocks(Buffer* dst, const RECT& d, const Buffer* src, const RECT& s) {
+    const int bs = BlockBytes(dst->fmt.fourCC);
+    const size_t bytes = size_t((d.right - d.left + 3) / 4) * bs;
+    const LONG rows = (d.bottom - d.top + 3) / 4;
+    const bool up = src == dst && s.top < d.top;
+    for (LONG i = 0; i < rows; i++) {
+        const LONG r = up ? rows - 1 - i : i;
+        memmove(dst->bits + size_t(d.top / 4 + r) * 4 * size_t(dst->pitch) + size_t(d.left / 4) * bs,
+                src->bits + size_t(s.top / 4 + r) * 4 * size_t(src->pitch) + size_t(s.left / 4) * bs, bytes);
     }
 }
 
@@ -258,7 +270,7 @@ inline YuvLayout Layout(DWORD fourCC) {
 
 }  // namespace
 
-static void DecodeYuv(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1, int x0, int x1) {
+static void DecodeYuv(const Buffer* b, const ArgbWindow& o, int y0, int y1, int x0, int x1) {
     const YuvLayout l = Layout(b->fmt.fourCC);
     // A last pixel alone (odd width) whose pair's second half lies past a game's row: grey
     // chroma for it.
@@ -267,7 +279,7 @@ static void DecodeYuv(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1
     const __m128i lowBytes = _mm_set1_epi16(0x00FF);
     for (int y = y0; y < y1; y++) {
         const uint8_t* row = b->bits + size_t(y) * b->pitch;
-        uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
+        uint32_t* out = o.Row(y);  // (pixel x at out[x - o.left])
         // Eight pixels (four pairs, 16 bytes) at a time: Y in the even bytes (YUY2) or odd
         // (UYVY), the chroma pairs in the others, each pair's U and V spread over its pixels.
         int x = x0 & ~1;  // (whole pairs)
@@ -277,21 +289,21 @@ static void DecodeYuv(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1
             const __m128i uv = uyvy ? _mm_and_si128(v, lowBytes) : _mm_srli_epi16(v, 8);  // U0 V0 U1 V1 ...
             const __m128i us = _mm_shufflehi_epi16(_mm_shufflelo_epi16(uv, _MM_SHUFFLE(2, 2, 0, 0)), _MM_SHUFFLE(2, 2, 0, 0));
             const __m128i vs = _mm_shufflehi_epi16(_mm_shufflelo_epi16(uv, _MM_SHUFFLE(3, 3, 1, 1)), _MM_SHUFFLE(3, 3, 1, 1));
-            YuvToArgb8(ys, us, vs, reinterpret_cast<uint8_t*>(out + x));
+            YuvToArgb8(ys, us, vs, reinterpret_cast<uint8_t*>(out + (x - o.left)));
         }
         for (; x < x1; x += 2) {
             const uint8_t* p = row + size_t(x) * 2;
             if (x + 1 >= b->w && lastAlone) {
-                out[x] = YuvToArgb(p[l.y0], 128, 128);  // (its Y lies in the first two bytes either way)
+                out[x - o.left] = YuvToArgb(p[l.y0], 128, 128);  // (its Y lies in the first two bytes either way)
                 continue;
             }
-            out[x] = YuvToArgb(p[l.y0], p[l.u], p[l.v]);
-            if (x + 1 < b->w) out[x + 1] = YuvToArgb(p[l.y1], p[l.u], p[l.v]);
+            out[x - o.left] = YuvToArgb(p[l.y0], p[l.u], p[l.v]);
+            if (x + 1 < b->w) out[x + 1 - o.left] = YuvToArgb(p[l.y1], p[l.u], p[l.v]);
         }
     }
 }
 
-static void EncodeYuv(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r) {
+static void EncodeYuv(const ArgbWindow& src, Buffer* b, const RECT& r) {
     const YuvLayout l = Layout(b->fmt.fourCC);
     const bool lastAlone = (b->w & 1) && b->pitch < LONG(b->w + 1) * 2;
     const int x0 = std::max<LONG>(r.left, 0) & ~1, x1 = std::min<LONG>(r.right, b->w);
@@ -303,12 +315,12 @@ static void EncodeYuv(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r)
         *v = ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
     };
     for (int y = y0; y < y1; y++) {
-        const uint32_t* in = reinterpret_cast<const uint32_t*>(argb + size_t(y) * pitch);
+        const uint32_t* in = src.Row(y);
         uint8_t* row = b->bits + size_t(y) * b->pitch;
         for (int x = x0; x < x1; x += 2) {
             uint8_t* p = row + size_t(x) * 2;
             int ya, ua, va, yb, ub, vb;
-            luma(in[x], &ya, &ua, &va);
+            luma(in[x - src.left], &ya, &ua, &va);
             if (x + 1 >= b->w) {
                 if (lastAlone) {
                     p[l.y0] = Clamp8(ya);
@@ -316,7 +328,7 @@ static void EncodeYuv(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r)
                 }
                 yb = ya, ub = ua, vb = va;
             } else {
-                luma(in[x + 1], &yb, &ub, &vb);
+                luma(in[x + 1 - src.left], &yb, &ub, &vb);
             }
             p[l.y0] = Clamp8(ya);
             p[l.y1] = Clamp8(yb);
@@ -344,13 +356,13 @@ static Planes PlanesOf(const Buffer* b) {
     return p;
 }
 
-static void DecodePlanar(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1, int x0, int x1) {
+static void DecodePlanar(const Buffer* b, const ArgbWindow& o, int y0, int y1, int x0, int x1) {
     const Planes p = PlanesOf(b);
     for (int y = y0; y < y1; y++) {
         const uint8_t* yr = p.y + size_t(y) * b->pitch;
         const uint8_t* ur = p.u + size_t(y / 2) * p.cp;
         const uint8_t* vr = p.v + size_t(y / 2) * p.cp;
-        uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
+        uint32_t* out = o.Row(y);  // (pixel x at out[x - o.left])
         // Eight pixels (four chroma samples, each over two of them) at a time.
         int x = x0 & ~1;  // (even: a chroma sample's first pixel)
         const __m128i zero = _mm_setzero_si128();
@@ -360,19 +372,19 @@ static void DecodePlanar(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int
             memcpy(&u4, ur + x / 2, 4);
             memcpy(&v4, vr + x / 2, 4);
             const __m128i u = _mm_unpacklo_epi8(_mm_cvtsi32_si128(int(u4)), zero), v = _mm_unpacklo_epi8(_mm_cvtsi32_si128(int(v4)), zero);
-            YuvToArgb8(ys, _mm_unpacklo_epi16(u, u), _mm_unpacklo_epi16(v, v), reinterpret_cast<uint8_t*>(out + x));
+            YuvToArgb8(ys, _mm_unpacklo_epi16(u, u), _mm_unpacklo_epi16(v, v), reinterpret_cast<uint8_t*>(out + (x - o.left)));
         }
-        for (; x < x1; x++) out[x] = YuvToArgb(yr[x], ur[x / 2], vr[x / 2]);
+        for (; x < x1; x++) out[x - o.left] = YuvToArgb(yr[x], ur[x / 2], vr[x / 2]);
     }
 }
 
 // The 2x2 blocks `r` touches: luma per pixel, chroma the block's average (its pixels inside
 // the surface).
-static void EncodePlanar(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r) {
+static void EncodePlanar(const ArgbWindow& in, Buffer* b, const RECT& r) {
     const Planes p = PlanesOf(b);
     const int x0 = std::max<LONG>(r.left, 0) & ~1, x1 = std::min<LONG>(r.right, b->w);
     const int y0 = std::max<LONG>(r.top, 0) & ~1, y1 = std::min<LONG>(r.bottom, b->h);
-    auto px = [&](int x, int y) { return reinterpret_cast<const uint32_t*>(argb + size_t(y) * pitch)[x]; };
+    auto px = [&](int x, int y) { return in.Row(y)[x - in.left]; };
     for (int y = y0; y < y1; y += 2) {
         for (int x = x0; x < x1; x += 2) {
             int us = 0, vs = 0, n = 0;
@@ -428,7 +440,7 @@ static void KeyYuv(DWORD fourCC, DWORD key, int* y, int* u, int* v) {
     }
 }
 
-void MarkYuvKey(const Buffer* b, uint8_t* argb, LONG pitch, DWORD lo, DWORD hi, int y0, int y1, int x0, int x1) {
+void MarkYuvKey(const Buffer* b, const ArgbWindow& o, DWORD lo, DWORD hi, int y0, int y1, int x0, int x1) {
     int ly, lu, lv, hy, hu, hv;
     KeyYuv(b->fmt.fourCC, lo, &ly, &lu, &lv);
     KeyYuv(b->fmt.fourCC, hi, &hy, &hu, &hv);
@@ -442,8 +454,8 @@ void MarkYuvKey(const Buffer* b, uint8_t* argb, LONG pitch, DWORD lo, DWORD hi, 
             const uint8_t* yr = p.y + size_t(y) * b->pitch;
             const uint8_t* ur = p.u + size_t(y / 2) * p.cp;
             const uint8_t* vr = p.v + size_t(y / 2) * p.cp;
-            uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
-            for (int x = x0; x < x1; x++) set(out + x, in(yr[x], ur[x / 2], vr[x / 2]));
+            uint32_t* out = o.Row(y);
+            for (int x = x0; x < x1; x++) set(out + (x - o.left), in(yr[x], ur[x / 2], vr[x / 2]));
         }
         return;
     }
@@ -451,31 +463,33 @@ void MarkYuvKey(const Buffer* b, uint8_t* argb, LONG pitch, DWORD lo, DWORD hi, 
     const bool lastAlone = (b->w & 1) && b->pitch < LONG(b->w + 1) * 2;  // (as DecodeYuv: grey chroma)
     for (int y = y0; y < y1; y++) {
         const uint8_t* row = b->bits + size_t(y) * b->pitch;
-        uint32_t* out = reinterpret_cast<uint32_t*>(argb + size_t(y) * pitch);
+        uint32_t* out = o.Row(y);
         for (int x = x0; x < x1; x++) {
             const uint8_t* p = row + size_t(x & ~1) * 2;
             const int yy = (x & 1) ? p[l.y1] : p[l.y0];
             const bool alone = (x | 1) >= b->w && lastAlone;
-            set(out + x, alone ? in(p[l.y0], 128, 128) : in(yy, p[l.u], p[l.v]));
+            set(out + (x - o.left), alone ? in(p[l.y0], 128, 128) : in(yy, p[l.u], p[l.v]));
         }
     }
 }
 
-void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch, int y0, int y1, int x0, int x1) {
+void DecodeFourCC(const Buffer* b, const ArgbWindow& out, int y0, int y1, int x0, int x1) {
     y0 = std::max(y0, 0);
     y1 = std::min(y1, b->h);
     x0 = std::max(x0, 0);
     x1 = std::min(x1, b->w);
     if (x0 >= x1) return;
-    if (b->fmt.Yuv()) DecodeYuv(b, argb, pitch, y0, y1, x0, x1);
-    else if (b->fmt.Planar()) DecodePlanar(b, argb, pitch, y0, y1, x0, x1);
-    else DecodeDxt(b, argb, pitch, y0 & ~3, y1, x0, x1);
+    if (b->fmt.Yuv()) DecodeYuv(b, out, y0, y1, x0, x1);
+    else if (b->fmt.Planar()) DecodePlanar(b, out, y0, y1, x0, x1);
+    else DecodeDxt(b, out, y0 & ~3, y1, x0, x1);
 }
 
-void EncodeFourCC(const uint8_t* argb, LONG pitch, Buffer* b, const RECT& r) {
-    if (b->fmt.Yuv()) EncodeYuv(argb, pitch, b, r);
-    else if (b->fmt.Planar()) EncodePlanar(argb, pitch, b, r);
-    else EncodeDxt(argb, pitch, b, r);
+void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch) { DecodeFourCC(b, ArgbWindow{argb, pitch}, 0, b->h, 0, b->w); }
+
+void EncodeFourCC(const ArgbWindow& in, Buffer* b, const RECT& r) {
+    if (b->fmt.Yuv()) EncodeYuv(in, b, r);
+    else if (b->fmt.Planar()) EncodePlanar(in, b, r);
+    else EncodeDxt(in, b, r);
 }
 
 }  // namespace dd2d9

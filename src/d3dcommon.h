@@ -1,4 +1,4 @@
-// Helpers shared by dd2d9's Direct3D 7 (d3d7.cpp) and Direct3D 3-6 (d3d6*.cpp): vertex
+// Helpers shared by dd2d9's Direct3D 7 (d3d7*.cpp) and Direct3D 3-6 (d3d6*.cpp): vertex
 // formats, primitive counts, matrices, the hardware device's caps from Direct3D 9, and the
 // small vector types of the CPU vertex pipelines. Includes d3d.h (never with d3d9.h).
 #pragma once
@@ -97,13 +97,13 @@ inline D3DDEVICEDESC7 HalDesc(bool tnl) {
     p.dwMiscCaps = c.primMiscCaps & (D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW);
     p.dwRasterCaps = (c.rasterCaps & 0x0037A091) | D3DPRASTERCAPS_SUBPIXEL;  // DITHER ZTEST FOG* LODBIAS FOGRANGE ANISOTROPY WBUFFER WFOG ZFOG
     if (c.rasterCaps & 0x04000000) p.dwRasterCaps |= D3DPRASTERCAPS_ZBIAS;  // D3DPRASTERCAPS_DEPTHBIAS
-    if (g_config.wbuffer) p.dwRasterCaps |= D3DPRASTERCAPS_WBUFFER;  // emulated where D3D9 lacks it (gpures.cpp)
+    if (g_config.wbuffer) p.dwRasterCaps |= D3DPRASTERCAPS_WBUFFER;  // emulated where D3D9 lacks it (gpudraw.cpp)
     p.dwZCmpCaps = c.zCmpCaps & 0xFF;
     p.dwSrcBlendCaps = c.srcBlendCaps & 0x1FFF;
     p.dwDestBlendCaps = c.destBlendCaps & 0x1FFF;
     p.dwAlphaCmpCaps = c.alphaCmpCaps & 0xFF;
     p.dwShadeCaps = c.shadeCaps | 0xC528A;
-    // Cube maps where D3D9 has them (gpures.cpp: EnsureCube).
+    // Cube maps where D3D9 has them (gputex.cpp: EnsureCube).
     p.dwTextureCaps = (c.textureCaps & (0x5E7 | D3DPTEXTURECAPS_CUBEMAP)) | D3DPTEXTURECAPS_TRANSPARENCY;
     if (!g_config.palTextures) p.dwTextureCaps &= ~DWORD(D3DPTEXTURECAPS_ALPHAPALETTE);  // (no palettized textures)
     DWORD f = c.textureFilterCaps & 0x07030700;

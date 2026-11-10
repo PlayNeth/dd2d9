@@ -237,6 +237,13 @@ private:
 };
 
 // ================================================================ DirectDraw
+// The FourCC surfaces dd2d9 makes and blits, as a driver lists them (GetFourCCCodes; GetCaps
+// counts them).
+inline constexpr DWORD kFourCCCodes[] = {MAKEFOURCC('Y', 'U', 'Y', '2'), MAKEFOURCC('U', 'Y', 'V', 'Y'),
+                                         MAKEFOURCC('D', 'X', 'T', '1'), MAKEFOURCC('D', 'X', 'T', '2'),
+                                         MAKEFOURCC('D', 'X', 'T', '3'), MAKEFOURCC('D', 'X', 'T', '4'),
+                                         MAKEFOURCC('D', 'X', 'T', '5'), MAKEFOURCC('Y', 'V', '1', '2')};
+
 template <int V> struct DT;
 template <> struct DT<1> { using I = IDirectDraw;  using SI = IDirectDrawSurface;  using Desc = DDSURFACEDESC;  using ModesCB = LPDDENUMMODESCALLBACK;  using SurfCB = LPDDENUMSURFACESCALLBACK;  using Caps = DDSCAPS;  using DevId = DDDEVICEIDENTIFIER;  static constexpr int SV = 1; };
 template <> struct DT<2> { using I = IDirectDraw2; using SI = IDirectDrawSurface;  using Desc = DDSURFACEDESC;  using ModesCB = LPDDENUMMODESCALLBACK;  using SurfCB = LPDDENUMSURFACESCALLBACK;  using Caps = DDSCAPS;  using DevId = DDDEVICEIDENTIFIER;  static constexpr int SV = 1; };
@@ -291,16 +298,11 @@ public:
     STDMETHOD(GetFourCCCodes)(LPDWORD n, LPDWORD codes) {
         DD2D9_READY();
         if (!n) return DDERR_INVALIDPARAMS;
-        // The FourCC surfaces dd2d9 makes and blits, as a driver lists them. As ddraw.dll:
-        // no array, the count; otherwise at most *n codes, *n set to how many.
-        static const DWORD kCodes[] = {MAKEFOURCC('Y', 'U', 'Y', '2'), MAKEFOURCC('U', 'Y', 'V', 'Y'),
-                                       MAKEFOURCC('D', 'X', 'T', '1'), MAKEFOURCC('D', 'X', 'T', '2'),
-                                       MAKEFOURCC('D', 'X', 'T', '3'), MAKEFOURCC('D', 'X', 'T', '4'),
-                                       MAKEFOURCC('D', 'X', 'T', '5'), MAKEFOURCC('Y', 'V', '1', '2')};
-        const DWORD total = DWORD(sizeof(kCodes) / sizeof(kCodes[0]));
+        // As ddraw.dll: no array, the count; otherwise at most *n codes, *n set to how many.
+        const DWORD total = DWORD(sizeof(kFourCCCodes) / sizeof(kFourCCCodes[0]));
         if (codes) {
             *n = *n < total ? *n : total;
-            for (DWORD i = 0; i < *n; i++) codes[i] = kCodes[i];
+            for (DWORD i = 0; i < *n; i++) codes[i] = kFourCCCodes[i];
         } else {
             *n = total;
         }
@@ -310,7 +312,7 @@ public:
     STDMETHOD(GetMonitorFrequency)(LPDWORD f) { DD2D9_READY(); return d->GetMonitorFrequency(f); }
     STDMETHOD(GetScanLine)(LPDWORD l) { DD2D9_READY(); return d->GetScanLine(l); }
     STDMETHOD(GetVerticalBlankStatus)(WINBOOL* b) { DD2D9_READY(); return d->GetVerticalBlankStatus(b); }
-    STDMETHOD(Initialize)(GUID* g) { return d->Initialize(g); }
+    STDMETHOD(Initialize)(GUID* g) { return d->Initialize(g, V); }
     STDMETHOD(RestoreDisplayMode)() { DD2D9_READY(); return d->RestoreDisplayMode(); }
     STDMETHOD(SetCooperativeLevel)(HWND h, DWORD f) { DD2D9_READY(); return TraceFail("SetCooperativeLevel", d, d->SetCooperativeLevel(h, f, V)); }
     STDMETHOD(SetDisplayMode)(DWORD w, DWORD h, DWORD bpp) { DD2D9_READY(); return TraceFail("SetDisplayMode", d, d->SetDisplayMode(w, h, bpp, 0, 0)); }

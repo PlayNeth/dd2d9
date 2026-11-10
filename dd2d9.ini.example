@@ -28,9 +28,11 @@ filter=sharp
 
 ; Vertical sync:
 ;   auto - the game decides: Flip() waits for vblank unless the game passes DDFLIP_NOVSYNC,
-;          as DirectDraw does (default)
+;          as DirectDraw does (default); a Direct3D game that keeps flipping without vsync is
+;          presented without waiting too (may tear, as it asked)
 ;   on   - every Flip() waits for vblank
-;   off  - never wait (uncapped, may tear)
+;   off  - never wait (uncapped, may tear; still at most two presents a refresh: more
+;          wouldn't be shown, and their work would slow the game)
 ; On Windows with the desktop compositor (Windows 8 and later; 7 with Aero), dd2d9 waits
 ; itself, one frame per refresh, rather than Direct3D 9 (smoother; less CPU on some
 ; drivers). Under Wine, or without the compositor, Direct3D 9's vsync waits.
@@ -67,6 +69,17 @@ cpu=2000
 ; One logical processor per physical core is taken, the first core last (it handles most of
 ; the system's interrupts). dd2d9's own presenting thread shares them. 0: all.
 cpus=1
+; The game's heap memory (HeapAlloc) comes zeroed: on (default), as fresh memory often was on
+; Windows 9x, where games were tested; today's heap hands back blocks other code freed, with
+; their old contents (Daytona USA Deluxe crashed on them as its 3D device came up). off: as
+; Windows gives it, for a game that allocates a lot and needs none of this.
+heapzero=on
+; A critical section the game releases goes to the thread waiting for it: on (default), as on
+; Windows up to XP. Since Vista the waiter is only woken, and a thread that releases a section
+; and takes it again at once nearly always gets it (KOF 99 Evolution's intro stayed black:
+; its decoder hardly ever got the section its main thread lets go of once a frame). off: as
+; Windows has it now.
+fairlocks=on
 ; The desktop's colour depth DirectDraw reports before the game sets its own mode: 32
 ; (default), 24 or 16. Some games refuse to start unless the desktop is 16-bit, even ones
 ; that then switch to their own mode (Moto Racer: "16 bit screen mode required"): set 16 for

@@ -214,6 +214,57 @@ static int RunUnit() {
     }
 
     {
+        // A released critical section goes to the thread waiting for it, as up to Windows XP
+        // (KOF 99 Evolution's intro: its main thread holds the movie's section and lets go of
+        // it for an instant each frame, for the decoder's thread to hand a frame over; since
+        // Vista, and under Wine, the releasing thread takes it straight back).
+        struct Movie {
+            CRITICAL_SECTION cs;
+            volatile LONG frames, stop;
+            static DWORD WINAPI Decoder(void* p) {
+                Movie& m = *static_cast<Movie*>(p);
+                while (!m.stop) {
+                    EnterCriticalSection(&m.cs);
+                    m.frames++;
+                    LeaveCriticalSection(&m.cs);
+                    Sleep(1);
+                }
+                return 0;
+            }
+        };
+        static Movie movie;
+        InitializeCriticalSection(&movie.cs);
+        EnterCriticalSection(&movie.cs);
+        HANDLE decoder = CreateThread(nullptr, 0, Movie::Decoder, &movie, 0, nullptr);
+        Sleep(20);  // (the decoder is waiting)
+        const int kFrames = 100;
+        for (int i = 0; i < kFrames; i++) {
+            LeaveCriticalSection(&movie.cs);
+            EnterCriticalSection(&movie.cs);
+            Sleep(3);
+        }
+        // Nested: only the last Leave releases. One that doesn't returns at once (waiting
+        // for the hand-over, it would take the 4 ms and more until that is given up).
+        const LONG before = movie.frames;
+        EnterCriticalSection(&movie.cs);
+        Sleep(5);  // (the decoder is waiting again)
+        LARGE_INTEGER freq, t0, t1;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&t0);
+        LeaveCriticalSection(&movie.cs);
+        QueryPerformanceCounter(&t1);
+        const double nestedMs = double(t1.QuadPart - t0.QuadPart) * 1000 / double(freq.QuadPart);
+        const LONG nested = movie.frames;
+        movie.stop = 1;
+        LeaveCriticalSection(&movie.cs);
+        const bool ended = decoder && WaitForSingleObject(decoder, 2000) == WAIT_OBJECT_0;
+        if (decoder) CloseHandle(decoder);
+        CHECK(before >= kFrames * 9 / 10, "critical section: the waiting thread got it at %ld of %d releases", before, kFrames);
+        CHECK(nested == before && nestedMs < 3 && ended, "critical section: a nested Leave hands nothing over (%ld, %ld) and doesn't wait (%.2f ms); the waiter ends", before, nested, nestedMs);
+        if (ended) DeleteCriticalSection(&movie.cs);
+    }
+
+    {
         // A DirectDrawCreateEx object offers dd2d9's Direct3D 7: 3D is reported.
         DDCAPS caps = {};
         caps.dwSize = sizeof(caps);
@@ -241,6 +292,46 @@ static int RunUnit() {
             if (d7) d7->Release();
             dd1->Release();
         }
+        // The class factory's object is a DirectDraw 7 one when initialized through
+        // IDirectDraw7, whatever interface it was made with (as ddraw.dll's Initialize).
+        using GetClassFn = HRESULT(WINAPI*)(REFCLSID, REFIID, void**);
+        const auto getClass = reinterpret_cast<GetClassFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ddraw.dll"), "DllGetClassObject")));
+        IClassFactory* cf = nullptr;
+        IUnknown* unk = nullptr;
+        hr = getClass ? getClass(CLSID_DirectDraw7, IID_IClassFactory, reinterpret_cast<void**>(&cf)) : E_FAIL;
+        if (SUCCEEDED(hr) && cf) hr = cf->CreateInstance(nullptr, IID_IUnknown, reinterpret_cast<void**>(&unk));
+        CHECK(getClass && cf && unk, "the class factory makes a DirectDraw object (0x%08lx)", hr);
+        if (unk) {
+            IDirectDraw7* co = nullptr;
+            IDirect3D7* d7 = nullptr;
+            hr = unk->QueryInterface(IID_IDirectDraw7, reinterpret_cast<void**>(&co));
+            if (SUCCEEDED(hr)) {
+                co->Initialize(nullptr);
+                hr = co->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d7));
+                co->Release();
+            }
+            CHECK(d7, "class factory object initialized through IDirectDraw7 offers IDirect3D7 (0x%08lx)", hr);
+            if (d7) d7->Release();
+            unk->Release();
+        }
+        if (cf) cf->Release();
+    }
+
+    {
+        // A surface in non-local (AGP) video memory says so, and not local video memory too.
+        DDSURFACEDESC2 d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        d.dwWidth = d.dwHeight = 16;
+        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_NONLOCALVIDMEM;
+        IDirectDrawSurface7* agp = nullptr;
+        hr = dd->CreateSurface(&d, &agp, nullptr);
+        DDSCAPS2 caps = {};
+        if (agp) agp->GetCaps(&caps);
+        CHECK(agp && (caps.dwCaps & DDSCAPS_NONLOCALVIDMEM) && !(caps.dwCaps & DDSCAPS_LOCALVIDMEM),
+              "non-local video memory surface: caps 0x%08lx (0x%08lx)", caps.dwCaps, hr);
+        if (agp) agp->Release();
     }
 
     const DWORD A = 0x00112233, B = 0x00445566, C = 0x00778899, D = 0x00AABBCC, K = 0x00FF00FF;
@@ -316,6 +407,21 @@ static int RunUnit() {
     Expect32(s, e5b, 4, "Blt clipped to the clip list");
     s->SetClipper(nullptr);
     clip->Release();
+    // A clipper released once too often (Wine's test_clipper_refcount): it leaves the surface
+    // as it goes, which then blits as one without a clipper.
+    {
+        IDirectDrawClipper* gone = nullptr;
+        dd->CreateClipper(0, &gone, nullptr);
+        gone->SetClipList(reinterpret_cast<RGNDATA*>(&rgn), 0);
+        s->SetClipper(gone);
+        gone->Release();
+        gone->Release();
+        IDirectDrawClipper* left = nullptr;
+        const HRESULT hg = s->GetClipper(&left);
+        hr = s->Blt(&dr, src, nullptr, 0, nullptr);
+        CHECK(hg == DDERR_NOCLIPPERATTACHED && !left && hr == DDERR_INVALIDRECT,
+              "a clipper released too often leaves its surface (0x%08lx 0x%08lx)", hg, hr);
+    }
 
     // BltFast never clips, and requires the color key it is asked to use
     hr = s->BltFast(2, 0, src, nullptr, DDBLTFAST_NOCOLORKEY);
@@ -557,6 +663,83 @@ static int RunUnit() {
             yuy->Release();
         } else {
             CHECK(false, "YUY2 surface -> 0x%08lx", hr);
+        }
+        // DXT to DXT of one format: the blocks copied as they are, Blt and BltFast. These
+        // blocks use only the colours between their endpoints (as a good encoder's do), which
+        // decoding and encoding again would change.
+        {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY;
+            d.dwWidth = 8;
+            d.dwHeight = 8;
+            d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            d.ddpfPixelFormat.dwFlags = DDPF_FOURCC;
+            d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('D', 'X', 'T', '1');
+            IDirectDrawSurface7 *a = nullptr, *b = nullptr;
+            dd->CreateSurface(&d, &a, nullptr);
+            dd->CreateSurface(&d, &b, nullptr);
+            CHECK(a && b, "DXT1 surfaces");
+            if (a && b) {
+                static const BYTE kBlocks[4][8] = {{0x00, 0xF8, 0x1F, 0x00, 0xAA, 0xFF, 0xAA, 0xFF},
+                                                   {0xE0, 0x07, 0x00, 0xF8, 0xFA, 0xAF, 0xFA, 0xAF},
+                                                   {0x1F, 0x00, 0xE0, 0x07, 0xEE, 0xBB, 0xEE, 0xBB},
+                                                   {0xFF, 0xFF, 0x00, 0x00, 0xAF, 0xFA, 0xAF, 0xFA}};
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                a->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+                memcpy(l.lpSurface, kBlocks, sizeof(kBlocks));
+                a->Unlock(nullptr);
+                auto blocksOf = [&](IDirectDrawSurface7* s, BYTE (*out)[8]) {
+                    DDSURFACEDESC2 k = {};
+                    k.dwSize = sizeof(k);
+                    s->Lock(nullptr, &k, DDLOCK_WAIT | DDLOCK_READONLY, nullptr);
+                    memcpy(out, k.lpSurface, 32);
+                    s->Unlock(nullptr);
+                };
+                BYTE got[4][8];
+                hr = b->Blt(nullptr, a, nullptr, DDBLT_WAIT, nullptr);
+                blocksOf(b, got);
+                CHECK(SUCCEEDED(hr) && !memcmp(got, kBlocks, sizeof(kBlocks)), "DXT1 Blt copies the blocks (0x%08lx)", hr);
+                RECT second = {4, 0, 8, 8};
+                hr = b->BltFast(0, 0, a, &second, DDBLTFAST_WAIT);
+                blocksOf(b, got);
+                CHECK(SUCCEEDED(hr) && !memcmp(got[0], kBlocks[1], 8) && !memcmp(got[2], kBlocks[3], 8),
+                      "DXT1 BltFast copies the blocks (0x%08lx)", hr);
+            }
+            if (a) a->Release();
+            if (b) b->Release();
+            // A system-memory surface made with an RGB format pointed at DXT1 memory
+            // (SetSurfaceDesc): the blocks laid out for its own width, not the old pitch.
+            IDirectDrawSurface7* rgbSurf = MakeSurface(dd, 16, 16, 32, 0xFF0000, 0xFF00, 0xFF);
+            if (rgbSurf) {
+                static BYTE mem[128 + 64];
+                memset(mem, 0xCD, sizeof(mem));
+                DDSURFACEDESC2 sd = {};
+                sd.dwSize = sizeof(sd);
+                sd.dwFlags = DDSD_LPSURFACE | DDSD_PIXELFORMAT;
+                sd.lpSurface = mem;
+                sd.ddpfPixelFormat = d.ddpfPixelFormat;
+                hr = rgbSurf->SetSurfaceDesc(&sd, 0);
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                rgbSurf->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+                rgbSurf->Unlock(nullptr);
+                IDirectDrawSurface7* fillSrc = Make32(dd, 16, 16);
+                DDBLTFX bfx = {};
+                bfx.dwSize = sizeof(bfx);
+                bfx.dwFillColor = 0x00FF00;
+                fillSrc->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL, &bfx);
+                const HRESULT hb = rgbSurf->Blt(nullptr, fillSrc, nullptr, DDBLT_WAIT, nullptr);
+                bool guard = true;
+                for (int i = 128; i < int(sizeof(mem)); i++) guard &= mem[i] == 0xCD;
+                CHECK(SUCCEEDED(hr) && (l.dwFlags & DDSD_LINEARSIZE) && l.dwLinearSize == 128 && SUCCEEDED(hb) && guard,
+                      "SetSurfaceDesc to DXT1: linear size %lu, Blt into it stays inside (0x%08lx 0x%08lx)", l.dwLinearSize,
+                      hr, hb);
+                fillSrc->Release();
+                rgbSurf->Release();
+            }
         }
         // Planar YV12 / I420 (4:2:0): a luma plane, then the chroma planes at half the pitch.
         {
@@ -1267,6 +1450,65 @@ static int RunWindowed() {
         clip2->Release();
         prim2->Release();
         dd2->Release();
+    }
+    {
+        // The program's own GDI drawing into the window its normal-mode primary is shown in
+        // stays: drawn into that primary, not covered by its older picture at the next refresh
+        // (Swordman's windowed versions: StretchDIBits after a Bink movie in the primary).
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
+        DDBLTFX fx = {};
+        fx.dwSize = sizeof(fx);
+        fx.dwFillColor = 0x400000;  // the "movie"
+        prim->Blt(&cr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+        for (int i = 0; i < 12; i++) {
+            Pump();
+            Sleep(25);
+        }
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = 2;
+        bi.bmiHeader.biHeight = -2;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        const DWORD green[4] = {0xFF00, 0xFF00, 0xFF00, 0xFF00};
+        void* bits = nullptr;
+        HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HDC mem = CreateCompatibleDC(nullptr);
+        HGDIOBJ old = SelectObject(mem, bm);
+        for (int y = 0; y < 2; y++)
+            for (int x = 0; x < 2; x++) static_cast<DWORD*>(bits)[y * 2 + x] = 0xFF00FF;  // magenta
+        const int w = cr.right - cr.left, h = cr.bottom - cr.top;
+        const char* how[2] = {"StretchDIBits", "BitBlt"};
+        for (int k = 0; k < 2; k++) {
+            HDC wdc = GetDC(hwnd);
+            BOOL drawn;
+            if (k == 0) drawn = StretchDIBits(wdc, 0, 0, w, h, 0, 0, 2, 2, green, &bi, DIB_RGB_COLORS, SRCCOPY) == 2;
+            else drawn = StretchBlt(wdc, 0, 0, w / 2, h, mem, 0, 0, 2, 2, SRCCOPY) && BitBlt(wdc, w / 2, 0, 2, 2, mem, 0, 0, SRCCOPY);
+            ReleaseDC(hwnd, wdc);
+            const COLORREF want = k == 0 ? 0x00FF00 : 0xFF00FF;
+            int ok = 0, other = 0;
+            COLORREF seen = 0;
+            for (int i = 0; i < 40; i++) {  // a second: four refreshes
+                Pump();
+                Sleep(25);
+                HDC sdc = GetDC(nullptr);
+                const COLORREF c = GetPixel(sdc, cr.left + w / 4, cr.top + h / 2) & 0xFFFFFF;
+                ReleaseDC(nullptr, sdc);
+                if (c == want) ok++;
+                else {
+                    other++;
+                    seen = c;
+                }
+            }
+            CHECK(drawn && ok == 40, "the program's %s into its window stays over the primary (%d of 40, other 0x%06lx)",
+                  how[k], ok, seen);
+        }
+        SelectObject(mem, old);
+        DeleteDC(mem);
+        DeleteObject(bm);
     }
     img->Release();
     clip->Release();
@@ -2055,6 +2297,18 @@ static bool WriteTinyAvi(const char* path) {
     return ok;
 }
 
+// A popup's procedure that paints its background (blue) and returns 0, as many do.
+static LRESULT CALLBACK OwnErasePopupProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        RECT rc = {0, 0, 4, 4};
+        HBRUSH blue = CreateSolidBrush(RGB(0, 0, 255));
+        FillRect(reinterpret_cast<HDC>(wp), &rc, blue);
+        DeleteObject(blue);
+        return 0;
+    }
+    return DefWindowProcA(h, msg, wp, lp);
+}
+
 static int RunMouse() {
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);  // the real screen, before
     HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
@@ -2075,7 +2329,7 @@ static int RunMouse() {
     CHECK(g_lastSize == MAKELPARAM(640, 480), "WM_SIZE: the window told the mode's size (%dx%d)", LOWORD(g_lastSize),
           HIWORD(g_lastSize));
     {
-        // A second DirectDraw object of the process (DirectShow's, for KOF 99's intro): the
+        // A second DirectDraw object of the process (DirectShow's, as KOF 99's intro starts): the
         // display is in the game's mode, as after a real switch.
         IDirectDraw7* other = nullptr;
         if (SUCCEEDED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&other), IID_IDirectDraw7, nullptr)) && other) {
@@ -2178,6 +2432,37 @@ static int RunMouse() {
                   labs(g_lastPaint.bottom - 150) <= 1,
               "WM_PAINT: an invalidated part comes back as given (%ld,%ld-%ld,%ld)", g_lastPaint.left, g_lastPaint.top,
               g_lastPaint.right, g_lastPaint.bottom);
+        // Validating the rectangle GetUpdateRect gave validates all there was, the parts
+        // around the image too (else WM_PAINT comes again forever).
+        InvalidateRect(hwnd, nullptr, FALSE);
+        RECT upd = {}, left = {};
+        GetUpdateRect(hwnd, &upd, FALSE);
+        ValidateRect(hwnd, &upd);
+        const BOOL still = GetUpdateRect(hwnd, &left, FALSE);
+        CHECK(!still, "ValidateRect of the update rectangle (%ld,%ld-%ld,%ld) leaves nothing to repaint (left %ld,%ld-%ld,%ld)",
+              upd.left, upd.top, upd.right, upd.bottom, left.left, left.top, left.right, left.bottom);
+        // The same for a part of the window that isn't on the image's border, at odd real
+        // coordinates the scale doesn't divide (Windows invalidated it: a dialog over it), and
+        // for a strip beside the image where there is one. Rounded down both ways, the mode's
+        // rectangle mapped back a pixel short and that pixel stayed to repaint.
+        using InvalidateFn = BOOL(WINAPI*)(HWND, const RECT*, BOOL);
+        const auto realInvalidate = reinterpret_cast<InvalidateFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "InvalidateRect")));
+        const double scale = std::min(double(sw) / 640, double(sh) / 480);
+        const long ix = long((sw - 640 * scale) / 2), iy = long((sh - 480 * scale) / 2);
+        RECT parts[2] = {{ix + 141, iy + 77, ix + 244, iy + 151}, {0, iy + 77, ix / 2, iy + 151}};
+        for (int i = 0; i < (ix >= 2 ? 2 : 1); i++) {
+            realInvalidate(hwnd, &parts[i], FALSE);
+            upd = left = RECT{};
+            GetUpdateRect(hwnd, &upd, FALSE);
+            ValidateRect(hwnd, &upd);
+            const BOOL rest = GetUpdateRect(hwnd, &left, FALSE);
+            CHECK(!rest && !IsRectEmpty(&upd),
+                  "ValidateRect of the update rectangle of real %ld,%ld-%ld,%ld (%ld,%ld-%ld,%ld) leaves nothing to repaint "
+                  "(left %ld,%ld-%ld,%ld)",
+                  parts[i].left, parts[i].top, parts[i].right, parts[i].bottom, upd.left, upd.top, upd.right, upd.bottom,
+                  left.left, left.top, left.right, left.bottom);
+        }
     }
     if (WriteTinyAvi("dd2d9test.avi")) {
         // A video Windows' player draws into the window (Street Fighter Zero's movies): the
@@ -2288,8 +2573,43 @@ static int RunMouse() {
             HWND popup = CreateWindowExA(WS_EX_TOPMOST, "dd2d9popup", "AVI Window", WS_POPUP, 0, 0, 640, 480, nullptr,
                                          nullptr, GetModuleHandleA(nullptr), nullptr);
             if (popup) {
-                CHECK(ULONG_PTR(GetClassLongPtrA(popup, GCLP_HBRBACKGROUND)) == reinterpret_cast<ULONG_PTR>(GetStockObject(BLACK_BRUSH)),
-                      "the popup is black where nothing paints it (the menu showed around Road Rash's race intros)");
+                // (Its background erased black, the class left as it is: the game's other windows
+                // may share it.)
+                auto erasedPixel = [](HWND w) {  // a white DC's first pixel after the window's erase
+                    BITMAPINFO bi = {};
+                    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), 4, -4, 1, 32, BI_RGB};
+                    void* bits = nullptr;
+                    HDC mdc = CreateCompatibleDC(nullptr);
+                    HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+                    DWORD erased = 1;
+                    if (bmp && bits) {
+                        HGDIOBJ old = SelectObject(mdc, bmp);
+                        memset(bits, 0xFF, 4 * 4 * 4);
+                        SendMessageA(w, WM_ERASEBKGND, reinterpret_cast<WPARAM>(mdc), 0);
+                        GdiFlush();
+                        erased = *static_cast<DWORD*>(bits) & 0xFFFFFF;
+                        SelectObject(mdc, old);
+                        DeleteObject(bmp);
+                    }
+                    DeleteDC(mdc);
+                    return erased;
+                };
+                const DWORD erased = erasedPixel(popup);
+                CHECK(!GetClassLongPtrA(popup, GCLP_HBRBACKGROUND) && erased == 0,
+                      "the popup is black where nothing paints it (the menu showed around Road Rash's race intros): "
+                      "erased 0x%06lx", erased);
+                // One whose procedure paints its background itself and returns 0 keeps that.
+                WNDCLASSA oc = pc;
+                oc.lpfnWndProc = OwnErasePopupProc;
+                oc.lpszClassName = "dd2d9popup2";
+                RegisterClassA(&oc);
+                if (HWND own = CreateWindowExA(WS_EX_TOPMOST, "dd2d9popup2", "", WS_POPUP, 0, 0, 64, 64, nullptr, nullptr,
+                                               GetModuleHandleA(nullptr), nullptr)) {
+                    const DWORD kept = erasedPixel(own);
+                    CHECK(kept == 0x0000FF, "a popup painting its own background and returning 0 keeps it: 0x%06lx", kept);
+                    DestroyWindow(own);
+                }
+                UnregisterClassA("dd2d9popup2", GetModuleHandleA(nullptr));
                 ShowWindow(popup, SW_SHOW);
                 using RectFn = BOOL(WINAPI*)(HWND, RECT*);
                 const auto realWindowRect = reinterpret_cast<RectFn>(

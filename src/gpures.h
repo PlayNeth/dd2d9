@@ -1,8 +1,9 @@
 // Direct3D's use of the shared Direct3D 9 device (gpu.h): the GPU copies of surfaces and
-// the drawing context of a Direct3D 7 device. The Direct3D 7 side (d3d7.cpp) includes
-// d3d.h, which conflicts with d3d9.h, so this interface uses dd2d9's own types and passes
-// Direct3D 9 enumeration values as plain numbers (d3d7.cpp maps the Direct3D 7 ones).
-// Implemented in gpures.cpp. See re/d3d-design.md.
+// the drawing context of a Direct3D 3-7 device. The Direct3D side (d3d7*.cpp, d3d6*.cpp)
+// includes d3d.h, which conflicts with d3d9.h, so this interface uses dd2d9's own types and
+// passes Direct3D 9 enumeration values as plain numbers (the device files and d3dxlate.cpp
+// map the Direct3D 3-7 ones).
+// Implemented in the files gpuint.h lists. See re/d3d-design.md.
 //
 // Locking: g_lock first (surfaces are read), then the Gpu lock, for every call here.
 #pragma once
@@ -17,6 +18,7 @@ class Surface;
 struct Buffer;
 struct GpuSurf;
 struct GpuTex;
+struct GpuVb;
 
 // ---------------------------------------------------------------- surfaces' GPU copies
 // A surface's pixels live in its Buffer. A render target or Z buffer Direct3D draws into
@@ -48,6 +50,20 @@ bool TextureHasAlpha(const Surface* s);
 // Buffer::Release / the Surface destructor: their GPU copies go. g_lock held.
 void GpuBufferGone(Buffer* b);
 void GpuSurfaceGone(Surface* s);
+
+// ---------------------------------------------------------------- vertex buffers' GPU copies
+// A Direct3D 7 vertex buffer drawn from a Direct3D 9 one: `*slot` is the buffer's copy, made
+// at its first draw. Each draw compares the vertices it uses with what the copy holds and
+// copies those that changed, so whatever wrote them (Lock's pointer, kept or not,
+// ProcessVertices) is drawn. A draw that can't use it (transformed vertices, another Gpu's
+// copy, no memory for it, a buffer rewritten for every draw) sends the vertices as any other.
+struct GpuVbSource {
+    GpuVb** slot;
+    const void* mem;  // the buffer's vertices, which the draw's lie within
+    UINT bytes;
+};
+// The vertex buffer goes: its copy too. g_lock held.
+void GpuVbGone(GpuVb* vb);
 
 // ---------------------------------------------------------------- caps
 // What Direct3D 7 reports for its hardware devices, from the Direct3D 9 adapter.
@@ -109,8 +125,10 @@ public:
         UINT firstVertex, vertexCount, firstIndex, indexCount, primCount;
         bool indexed;
     };
+    // vb: the vertices are a vertex buffer's, which may be drawn from its GPU copy.
     void Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride, UINT vertexCount, const WORD* indices,
-              UINT indexCount, UINT primCount, bool zEnabled, const DrawSeg* segs = nullptr, UINT segCount = 0);
+              UINT indexCount, UINT primCount, bool zEnabled, const DrawSeg* segs = nullptr, UINT segCount = 0,
+              const GpuVbSource* vb = nullptr);
     void EndScene();  // the game's EndScene: D3D9's scene closes (presentation may follow)
 
 private:

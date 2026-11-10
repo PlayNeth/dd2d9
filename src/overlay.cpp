@@ -6,9 +6,10 @@
 #include "objects.h"
 #include "convert.h"
 #include "devstate.h"
-#include "dxt.h"
+#include "fourcc.h"
 #include "gpu.h"
 #include "gpures.h"
+#include "quadpass.h"
 
 #include <algorithm>
 #include <vector>
@@ -16,7 +17,7 @@
 namespace dd2d9 {
 
 namespace {
-// As many overlays shown at once as dwMaxVisibleOverlays says (ddraw.cpp, GetCaps).
+// As many overlays shown at once as dwMaxVisibleOverlays says (ddcaps.cpp, GetCaps).
 constexpr int kMaxVisibleOverlays = 16;
 // The stretch factors reported (thousandths): from 1/1000 to 100 times.
 constexpr DWORD kMinStretch = 1, kMaxStretch = 100000;
@@ -312,15 +313,6 @@ void TakeOverlays(const Surface* primary, std::vector<OverlayLayer*>* out) {
     }
 }
 
-static uint32_t RawPixel(const uint8_t* p, DWORD bytes) {
-    switch (bytes) {
-    case 1: return p[0];
-    case 2: return uint32_t(p[0]) | uint32_t(p[1]) << 8;
-    case 3: return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16;
-    default: return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
-    }
-}
-
 static bool KeyMatch(uint32_t v, DWORD mask, const DDCOLORKEY& k) {
     v &= mask;
     return v >= (k.dwColorSpaceLowValue & mask) && v <= (k.dwColorSpaceHighValue & mask);
@@ -332,10 +324,37 @@ bool OverlaysKeyedOnDest(const std::vector<OverlayLayer*>& layers) {
     return false;
 }
 
+// The destination key at x, y of the primary: its raw pixel, or (a windowed program) what GDI
+// drew in its window there, as the screen the hardware compared held both.
+static bool DestKeyAt(const OverlayLayer* l, const Buffer* primaryBits, const OverlayGdi* gdi, LONG x, LONG y) {
+    const DWORD destMask = primaryBits->fmt.KeyMask(), destBytes = primaryBits->fmt.Bytes();
+    if (y >= 0 && y < primaryBits->h && x >= 0 && x < primaryBits->w &&
+        KeyMatch(ReadPixel(primaryBits->Row(int(y)) + size_t(x) * destBytes, destBytes), destMask, l->destKey))
+        return true;
+    if (gdi && gdi->px && !primaryBits->fmt.pal8) {  // (no colour-to-index lookup for an 8-bit desktop)
+        const LONG gx = x - gdi->left, gy = y - gdi->top;
+        if (gx >= 0 && gy >= 0 && gx < gdi->w && gy < gdi->h &&
+            KeyMatch(ARGBToPixel(primaryBits->fmt, 0xFF000000u | gdi->px[size_t(gy) * gdi->w + gx]), destMask, l->destKey))
+            return true;
+    }
+    return false;
+}
+
+// Whether a windowed overlay's destination key shows anywhere under it (in the primary or
+// the GDI picture): if not, it is drawn whole (painted where dd2d9 doesn't see it, the
+// overlay is shown rather than not at all).
+static bool OverlayKeyShows(const OverlayLayer* l, const Buffer* primaryBits, const RECT& area, const OverlayGdi* gdi) {
+    RECT vis;
+    if (!IntersectRect(&vis, &l->dst, &area)) return true;
+    for (LONG y = vis.top; y < vis.bottom; y++)
+        for (LONG x = vis.left; x < vis.right; x++)
+            if (DestKeyAt(l, primaryBits, gdi, x, y)) return true;
+    return false;
+}
+
 void DrawOverlays(const std::vector<OverlayLayer*>& layers, const Buffer* primaryBits, const RECT& area, uint32_t* frame,
                   size_t pitch, const OverlayGdi* gdi) {
     std::vector<uint32_t> decoded;
-    const DWORD destMask = primaryBits->fmt.KeyMask(), destBytes = primaryBits->fmt.Bytes();
     for (const OverlayLayer* l : layers) {
         RECT vis;
         if (!IntersectRect(&vis, &l->dst, &area)) continue;
@@ -348,30 +367,7 @@ void DrawOverlays(const std::vector<OverlayLayer*>& layers, const Buffer* primar
             DecodeFourCC(b, reinterpret_cast<uint8_t*>(decoded.data()), LONG(b->w) * 4);
         }
         const bool srcKeyed = (l->flags & DDOVER_KEYSRCOVERRIDE) != 0;
-        bool destKeyed = (l->flags & DDOVER_KEYDESTOVERRIDE) != 0;
-        // The destination key: the primary's raw pixel, or (a windowed program) what GDI drew
-        // in its window there, as the screen the hardware compared held both.
-        auto keyAt = [&](LONG x, LONG y) {
-            if (y >= 0 && y < primaryBits->h && x >= 0 && x < primaryBits->w &&
-                KeyMatch(RawPixel(primaryBits->Row(int(y)) + size_t(x) * destBytes, destBytes), destMask, l->destKey))
-                return true;
-            if (gdi && !primaryBits->fmt.pal8) {  // (no colour-to-index lookup for an 8-bit desktop)
-                const LONG gx = x - gdi->left, gy = y - gdi->top;
-                if (gx >= 0 && gy >= 0 && gx < gdi->w && gy < gdi->h &&
-                    KeyMatch(ARGBToPixel(primaryBits->fmt, 0xFF000000u | gdi->px[size_t(gy) * gdi->w + gx]), destMask,
-                             l->destKey))
-                    return true;
-            }
-            return false;
-        };
-        // A windowed program's key that shows nowhere under the overlay (painted where dd2d9
-        // doesn't see it): the overlay shown whole rather than not at all.
-        if (destKeyed && gdi) {
-            bool any = false;
-            for (LONG y = vis.top; y < vis.bottom && !any; y++)
-                for (LONG x = vis.left; x < vis.right && !any; x++) any = keyAt(x, y);
-            if (!any) destKeyed = false;
-        }
+        const bool destKeyed = (l->flags & DDOVER_KEYDESTOVERRIDE) && (!gdi || OverlayKeyShows(l, primaryBits, area, gdi));
         const uint32_t fourccKey = f.fourcc && srcKeyed ? FourCCKeyToArgb(f.fourCC, l->srcKey.dwColorSpaceLowValue) & 0xFFFFFF : 0;
         const DWORD srcMask = f.KeyMask(), srcBytes = f.Bytes();
         const LONG dw = l->dst.right - l->dst.left, dh = l->dst.bottom - l->dst.top;
@@ -382,7 +378,8 @@ void DrawOverlays(const std::vector<OverlayLayer*>& layers, const Buffer* primar
             sy += l->src.top;
             uint32_t* row = frame + size_t(y - area.top) * pitch - area.left;
             for (LONG x = vis.left; x < vis.right; x++) {
-                if (destKeyed && !keyAt(x, y)) continue;  // shown only where the destination has its key colour
+                // Shown only where the destination has its key colour.
+                if (destKeyed && !DestKeyAt(l, primaryBits, gdi, x, y)) continue;
                 LONG sx = LONG((int64_t(2 * (x - l->dst.left) + 1) * sw) / (2 * dw));
                 if (l->ddfx & DDOVERFX_MIRRORLEFTRIGHT) sx = sw - 1 - sx;
                 sx += l->src.left;
@@ -391,7 +388,7 @@ void DrawOverlays(const std::vector<OverlayLayer*>& layers, const Buffer* primar
                     argb = decoded[size_t(sy) * b->w + sx];
                     if (srcKeyed && (argb & 0xFFFFFF) == fourccKey) continue;
                 } else {
-                    const uint32_t raw = RawPixel(b->Row(int(sy)) + size_t(sx) * srcBytes, srcBytes);
+                    const uint32_t raw = ReadPixel(b->Row(int(sy)) + size_t(sx) * srcBytes, srcBytes);
                     if (srcKeyed && KeyMatch(raw, srcMask, l->srcKey)) continue;
                     argb = PixelToARGB(f, raw, l->pal);
                 }
@@ -480,8 +477,6 @@ OverlayGpu* NewOverlayGpu() { return new OverlayGpu; }
 void DeleteOverlayGpu(OverlayGpu* g) { delete g; }
 void ReleaseOverlayGpu(OverlayGpu* g) { g->Release(); }
 bool OverlayGpuUsable(const OverlayGpu* g) { return !g->failed; }
-
-bool OverlayKeyShows(const OverlayLayer* l, const Buffer* primaryBits, const RECT& area, const OverlayGdi* gdi);
 
 void PrepareOverlays(OverlayGpu* g, const std::vector<OverlayLayer*>& layers, const Buffer* keyPrimary, const RECT& area,
                      const OverlayGdi* gdi) {
@@ -587,38 +582,10 @@ bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::ve
             g->gdiSeq = gdiSeq;
         }
     }
-    const SavedDeviceState saved(d);
-    d->SetRenderTarget(0, bb);
-    d->SetDepthStencilSurface(nullptr);
-    D3DSURFACE_DESC bd;
-    bb->GetDesc(&bd);
-    const D3DVIEWPORT9 vp = {0, 0, bd.Width, bd.Height, 0.0f, 1.0f};
-    d->SetViewport(&vp);
-    d->SetPixelShader(g->ps);
-    d->SetVertexShader(nullptr);
-    SetFvf9(d, D3DFVF_XYZRHW | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0));
-    d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
-    d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
-    d->SetRenderState(D3DRS_WRAP0, 0);
-    const DWORD rs[][2] = {{D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE},
-                           {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_FOGENABLE, FALSE},
-                           {D3DRS_STENCILENABLE, FALSE}, {D3DRS_SCISSORTESTENABLE, FALSE},
-                           {D3DRS_COLORWRITEENABLE, 0xF}, {D3DRS_FILLMODE, D3DFILL_SOLID}, {D3DRS_SRGBWRITEENABLE, FALSE},
-                           {D3DRS_CLIPPLANEENABLE, 0}};
-    for (const auto& r : rs) d->SetRenderState(D3DRENDERSTATETYPE(r[0]), r[1]);
-    for (DWORD st = 0; st < 3; st++) {
-        d->SetSamplerState(st, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
-        d->SetSamplerState(st, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-        d->SetSamplerState(st, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-        d->SetSamplerState(st, D3DSAMP_SRGBTEXTURE, FALSE);
-        if (st) {
-            d->SetSamplerState(st, D3DSAMP_MINFILTER, D3DTEXF_POINT);
-            d->SetSamplerState(st, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
-        }
-    }
+    QuadPass pass(gpu, d, g->ps, D3DFVF_XYZRHW | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0));
+    pass.Target(bb);
     const float dw = float(dst.right - dst.left), dh = float(dst.bottom - dst.top);
     const float kx = dw / float(sw), ky = dh / float(sh);
-    gpu.OpenScene();
     for (size_t i = 0; i < layers.size(); i++) {
         const OverlayLayer* l = layers[i];
         const OverlayGpu::Tex& c = g->texs[i];
@@ -626,12 +593,10 @@ bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::ve
         if (!c.tex || !c.uploaded || !IntersectRect(&vis, &l->dst, &src)) continue;
         const bool srcKeyed = (l->flags & DDOVER_KEYSRCOVERRIDE) != 0;
         const bool destKeyed = (l->flags & DDOVER_KEYDESTOVERRIDE) && !l->unkeyed && g->frameTex;
-        const DWORD filter = srcKeyed ? D3DTEXF_POINT : D3DTEXF_LINEAR;  // (a key blurred by filtering would fringe)
-        d->SetSamplerState(0, D3DSAMP_MINFILTER, filter);
-        d->SetSamplerState(0, D3DSAMP_MAGFILTER, filter);
-        SetTexture9(d, 0, c.tex);
-        SetTexture9(d, 1, destKeyed ? static_cast<IDirect3DBaseTexture9*>(g->frameTex) : c.tex);
-        SetTexture9(d, 2, destKeyed && useGdi && g->gdiTex ? static_cast<IDirect3DBaseTexture9*>(g->gdiTex) : c.tex);
+        // (Point sampled when source-keyed: a key blurred by filtering would fringe.)
+        pass.Texture(0, c.tex, srcKeyed ? D3DTEXF_POINT : D3DTEXF_LINEAR);
+        pass.Texture(1, destKeyed ? static_cast<IDirect3DBaseTexture9*>(g->frameTex) : c.tex);
+        pass.Texture(2, destKeyed && useGdi && g->gdiTex ? static_cast<IDirect3DBaseTexture9*>(g->gdiTex) : c.tex);
         auto neg = [](uint32_t argb, float* out) {
             out[0] = -float((argb >> 16) & 255) / 255.0f;
             out[1] = -float((argb >> 8) & 255) / 255.0f;
@@ -673,34 +638,10 @@ bool DrawOverlaysGpu(OverlayGpu* g, Gpu& gpu, IDirect3DDevice9* d, const std::ve
         const float g0 = float(vis.top - src.top) / float(sh), g1 = float(vis.bottom - src.top) / float(sh);
         const float q[4][8] = {{x0, y0, 0, 1, u0, v0, f0, g0}, {x1, y0, 0, 1, u1, v0, f1, g0},
                                {x0, y1, 0, 1, u0, v1, f0, g1}, {x1, y1, 0, 1, u1, v1, f1, g1}};
-        d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+        pass.DrawUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
     }
     gpu.CloseScene();
-    d->SetPixelShader(nullptr);
-    for (DWORD st = 0; st < 3; st++) SetTexture9(d, st, nullptr);
     return true;
-}
-
-// Whether a windowed overlay's destination key shows anywhere under it (in the primary or
-// the GDI picture): if not, it is drawn whole (see DrawOverlays).
-bool OverlayKeyShows(const OverlayLayer* l, const Buffer* primaryBits, const RECT& area, const OverlayGdi* gdi) {
-    RECT vis;
-    if (!IntersectRect(&vis, &l->dst, &area)) return true;
-    const DWORD destMask = primaryBits->fmt.KeyMask(), destBytes = primaryBits->fmt.Bytes();
-    for (LONG y = vis.top; y < vis.bottom; y++)
-        for (LONG x = vis.left; x < vis.right; x++) {
-            if (y < primaryBits->h && x < primaryBits->w && y >= 0 && x >= 0 &&
-                KeyMatch(RawPixel(primaryBits->Row(int(y)) + size_t(x) * destBytes, destBytes), destMask, l->destKey))
-                return true;
-            if (gdi && gdi->px && !primaryBits->fmt.pal8) {
-                const LONG gx = x - gdi->left, gy = y - gdi->top;
-                if (gx >= 0 && gy >= 0 && gx < gdi->w && gy < gdi->h &&
-                    KeyMatch(ARGBToPixel(primaryBits->fmt, 0xFF000000u | gdi->px[size_t(gy) * gdi->w + gx]), destMask,
-                             l->destKey))
-                    return true;
-            }
-        }
-    return false;
 }
 
 }  // namespace dd2d9

@@ -835,8 +835,8 @@ Version-dependent behaviour (creation version `dev+4`, whatever interface is cal
 
 ## Implementation notes for dd2d9 (on D3D9)
 
-dd2d9's `Device7` (`src/d3d7.cpp`) already owns the D3D9 path: DX7-numbered render/stage state arrays,
-`PushRS`/`PushTSS` translating them to D3D9 (`d3d7.cpp:711-799`), `GpuContext` in `src/gpures.h` for the D3D9
+dd2d9's `Device7` (`src/d3d7*.cpp`) already owns the D3D9 path: DX7-numbered render/stage state arrays,
+`PushRS`/`PushTSS` translating them to D3D9 (`d3d7state.cpp`), `GpuContext` in `src/gpures.h` for the D3D9
 calls, `DrawCommon` for draws. The DX6 device is best built as **a front end that owns the DX6 state and
 semantics and drives a Device7-like back end**, rather than a Device7 wrapper, because Get/dedupe semantics,
 viewports and the legacy-state "driver" layer differ.

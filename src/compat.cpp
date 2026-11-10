@@ -1,622 +1,28 @@
 // Compatibility options: what the game is told about the machine, as a PC of its era would
 // answer. None of this is DirectDraw; it is here because dd2d9 is the DLL old games load.
-//   ram=  GlobalMemoryStatus(Ex): Windows caps physical memory at 2 GB for programs that
-//         aren't large-address-aware, and games of the era that add to it or scale it
-//         overflow their signed arithmetic and refuse to run ("not enough memory").
-//   cpu=  the processor clock in the registry (~MHz under HKLM, HARDWARE\DESCRIPTION\System
-//         \CentralProcessor\<n>). Games that time the processor with RDTSC measure the
-//         real one: a DLL can't intercept that instruction.
-//   cpus= the processors the game runs on (its affinity) and is told about (GetSystemInfo):
-//         games of the single-core era can race or stutter across cores.
+//   ram=, cpu=, cpus= (compatsys.cpp): the memory, processor clock and processors.
+//   desktopbpp= (compatdisplay.cpp), and the display mode and GDI in a mode of the game's own
+//   (compatdisplay.cpp, compatgdi.cpp), with the game's GDI drawing on a windowed primary.
+//   heapzero=, fairlocks= (here): the heap and the critical sections as the games knew them.
 // The imports are patched in the game's modules (hooks.cpp): from DllMain, before the game's
-// own code runs, and again when it creates a DirectDraw object (DLLs loaded since).
-#include "hooks.h"
+// own code runs, and in each DLL loaded later as it loads.
+#include "compatint.h"
 
-#include <algorithm>
-#include <cstring>
-#include <cwctype>
-#include <string>
+#include <iterator>
 #include <vector>
 
 namespace dd2d9 {
 
 namespace {
 
-// ---------------------------------------------------------------- ram=
-
-using GlobalMemoryStatusFn = void(WINAPI*)(MEMORYSTATUS*);
-using GlobalMemoryStatusExFn = BOOL(WINAPI*)(MEMORYSTATUSEX*);
-GlobalMemoryStatusFn g_globalMemoryStatus;
-GlobalMemoryStatusExFn g_globalMemoryStatusEx;
-
-// The configured machine: ram= of physical memory, at most 3/4 of it free (less if the real
-// machine has less free), a commit limit (memory plus page file) of 1.5x the memory. Every
-// value stays below 2 GB, as on the machines these games knew.
-struct FakeMemory {
-    uint64_t totalPhys, availPhys, totalPage, availPage;
-    DWORD load;
-};
-
-FakeMemory Fake(uint64_t realAvailPhys, uint64_t realAvailPage) {
-    constexpr uint64_t kMax = 0x7FFFFFFF;
-    FakeMemory m;
-    m.totalPhys = uint64_t(g_config.ramMB) << 20;
-    m.availPhys = std::min(realAvailPhys, m.totalPhys / 4 * 3);
-    m.totalPage = std::min(m.totalPhys + m.totalPhys / 2, kMax);
-    m.availPage = std::min(m.totalPage - (m.totalPhys - m.availPhys), realAvailPage);
-    m.load = DWORD((m.totalPhys - m.availPhys) * 100 / m.totalPhys);
-    return m;
-}
-
-void WINAPI HookGlobalMemoryStatus(MEMORYSTATUS* s) {
-    DD2D9_NEXT(g_globalMemoryStatus)(s);
-    if (!s) return;
-    const FakeMemory m = Fake(s->dwAvailPhys, s->dwAvailPageFile);
-    s->dwMemoryLoad = m.load;
-    s->dwTotalPhys = SIZE_T(m.totalPhys);
-    s->dwAvailPhys = SIZE_T(m.availPhys);
-    s->dwTotalPageFile = SIZE_T(m.totalPage);
-    s->dwAvailPageFile = SIZE_T(m.availPage);
-    // dwTotalVirtual / dwAvailVirtual: the game's own address space, true as it is.
-}
-
-BOOL WINAPI HookGlobalMemoryStatusEx(MEMORYSTATUSEX* s) {
-    if (!DD2D9_NEXT(g_globalMemoryStatusEx)(s)) return FALSE;
-    const FakeMemory m = Fake(s->ullAvailPhys, s->ullAvailPageFile);
-    s->dwMemoryLoad = m.load;
-    s->ullTotalPhys = m.totalPhys;
-    s->ullAvailPhys = m.availPhys;
-    s->ullTotalPageFile = m.totalPage;
-    s->ullAvailPageFile = m.availPage;
-    return TRUE;
-}
-
-ImportHook kMemoryHooks[] = {
-    {"kernel32", "GlobalMemoryStatus", reinterpret_cast<void*>(HookGlobalMemoryStatus),
-     reinterpret_cast<void**>(&g_globalMemoryStatus)},
-    {"kernel32", "GlobalMemoryStatusEx", reinterpret_cast<void*>(HookGlobalMemoryStatusEx),
-     reinterpret_cast<void**>(&g_globalMemoryStatusEx)},
-};
-
-// ---------------------------------------------------------------- cpu=
-
-using RegOpenKeyExAFn = LONG(WINAPI*)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY);
-using RegOpenKeyExWFn = LONG(WINAPI*)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY);
-using RegOpenKeyAFn = LONG(WINAPI*)(HKEY, LPCSTR, PHKEY);
-using RegOpenKeyWFn = LONG(WINAPI*)(HKEY, LPCWSTR, PHKEY);
-using RegQueryValueExAFn = LONG(WINAPI*)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
-using RegQueryValueExWFn = LONG(WINAPI*)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
-using RegCloseKeyFn = LONG(WINAPI*)(HKEY);
-RegOpenKeyExAFn g_regOpenKeyExA;
-RegOpenKeyExWFn g_regOpenKeyExW;
-RegOpenKeyAFn g_regOpenKeyA;
-RegOpenKeyWFn g_regOpenKeyW;
-RegQueryValueExAFn g_regQueryValueExA;
-RegQueryValueExWFn g_regQueryValueExW;
-RegCloseKeyFn g_regCloseKey;
-
-// The keys the game has open on the way to the processor keys, with their path under
-// HKEY_LOCAL_MACHINE, in lower case: from "hardware" to a processor's key,
-// "hardware\description\system\centralprocessor\0". Any other key isn't tracked.
-SRWLOCK g_keyLock = SRWLOCK_INIT;
-std::vector<std::pair<HKEY, std::wstring>>* g_keys;  // g_keyLock
-const std::wstring kCpuPath = L"hardware\\description\\system\\centralprocessor";
-
-// The key's path, if it is HKEY_LOCAL_MACHINE ("") or tracked.
-bool PathOf(HKEY k, std::wstring* path) {
-    if (k == HKEY_LOCAL_MACHINE) {
-        path->clear();
-        return true;
-    }
-    bool found = false;
-    AcquireSRWLockShared(&g_keyLock);
-    if (g_keys)
-        for (const auto& [h, p] : *g_keys)
-            if (h == k) {
-                *path = p;
-                found = true;
-                break;
-            }
-    ReleaseSRWLockShared(&g_keyLock);
-    return found;
-}
-
-void Remember(HKEY k, const std::wstring& path) {
-    AcquireSRWLockExclusive(&g_keyLock);
-    if (!g_keys) g_keys = new std::vector<std::pair<HKEY, std::wstring>>;
-    // A handle value seen before (closed some way not hooked, and reused): the new key.
-    for (auto& e : *g_keys)
-        if (e.first == k) {
-            e.second = path;
-            ReleaseSRWLockExclusive(&g_keyLock);
-            return;
-        }
-    g_keys->emplace_back(k, path);
-    ReleaseSRWLockExclusive(&g_keyLock);
-}
-
-void Forget(HKEY k) {
-    AcquireSRWLockExclusive(&g_keyLock);
-    if (g_keys)
-        for (size_t i = 0; i < g_keys->size(); i++)
-            if ((*g_keys)[i].first == k) {
-                (*g_keys)[i] = g_keys->back();
-                g_keys->pop_back();
-                break;
-            }
-    ReleaseSRWLockExclusive(&g_keyLock);
-}
-
-bool AllDigits(const std::wstring& s, size_t from) {
-    if (from >= s.size()) return false;
-    for (size_t i = from; i < s.size(); i++)
-        if (s[i] < L'0' || s[i] > L'9') return false;
-    return true;
-}
-
-// A processor's key: ...\centralprocessor\<n>.
-bool IsCpuKey(const std::wstring& path) {
-    return path.size() > kCpuPath.size() + 1 && path.compare(0, kCpuPath.size(), kCpuPath) == 0 &&
-           path[kCpuPath.size()] == L'\\' && AllDigits(path, kCpuPath.size() + 1);
-}
-
-// On the way there: a whole-component prefix of the processor directory, or a processor
-// ("": a new handle to HKEY_LOCAL_MACHINE itself, opened with no subkey).
-bool Tracked(const std::wstring& path) {
-    if (path.empty()) return true;
-    if (path.size() <= kCpuPath.size())
-        return kCpuPath.compare(0, path.size(), path) == 0 && (path.size() == kCpuPath.size() || kCpuPath[path.size()] == L'\\');
-    return IsCpuKey(path);
-}
-
-bool IsCpuHandle(HKEY k) {
-    std::wstring path;
-    return k != HKEY_LOCAL_MACHINE && PathOf(k, &path) && IsCpuKey(path);
-}
-
-std::wstring Wide(LPCSTR s) {
-    if (!s) return std::wstring();
-    const int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
-    std::wstring w(size_t(n > 0 ? n - 1 : 0), L'\0');
-    if (n > 1) MultiByteToWideChar(CP_ACP, 0, s, -1, &w[0], n);
-    return w;
-}
-
-LONG Opened(LONG r, HKEY parent, std::wstring sub, PHKEY out) {
-    if (r != ERROR_SUCCESS || !out || !*out) return r;
-    std::wstring path;
-    if (!PathOf(parent, &path)) return r;
-    for (wchar_t& c : sub) c = towlower(c);
-    while (!sub.empty() && sub.front() == L'\\') sub.erase(0, 1);
-    while (!sub.empty() && sub.back() == L'\\') sub.pop_back();
-    if (!sub.empty()) path = path.empty() ? sub : path + L'\\' + sub;
-    if (Tracked(path)) Remember(*out, path);
-    return r;
-}
-
-LONG WINAPI HookRegOpenKeyExA(HKEY k, LPCSTR sub, DWORD opt, REGSAM sam, PHKEY out) {
-    return Opened(DD2D9_NEXT(g_regOpenKeyExA)(k, sub, opt, sam, out), k, Wide(sub), out);
-}
-LONG WINAPI HookRegOpenKeyExW(HKEY k, LPCWSTR sub, DWORD opt, REGSAM sam, PHKEY out) {
-    return Opened(DD2D9_NEXT(g_regOpenKeyExW)(k, sub, opt, sam, out), k, sub ? sub : L"", out);
-}
-LONG WINAPI HookRegOpenKeyA(HKEY k, LPCSTR sub, PHKEY out) {
-    return Opened(DD2D9_NEXT(g_regOpenKeyA)(k, sub, out), k, Wide(sub), out);
-}
-LONG WINAPI HookRegOpenKeyW(HKEY k, LPCWSTR sub, PHKEY out) {
-    return Opened(DD2D9_NEXT(g_regOpenKeyW)(k, sub, out), k, sub ? sub : L"", out);
-}
-
-// RegCreateKey(Ex) opens existing keys too (some games open the processor keys that way).
-using RegCreateKeyExAFn = LONG(WINAPI*)(HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM, const SECURITY_ATTRIBUTES*, PHKEY, LPDWORD);
-using RegCreateKeyExWFn = LONG(WINAPI*)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM, const SECURITY_ATTRIBUTES*, PHKEY, LPDWORD);
-using RegCreateKeyAFn = LONG(WINAPI*)(HKEY, LPCSTR, PHKEY);
-using RegCreateKeyWFn = LONG(WINAPI*)(HKEY, LPCWSTR, PHKEY);
-RegCreateKeyExAFn g_regCreateKeyExA;
-RegCreateKeyExWFn g_regCreateKeyExW;
-RegCreateKeyAFn g_regCreateKeyA;
-RegCreateKeyWFn g_regCreateKeyW;
-
-LONG WINAPI HookRegCreateKeyExA(HKEY k, LPCSTR sub, DWORD res, LPSTR cls, DWORD opt, REGSAM sam,
-                                const SECURITY_ATTRIBUTES* sa, PHKEY out, LPDWORD disp) {
-    return Opened(DD2D9_NEXT(g_regCreateKeyExA)(k, sub, res, cls, opt, sam, sa, out, disp), k, Wide(sub), out);
-}
-LONG WINAPI HookRegCreateKeyExW(HKEY k, LPCWSTR sub, DWORD res, LPWSTR cls, DWORD opt, REGSAM sam,
-                                const SECURITY_ATTRIBUTES* sa, PHKEY out, LPDWORD disp) {
-    return Opened(DD2D9_NEXT(g_regCreateKeyExW)(k, sub, res, cls, opt, sam, sa, out, disp), k, sub ? sub : L"", out);
-}
-LONG WINAPI HookRegCreateKeyA(HKEY k, LPCSTR sub, PHKEY out) {
-    return Opened(DD2D9_NEXT(g_regCreateKeyA)(k, sub, out), k, Wide(sub), out);
-}
-LONG WINAPI HookRegCreateKeyW(HKEY k, LPCWSTR sub, PHKEY out) {
-    return Opened(DD2D9_NEXT(g_regCreateKeyW)(k, sub, out), k, sub ? sub : L"", out);
-}
-
-LONG WINAPI HookRegCloseKey(HKEY k) {
-    const LONG r = DD2D9_NEXT(g_regCloseKey)(k);
-    if (r == ERROR_SUCCESS) Forget(k);
-    return r;
-}
-
-// ~MHz as a REG_DWORD, with RegQueryValueEx's size rules.
-LONG FakeMHz(LPDWORD type, LPBYTE data, LPDWORD cb) {
-    if (data && !cb) return ERROR_INVALID_PARAMETER;
-    if (type) *type = REG_DWORD;
-    if (!cb) return ERROR_SUCCESS;
-    const DWORD need = sizeof(DWORD);
-    if (!data) {
-        *cb = need;
-        return ERROR_SUCCESS;
-    }
-    if (*cb < need) {
-        *cb = need;
-        return ERROR_MORE_DATA;
-    }
-    const DWORD mhz = DWORD(g_config.cpuMHz);
-    memcpy(data, &mhz, need);
-    *cb = need;
-    return ERROR_SUCCESS;
-}
-
-LONG WINAPI HookRegQueryValueExA(HKEY k, LPCSTR name, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD cb) {
-    if (name && _stricmp(name, "~MHz") == 0 && IsCpuHandle(k)) return FakeMHz(type, data, cb);
-    return DD2D9_NEXT(g_regQueryValueExA)(k, name, reserved, type, data, cb);
-}
-
-LONG WINAPI HookRegQueryValueExW(HKEY k, LPCWSTR name, LPDWORD reserved, LPDWORD type, LPBYTE data, LPDWORD cb) {
-    if (name && _wcsicmp(name, L"~MHz") == 0 && IsCpuHandle(k)) return FakeMHz(type, data, cb);
-    return DD2D9_NEXT(g_regQueryValueExW)(k, name, reserved, type, data, cb);
-}
-
-ImportHook kCpuHooks[] = {
-    {"advapi32", "RegOpenKeyExA", reinterpret_cast<void*>(HookRegOpenKeyExA), reinterpret_cast<void**>(&g_regOpenKeyExA)},
-    {"advapi32", "RegOpenKeyExW", reinterpret_cast<void*>(HookRegOpenKeyExW), reinterpret_cast<void**>(&g_regOpenKeyExW)},
-    {"advapi32", "RegOpenKeyA", reinterpret_cast<void*>(HookRegOpenKeyA), reinterpret_cast<void**>(&g_regOpenKeyA)},
-    {"advapi32", "RegOpenKeyW", reinterpret_cast<void*>(HookRegOpenKeyW), reinterpret_cast<void**>(&g_regOpenKeyW)},
-    {"advapi32", "RegQueryValueExA", reinterpret_cast<void*>(HookRegQueryValueExA),
-     reinterpret_cast<void**>(&g_regQueryValueExA)},
-    {"advapi32", "RegQueryValueExW", reinterpret_cast<void*>(HookRegQueryValueExW),
-     reinterpret_cast<void**>(&g_regQueryValueExW)},
-    {"advapi32", "RegCloseKey", reinterpret_cast<void*>(HookRegCloseKey), reinterpret_cast<void**>(&g_regCloseKey)},
-    {"advapi32", "RegCreateKeyExA", reinterpret_cast<void*>(HookRegCreateKeyExA), reinterpret_cast<void**>(&g_regCreateKeyExA)},
-    {"advapi32", "RegCreateKeyExW", reinterpret_cast<void*>(HookRegCreateKeyExW), reinterpret_cast<void**>(&g_regCreateKeyExW)},
-    {"advapi32", "RegCreateKeyA", reinterpret_cast<void*>(HookRegCreateKeyA), reinterpret_cast<void**>(&g_regCreateKeyA)},
-    {"advapi32", "RegCreateKeyW", reinterpret_cast<void*>(HookRegCreateKeyW), reinterpret_cast<void**>(&g_regCreateKeyW)},
-};
-
-// ---------------------------------------------------------------- cpus=
-
-using GetSystemInfoFn = void(WINAPI*)(SYSTEM_INFO*);
-GetSystemInfoFn g_getSystemInfo;
-DWORD_PTR g_affinity;  // the processors the game was given (0: not set)
-int g_cpuCount;
-
-void WINAPI HookGetSystemInfo(SYSTEM_INFO* si) {
-    DD2D9_NEXT(g_getSystemInfo)(si);
-    if (!si || !g_affinity) return;
-    si->dwNumberOfProcessors = DWORD(g_cpuCount);
-    si->dwActiveProcessorMask = g_affinity;
-}
-
-ImportHook kCpusHooks[] = {
-    {"kernel32", "GetSystemInfo", reinterpret_cast<void*>(HookGetSystemInfo), reinterpret_cast<void**>(&g_getSystemInfo)},
-};
-
-// cpus= processors the process may run on: one logical processor per physical core (two
-// hyperthreads of one core would be about one core's worth), the first core last (it takes
-// most of the system's interrupts) when there are cores to spare.
-void SetAffinity() {
-    DWORD_PTR process = 0, system = 0;
-    if (!GetProcessAffinityMask(GetCurrentProcess(), &process, &system)) return;
-    std::vector<DWORD_PTR> cores;  // each core's first logical processor the process may use
-    DWORD len = 0;
-    GetLogicalProcessorInformation(nullptr, &len);
-    std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> info(len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) + 1);
-    len = DWORD(info.size() * sizeof(info[0]));
-    if (GetLogicalProcessorInformation(info.data(), &len)) {
-        for (DWORD i = 0; i < len / sizeof(info[0]); i++) {
-            if (info[i].Relationship != RelationProcessorCore) continue;
-            const DWORD_PTR usable = info[i].ProcessorMask & process;
-            if (usable) cores.push_back(usable & (~usable + 1));  // its lowest bit
-        }
-    }
-    if (cores.empty())  // no topology: the logical processors themselves
-        for (unsigned bit = 0; bit < sizeof(DWORD_PTR) * 8; bit++)
-            if (process & (DWORD_PTR(1) << bit)) cores.push_back(DWORD_PTR(1) << bit);
-    if (int(cores.size()) > g_config.cpus) std::rotate(cores.begin(), cores.begin() + 1, cores.end());  // core 0 last
-    DWORD_PTR mask = 0;
-    int count = 0;
-    for (DWORD_PTR c : cores) {
-        if (count >= g_config.cpus) break;
-        mask |= c;
-        count++;
-    }
-    if (!mask || !SetProcessAffinityMask(GetCurrentProcess(), mask)) return;
-    g_affinity = mask;
-    g_cpuCount = count;
-    DD2D9_LOG("cpus: the game runs on %d processor(s) (mask 0x%lx)", count, static_cast<unsigned long>(mask));
-}
-
-// ---------------------------------------------------------------- desktopbpp=
-
-// What a 16-bit (or 24-bit) desktop answered through GDI and EnumDisplaySettings: the colour
-// depth, for display device contexts and the current (or registry) display settings. Games
-// check it there too, as Moto Racer checks it through DirectDraw (GetDisplayMode, answered in
-// ddraw.cpp). While the game has a display mode of its own, that mode's depth, as on XP. A
-// palettized depth (8 bits) isn't faked there (GetDeviceCaps does answer one for an 8-bit mode
-// of the game's own, below).
-using GetDeviceCapsFn = int(WINAPI*)(HDC, int);
-using EnumDisplaySettingsAFn = BOOL(WINAPI*)(LPCSTR, DWORD, DEVMODEA*);
-using EnumDisplaySettingsWFn = BOOL(WINAPI*)(LPCWSTR, DWORD, DEVMODEW*);
-using EnumDisplaySettingsExAFn = BOOL(WINAPI*)(LPCSTR, DWORD, DEVMODEA*, DWORD);
-using EnumDisplaySettingsExWFn = BOOL(WINAPI*)(LPCWSTR, DWORD, DEVMODEW*, DWORD);
-GetDeviceCapsFn g_getDeviceCaps;
-EnumDisplaySettingsAFn g_enumDisplaySettingsA;
-EnumDisplaySettingsWFn g_enumDisplaySettingsW;
-EnumDisplaySettingsExAFn g_enumDisplaySettingsExA;
-EnumDisplaySettingsExWFn g_enumDisplaySettingsExW;
-
-int ShownBppOrZero() {
-    const int b = ShownDisplayBpp();
-    return b >= 16 ? b : 0;
-}
-
-// Always on (not only with desktopbpp=): in a display mode of the game's own, that mode's
-// depth and size, as XP's GDI answered after ddraw.dll switched the display. An 8-bit one makes the
-// display a palette device (RC_PALETTE, 256 entries, the 20 static colours): FlyingSB (and
-// other games) set up their DirectDraw palette only when the screen is one, and showed
-// dd2d9's grey ramp instead of their colours.
-int WINAPI HookGetDeviceCaps(HDC dc, int index) {
-    const int real = DD2D9_NEXT(g_getDeviceCaps)(dc, index);
-    const bool size = index == HORZRES || index == VERTRES || index == DESKTOPHORZRES || index == DESKTOPVERTRES;
-    if (!size && index != BITSPIXEL && index != NUMCOLORS && index != RASTERCAPS && index != SIZEPALETTE &&
-        index != NUMRESERVED && index != COLORRES)
-        return real;
-    const DWORD type = GetObjectType(dc);
-    if ((type != OBJ_DC && type != OBJ_MEMDC) || DD2D9_NEXT(g_getDeviceCaps)(dc, TECHNOLOGY) != DT_RASDISPLAY) return real;
-    if (size) {
-        // The screen's size: the mode's, as GetSystemMetrics answers it (input.cpp).
-        int w, h;
-        if (!ShownDisplaySize(&w, &h)) return real;
-        return index == HORZRES || index == DESKTOPHORZRES ? w : h;
-    }
-    const int bpp = ShownDisplayBpp();
-    if (bpp == 8) {
-        switch (index) {
-        case BITSPIXEL: return 8;
-        case NUMCOLORS: return 20;
-        case RASTERCAPS: return real | RC_PALETTE;
-        case SIZEPALETTE: return 256;
-        case NUMRESERVED: return 20;
-        default: return 18;  // COLORRES: the DAC's 6 bits a channel
-        }
-    }
-    if (bpp < 16) return real;
-    if (index == BITSPIXEL) return bpp;
-    if (index == NUMCOLORS) return -1;  // above 8 bits
-    return real;
-}
-
-// The current or registry settings of the primary display (null or its name): the depth.
-template <typename Dev, typename Ch>
-void FixDepth(const Ch* device, DWORD mode, Dev* dm, BOOL ok) {
-    if (!ok || !dm || (mode != ENUM_CURRENT_SETTINGS && mode != ENUM_REGISTRY_SETTINGS)) return;
-    if (device && device[0]) {  // named: only if that is the primary display
-        bool primary = false;
-        DISPLAY_DEVICEW dd = {};
-        dd.cb = sizeof(dd);
-        for (DWORD n = 0; !primary && EnumDisplayDevicesW(nullptr, n, &dd, 0); n++, dd.cb = sizeof(dd)) {
-            if (!(dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) continue;
-            bool same = true;  // compared as text, case-insensitively (ASCII names)
-            for (int i = 0; i < 32 && same; i++) {
-                const wchar_t a = dd.DeviceName[i];
-                const wchar_t b = wchar_t(static_cast<unsigned>(device[i]) & (sizeof(Ch) == 1 ? 0xFFu : 0xFFFFu));
-                if (towupper(a) != towupper(b)) same = false;
-                else if (!a) break;
-            }
-            primary = same;
-        }
-        if (!primary) return;
-    }
-    if (const int bpp = ShownBppOrZero()) dm->dmBitsPerPel = DWORD(bpp);
-    // The current mode the game's own while it is shown scaled or in a window (borderless,
-    // window), as after a real switch: a game checking that its mode took saw the desktop's.
-    RECT r;
-    SIZE m;
-    if (mode == ENUM_CURRENT_SETTINGS && GameImage(&r, &m)) {
-        dm->dmPelsWidth = DWORD(m.cx);
-        dm->dmPelsHeight = DWORD(m.cy);
-    }
-}
-
-BOOL WINAPI HookEnumDisplaySettingsA(LPCSTR device, DWORD mode, DEVMODEA* dm) {
-    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsA)(device, mode, dm);
-    FixDepth(device, mode, dm, ok);
-    return ok;
-}
-BOOL WINAPI HookEnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW* dm) {
-    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsW)(device, mode, dm);
-    FixDepth(device, mode, dm, ok);
-    return ok;
-}
-BOOL WINAPI HookEnumDisplaySettingsExA(LPCSTR device, DWORD mode, DEVMODEA* dm, DWORD flags) {
-    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsExA)(device, mode, dm, flags);
-    FixDepth(device, mode, dm, ok);
-    return ok;
-}
-BOOL WINAPI HookEnumDisplaySettingsExW(LPCWSTR device, DWORD mode, DEVMODEW* dm, DWORD flags) {
-    const BOOL ok = DD2D9_NEXT(g_enumDisplaySettingsExW)(device, mode, dm, flags);
-    FixDepth(device, mode, dm, ok);
-    return ok;
-}
-
-// A mode change asking for the depth EnumDisplaySettings made up (a game putting back the
-// "current" mode it read): the depth left as it is, not switched to that one for real.
-template <typename Dev> const Dev* RealDepth(const Dev* dm, Dev* copy) {
-    const int bpp = ShownBppOrZero();
-    if (!dm || !bpp || !(dm->dmFields & DM_BITSPERPEL) || dm->dmBitsPerPel != DWORD(bpp)) return dm;
-    // The public part as the game sized it (an older, shorter DEVMODE: not read past), its
-    // dmDriverExtra bytes after it not passed on.
-    *copy = Dev{};
-    memcpy(copy, dm, std::min<size_t>(dm->dmSize ? dm->dmSize : sizeof(Dev), sizeof(Dev)));
-    copy->dmDriverExtra = 0;
-    copy->dmFields &= ~DWORD(DM_BITSPERPEL);
-    return copy;
-}
-
-using ChangeDisplaySettingsAFn = LONG(WINAPI*)(DEVMODEA*, DWORD);
-using ChangeDisplaySettingsWFn = LONG(WINAPI*)(DEVMODEW*, DWORD);
-using ChangeDisplaySettingsExAFn = LONG(WINAPI*)(LPCSTR, DEVMODEA*, HWND, DWORD, LPVOID);
-using ChangeDisplaySettingsExWFn = LONG(WINAPI*)(LPCWSTR, DEVMODEW*, HWND, DWORD, LPVOID);
-ChangeDisplaySettingsAFn g_changeDisplaySettingsA;
-ChangeDisplaySettingsWFn g_changeDisplaySettingsW;
-ChangeDisplaySettingsExAFn g_changeDisplaySettingsExA;
-ChangeDisplaySettingsExWFn g_changeDisplaySettingsExW;
-
-// The mode the game is shown in already (borderless, window: EnumDisplaySettings reports it
-// as current): a game putting it back, or asking for it again, would really switch the
-// display under the scaled picture. Nothing to do, as on a display in that mode.
-template <typename Dev> bool AlreadyShown(const Dev* dm) {
-    RECT r;
-    SIZE m;
-    return dm && (dm->dmFields & (DM_PELSWIDTH | DM_PELSHEIGHT)) == (DM_PELSWIDTH | DM_PELSHEIGHT) &&
-           GameImage(&r, &m) && dm->dmPelsWidth == DWORD(m.cx) && dm->dmPelsHeight == DWORD(m.cy);
-}
-
-LONG WINAPI HookChangeDisplaySettingsA(DEVMODEA* dm, DWORD flags) {
-    if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
-    DEVMODEA c;
-    return DD2D9_NEXT(g_changeDisplaySettingsA)(const_cast<DEVMODEA*>(RealDepth(dm, &c)), flags);
-}
-LONG WINAPI HookChangeDisplaySettingsW(DEVMODEW* dm, DWORD flags) {
-    if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
-    DEVMODEW c;
-    return DD2D9_NEXT(g_changeDisplaySettingsW)(const_cast<DEVMODEW*>(RealDepth(dm, &c)), flags);
-}
-// (A display named: only the primary's depth is made up; the name left to the system.)
-LONG WINAPI HookChangeDisplaySettingsExA(LPCSTR device, DEVMODEA* dm, HWND h, DWORD flags, LPVOID p) {
-    if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
-    DEVMODEA c;
-    DEVMODEA* const sent = device && device[0] ? dm : const_cast<DEVMODEA*>(RealDepth(dm, &c));
-    return DD2D9_NEXT(g_changeDisplaySettingsExA)(device, sent, h, flags, p);
-}
-LONG WINAPI HookChangeDisplaySettingsExW(LPCWSTR device, DEVMODEW* dm, HWND h, DWORD flags, LPVOID p) {
-    if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
-    DEVMODEW c;
-    DEVMODEW* const sent = device && device[0] ? dm : const_cast<DEVMODEW*>(RealDepth(dm, &c));
-    return DD2D9_NEXT(g_changeDisplaySettingsExW)(device, sent, h, flags, p);
-}
-
-ImportHook kDepthHooks[] = {
-    {"user32", "ChangeDisplaySettingsA", reinterpret_cast<void*>(HookChangeDisplaySettingsA),
-     reinterpret_cast<void**>(&g_changeDisplaySettingsA)},
-    {"user32", "ChangeDisplaySettingsW", reinterpret_cast<void*>(HookChangeDisplaySettingsW),
-     reinterpret_cast<void**>(&g_changeDisplaySettingsW)},
-    {"user32", "ChangeDisplaySettingsExA", reinterpret_cast<void*>(HookChangeDisplaySettingsExA),
-     reinterpret_cast<void**>(&g_changeDisplaySettingsExA)},
-    {"user32", "ChangeDisplaySettingsExW", reinterpret_cast<void*>(HookChangeDisplaySettingsExW),
-     reinterpret_cast<void**>(&g_changeDisplaySettingsExW)},
-    {"user32", "EnumDisplaySettingsA", reinterpret_cast<void*>(HookEnumDisplaySettingsA),
-     reinterpret_cast<void**>(&g_enumDisplaySettingsA)},
-    {"user32", "EnumDisplaySettingsW", reinterpret_cast<void*>(HookEnumDisplaySettingsW),
-     reinterpret_cast<void**>(&g_enumDisplaySettingsW)},
-    {"user32", "EnumDisplaySettingsExA", reinterpret_cast<void*>(HookEnumDisplaySettingsExA),
-     reinterpret_cast<void**>(&g_enumDisplaySettingsExA)},
-    {"user32", "EnumDisplaySettingsExW", reinterpret_cast<void*>(HookEnumDisplaySettingsExW),
-     reinterpret_cast<void**>(&g_enumDisplaySettingsExW)},
-};
-
-// LockWindowUpdate on the window dd2d9 shows the primary in: not done. ddraw.dll drew a
-// windowed primary straight on the screen, which a window locked from painting didn't stop;
-// here the picture goes through that window, and a lock would hide all of it. 3DMark 2000's
-// splash locks its full-screen window (so that Windows doesn't paint over the desktop
-// behind) and blits its logo to the primary: nothing showed. Unlocking (NULL) after a lock
-// not done isn't passed on either. (This table is always on: not a compatibility option.)
-using LockWindowUpdateFn = BOOL(WINAPI*)(HWND);
-LockWindowUpdateFn g_lockWindowUpdate;
-volatile LONG g_lockSkipped;  // the last lock was one of those
-
-BOOL WINAPI HookLockWindowUpdate(HWND hwnd) {
-    if (hwnd && PresentsOnWindow(hwnd)) {
-        InterlockedExchange(&g_lockSkipped, 1);
-        DD2D9_LOG("LockWindowUpdate(%p): not done (the primary is shown in that window)", static_cast<void*>(hwnd));
-        return TRUE;
-    }
-    if (!hwnd && InterlockedExchange(&g_lockSkipped, 0)) return TRUE;
-    if (hwnd) InterlockedExchange(&g_lockSkipped, 0);
-    return DD2D9_NEXT(g_lockWindowUpdate)(hwnd);
-}
-
-// A 16-bit bitmap made with CreateBitmap or CreateBitmapIndirect while the game is in a 16-bit
-// mode of its own: made as a DIB section in the mode's format (5:6:5, as dd2d9's 16-bit
-// surfaces) with the game's pixels. On XP the screen really was 16-bit, so such a bitmap was
-// the screen's own format and went into any memory DC; here the screen stays 32-bit, and
-// Windows refuses to select a 16-bit device-dependent bitmap into a DC made for it
-// (SelectObject fails), so what the game then blits from that DC never arrives. Sakura Taisen
-// builds each letter of its text that way (CreateBitmapIndirect, CreateCompatibleDC(NULL),
-// BitBlt into the surface's DC) and its text came out empty. A DIB section goes into any
-// memory DC and copies to a 16-bit surface pixel for pixel.
-using CreateBitmapFn = HBITMAP(WINAPI*)(int, int, UINT, UINT, const void*);
-using CreateBitmapIndirectFn = HBITMAP(WINAPI*)(const BITMAP*);
-CreateBitmapFn g_createBitmap;
-CreateBitmapIndirectFn g_createBitmapIndirect;
-
-// The DIB section for a w x h 16-bit bitmap whose rows are `stride` bytes apart (null bits: left
-// zeroed); nullptr if this isn't such a bitmap (the real call then).
-HBITMAP ModeBitmap16(int w, int h, UINT planes, UINT bpp, const void* bits, LONG stride) {
-    if (bpp != 16 || planes != 1 || w <= 0 || h <= 0 || w > 32767 || h > 32767 || ShownDisplayBpp() != 16) return nullptr;
-    struct {
-        BITMAPINFOHEADER h;
-        DWORD masks[3];
-    } bi = {};
-    bi.h.biSize = sizeof(bi.h);
-    bi.h.biWidth = w;
-    bi.h.biHeight = -h;  // top-down, as a bitmap's bits are
-    bi.h.biPlanes = 1;
-    bi.h.biBitCount = 16;
-    bi.h.biCompression = BI_BITFIELDS;
-    bi.masks[0] = 0xF800;
-    bi.masks[1] = 0x07E0;
-    bi.masks[2] = 0x001F;
-    void* dst = nullptr;
-    HBITMAP b = CreateDIBSection(nullptr, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &dst, nullptr, 0);
-    if (!b || !dst) return nullptr;
-    if (bits) {
-        const size_t row = size_t(w) * 2, dstStride = (row + 3) & ~size_t(3);
-        for (int y = 0; y < h; y++)
-            memcpy(static_cast<BYTE*>(dst) + size_t(y) * dstStride, static_cast<const BYTE*>(bits) + size_t(y) * size_t(stride), row);
-    }
-    return b;
-}
-
-HBITMAP WINAPI HookCreateBitmap(int w, int h, UINT planes, UINT bpp, const void* bits) {
-    // (CreateBitmap's rows are a whole number of 16-bit words: 16-bit pixels, packed.)
-    if (HBITMAP b = ModeBitmap16(w, h, planes, bpp, bits, LONG(w) * 2)) return b;
-    return DD2D9_NEXT(g_createBitmap)(w, h, planes, bpp, bits);
-}
-
-HBITMAP WINAPI HookCreateBitmapIndirect(const BITMAP* bm) {
-    if (bm && int64_t(bm->bmWidthBytes) >= int64_t(bm->bmWidth) * 2)  // (rows that hold the pixels)
-        if (HBITMAP b = ModeBitmap16(bm->bmWidth, bm->bmHeight, bm->bmPlanes, bm->bmBitsPixel, bm->bmBits, bm->bmWidthBytes))
-            return b;
-    return DD2D9_NEXT(g_createBitmapIndirect)(bm);
-}
-
-ImportHook kWindowHooks[] = {
-    {"user32", "LockWindowUpdate", reinterpret_cast<void*>(HookLockWindowUpdate), reinterpret_cast<void**>(&g_lockWindowUpdate)},
-    {"gdi32", "GetDeviceCaps", reinterpret_cast<void*>(HookGetDeviceCaps), reinterpret_cast<void**>(&g_getDeviceCaps)},
-    {"gdi32", "CreateBitmap", reinterpret_cast<void*>(HookCreateBitmap), reinterpret_cast<void**>(&g_createBitmap)},
-    {"gdi32", "CreateBitmapIndirect", reinterpret_cast<void*>(HookCreateBitmapIndirect),
-     reinterpret_cast<void**>(&g_createBitmapIndirect)},
-};
-
 // Memory from the process heap comes zeroed, as fresh heap memory did on Windows 9x, where
 // games were tested: today's heap hands back blocks other code freed (Direct3D's, the
 // driver's) with their old contents. Daytona USA Deluxe allocates its texture table with
 // HeapAlloc and, before clearing it, releases every "texture" it finds in it: on a block
 // full of old data, it called through a stale pointer and crashed as its 3D device came up.
-// (Always on: zeroing is what HEAP_ZERO_MEMORY does anyway, and no working game depends on
-// garbage.)
+// A compatibility behaviour, not 9x's exact one (there only fresh pages came zeroed): on by
+// default (heapzero=on), since no working game depends on garbage; heapzero=off saves the
+// clearing for a game that allocates a lot.
 using HeapAllocFn = LPVOID(WINAPI*)(HANDLE, DWORD, SIZE_T);
 HeapAllocFn g_heapAlloc;
 
@@ -628,6 +34,152 @@ ImportHook kHeapHooks[] = {
     {"kernel32", "HeapAlloc", reinterpret_cast<void*>(HookHeapAlloc), reinterpret_cast<void**>(&g_heapAlloc)},
 };
 
+// A critical section a thread releases goes to the thread waiting for it, as on Windows up to
+// XP, where the waiter owned it from that moment. Since Vista it is only woken: the releasing
+// thread can take the section again before the waiter runs, and one that does so at once
+// nearly always does. KOF 99 Evolution's main thread holds its movie renderer's section for the whole
+// intro and lets go of it once a frame (Leave, then Enter) for the decoder's thread to copy a
+// frame into the surface the game draws: on Windows 10 the decoder got it twice in an
+// 18-second intro, or never (as under Wine), and the intro stayed black.
+// Here the releasing thread waits, after a release another of the game's threads is waiting
+// for, until the section has been taken (fairlocks=on, the default). The game's own imports
+// only: a waiter is one that came through HookEnterCriticalSection.
+using CriticalSectionFn = void(WINAPI*)(CRITICAL_SECTION*);
+CriticalSectionFn g_enterCriticalSection, g_leaveCriticalSection;
+
+// The critical sections threads are waiting for (seldom more than one at a time).
+struct Waited {
+    CRITICAL_SECTION* volatile cs;
+    volatile LONG threads;       // waiting for it (0: the slot is free)
+    DWORD ids[8];                // those threads (0: none); g_waitedLock
+    volatile LONG quiet;         // a hand-over ran out of time: none until `quietUntil`
+    volatile DWORD quietUntil;   // (GetTickCount)
+};
+Waited g_waited[16];                      // changed under g_waitedLock, read without it
+SRWLOCK g_waitedLock = SRWLOCK_INIT;
+volatile LONG g_waiters;                  // the threads waiting, over all the sections
+
+// nullptr: every slot is taken by another section, or this one's by eight threads (this wait
+// isn't known to the releases).
+Waited* AddWaiter(CRITICAL_SECTION* cs, DWORD thread) {
+    Waited* found = nullptr;
+    AcquireSRWLockExclusive(&g_waitedLock);
+    for (Waited& w : g_waited)
+        if (w.threads && w.cs == cs) found = &w;
+    for (Waited& w : g_waited)
+        if (!found && !w.threads) {
+            found = &w;
+            w.cs = cs;
+            w.quiet = 0;
+        }
+    DWORD* id = nullptr;
+    if (found)
+        for (DWORD& i : found->ids)
+            if (!id && !i) id = &i;
+    if (id) {
+        *id = thread;
+        InterlockedIncrement(&found->threads);
+        InterlockedIncrement(&g_waiters);
+    }
+    ReleaseSRWLockExclusive(&g_waitedLock);
+    return id ? found : nullptr;
+}
+
+// (g_waitedLock held.) Whether `thread` was waiting for `cs` in `w`; it no longer is.
+bool DropWaiter(Waited* w, const CRITICAL_SECTION* cs, DWORD thread) {
+    if (!w->threads || w->cs != cs) return false;
+    for (DWORD& i : w->ids)
+        if (i == thread) {
+            i = 0;
+            InterlockedDecrement(&w->threads);
+            InterlockedDecrement(&g_waiters);
+            return true;
+        }
+    return false;
+}
+
+void RemoveWaiter(Waited* w, const CRITICAL_SECTION* cs, DWORD thread) {
+    AcquireSRWLockExclusive(&g_waitedLock);
+    DropWaiter(w, cs, thread);  // (already dropped if it was taken for dead: see GiveUp)
+    ReleaseSRWLockExclusive(&g_waitedLock);
+}
+
+// Nobody took the released section in time. Waiters that no longer exist (killed as they
+// waited: the real EnterCriticalSection never came back to count them out) are dropped. For
+// one that can't run now (suspended, or starved), the releases stop waiting for a quarter
+// second, then try again. On XP such a waiter owned the section and the game hung.
+void GiveUp(Waited* w, const CRITICAL_SECTION* cs) {
+    AcquireSRWLockExclusive(&g_waitedLock);
+    if (w->threads && w->cs == cs) {
+        for (const DWORD id : w->ids) {
+            if (!id) continue;
+            const HANDLE thread = OpenThread(SYNCHRONIZE, FALSE, id);
+            const bool gone = !thread || WaitForSingleObject(thread, 0) == WAIT_OBJECT_0;
+            if (thread) CloseHandle(thread);
+            if (gone) DropWaiter(w, cs, id);
+        }
+        if (w->threads) {
+            w->quietUntil = GetTickCount() + 250;
+            w->quiet = 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_waitedLock);
+}
+
+void WINAPI HookEnterCriticalSection(CRITICAL_SECTION* cs) {
+    if (TryEnterCriticalSection(cs)) return;
+    const DWORD lastError = GetLastError(), thread = GetCurrentThreadId();
+    Waited* const w = AddWaiter(cs, thread);
+    DD2D9_NEXT(g_enterCriticalSection)(cs);
+    if (w) RemoveWaiter(w, cs, thread);
+    SetLastError(lastError);
+}
+
+void WINAPI HookLeaveCriticalSection(CRITICAL_SECTION* cs) {
+    // (Read while the section is still this thread's: the last of its nested entries?)
+    const bool released = cs->RecursionCount == 1;
+    DD2D9_NEXT(g_leaveCriticalSection)(cs);
+    if (!released || !g_waiters) return;
+    Waited* slot = nullptr;
+    for (Waited& w : g_waited)
+        if (w.threads && w.cs == cs) slot = &w;
+    if (!slot) return;
+    if (slot->quiet) {
+        if (LONG(GetTickCount() - slot->quietUntil) < 0) return;
+        slot->quiet = 0;
+    }
+    // The release woke a waiter: this thread stands aside until someone owns the section
+    // (yielding for a millisecond, then asleep a few times, for a waiter of a lower priority
+    // on the same processor).
+    // (`cs` is read after its release, while a thread is counted as waiting for it. A waiter
+    // that took it, left it and freed its memory between two of these reads would leave a
+    // stale pointer here: only memory given back to the system could fault, and a section
+    // freed while another thread uses it is the game's own error.)
+    const DWORD lastError = GetLastError();  // (the game's, as LeaveCriticalSection leaves it)
+    LARGE_INTEGER freq, start, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    for (int sleeps = 0; slot->threads && slot->cs == cs && !cs->OwningThread;) {
+        QueryPerformanceCounter(&now);
+        if ((now.QuadPart - start.QuadPart) * 1000 < freq.QuadPart) {
+            SwitchToThread();
+        } else if (sleeps++ < 3) {
+            Sleep(1);
+        } else {
+            GiveUp(slot, cs);
+            break;
+        }
+    }
+    SetLastError(lastError);
+}
+
+ImportHook kLockHooks[] = {
+    {"kernel32", "EnterCriticalSection", reinterpret_cast<void*>(HookEnterCriticalSection),
+     reinterpret_cast<void**>(&g_enterCriticalSection)},
+    {"kernel32", "LeaveCriticalSection", reinterpret_cast<void*>(HookLeaveCriticalSection),
+     reinterpret_cast<void**>(&g_leaveCriticalSection)},
+};
+
 // Functions looked up at run time (games that also ran on Windows 95 find
 // GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's.
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
@@ -637,7 +189,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[6];
+HookTable g_tables[7];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
@@ -656,14 +208,15 @@ ImportHook kProcHooks[] = {
 
 void InstallCompatHooks(bool inLoaderLock) {
     if (inLoaderLock && g_config.cpus) SetAffinity();
-    g_tables[0] = {kMemoryHooks, sizeof(kMemoryHooks) / sizeof(kMemoryHooks[0]), g_config.ramMB != 0};
-    g_tables[1] = {kCpuHooks, sizeof(kCpuHooks) / sizeof(kCpuHooks[0]), g_config.cpuMHz != 0};
-    g_tables[2] = {kCpusHooks, sizeof(kCpusHooks) / sizeof(kCpusHooks[0]), g_affinity != 0};
+    g_tables[0] = {kMemoryHooks, kMemoryHookCount, g_config.ramMB != 0};
+    g_tables[1] = {kCpuHooks, kCpuHookCount, g_config.cpuMHz != 0};
+    g_tables[2] = {kCpusHooks, kCpusHookCount, g_affinity != 0};
     // (Always: besides desktopbpp's depth, the current mode is the game's while it is shown
     // scaled or in a window, and a change to that mode does nothing; see FixDepth.)
-    g_tables[3] = {kDepthHooks, sizeof(kDepthHooks) / sizeof(kDepthHooks[0]), true};
-    g_tables[4] = {kWindowHooks, sizeof(kWindowHooks) / sizeof(kWindowHooks[0]), true};
-    g_tables[5] = {kHeapHooks, sizeof(kHeapHooks) / sizeof(kHeapHooks[0]), true};
+    g_tables[3] = {kDepthHooks, kDepthHookCount, true};
+    g_tables[4] = {kWindowHooks, kWindowHookCount, true};
+    g_tables[5] = {kHeapHooks, sizeof(kHeapHooks) / sizeof(kHeapHooks[0]), g_config.heapZero};
+    g_tables[6] = {kLockHooks, sizeof(kLockHooks) / sizeof(kLockHooks[0]), g_config.fairLocks};
     // The tables switched on, and GetProcAddress with them, patched together (the modules
     // listed once): made once, the setting fixed for the process.
     static std::vector<ImportHook> all;

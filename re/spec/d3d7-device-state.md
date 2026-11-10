@@ -546,7 +546,7 @@ corner can report "partly visible" where an exact sphere test would say "outside
 
 ## For dd2d9
 
-dd2d9 has only stubs for Direct3D today (`src/d3dstubs.h`), so this is the list of behaviours to implement.
+The behaviours dd2d9's Direct3D 7 (`src/d3d7*.cpp`) implements, and how.
 
 1. **State storage on the dd2d9 side.** Keep DX7's own arrays (256 render states, 8×64 stage states, 8 textures,
    matrices, viewport, material, growable light array, clip planes, clip status) and answer every Get* from them,

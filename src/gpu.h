@@ -20,16 +20,17 @@ struct IDirect3DDevice9;
 struct IDirect3DSwapChain9;
 struct IDirect3DBaseTexture9;
 struct IDirect3DSurface9;
+struct IDirect3DVertexDeclaration9;
 
 namespace dd2d9 {
 
 IDirect3D9* CreateD3D9();  // Windows' d3d9.dll or the game's, as configured
 
 // GpuContext::Draw sets a vertex declaration or a stage's texture only when it isn't the one
-// it set last on that device (gpures.cpp). Anything else that sets a device's vertex format or
-// textures (GPU blits, the presenter, overlays) goes through SetFvf9 and SetTexture9, and a
-// device made, reset, released or presented bumps the epoch too: Draw's record is then
-// stale. Gpu lock held.
+// it set last on that device (Gpu::lastDecl, Gpu::lastTex). Anything else that sets a
+// device's vertex format or textures (GPU blits, the presenter, overlays) goes through
+// SetFvf9 and SetTexture9, and a device made, reset, released or presented bumps the epoch
+// too: Draw's record is then stale. Gpu lock held.
 extern volatile LONG g_deviceStateEpoch;
 inline void DeviceStateChanged() { InterlockedIncrement(&g_deviceStateEpoch); }
 HRESULT SetFvf9(IDirect3DDevice9* d, DWORD fvf);
@@ -60,11 +61,15 @@ public:
     IDirect3DDevice9* Ensure();
     // The game's window: the device's window when it is made (see Ensure). Any thread.
     void SetWindowHint(HWND h) { InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&hint_), h); }
-    IDirect3DDevice9* Device() const { return dev_; }  // Lock held; may be lost
+    // The device as it is, not made, reset or checked (it may be lost): for calls that must
+    // not reset it. Lock held.
+    IDirect3DDevice9* CurrentDevice() const { return dev_; }
 
     // A frame for `hwnd`'s client area at w x h: whether it can be drawn (into
     // TargetBackBuffer's top left w x h) and presented (PresentTarget). Lock held, after Ensure().
-    bool PrepareTarget(HWND hwnd, UINT w, UINT h);
+    // immediate: presented at once, not at a vblank (the game flips without vsync), where
+    // the device itself waits for one: through a swap chain of its own then.
+    bool PrepareTarget(HWND hwnd, UINT w, UINT h, bool immediate);
     IDirect3DSurface9* TargetBackBuffer();  // referenced; nullptr if it can't be had
     HRESULT PresentTarget();
     // Vsync under the desktop compositor (see gpu.cpp): Present doesn't wait, dd2d9 paces
@@ -75,7 +80,7 @@ public:
     // in its units. False with vsync=off, under Wine, while composition is off, or when the
     // compositor won't tell.
     static bool CompositorClock(int64_t* vblank, int64_t* period);
-    void DropSwapChain();  // Lock held: another device (a wrapper's) presents into the window
+    void DropSwapChain();  // Lock held: no longer presenting into PrepareTarget's window
 
     // Counts device creations and resets: the device's states and D3DPOOL_DEFAULT resources
     // are new since a different value. Lock held.
@@ -83,10 +88,19 @@ public:
     // The GpuContext (gpures.h) whose states the device holds now: another one taking over
     // sends all of its own again. Lock held.
     const void* stateOwner = nullptr;
+    // What GpuContext::Draw set last on the device: the vertex declaration and each stage's
+    // texture, each valid while g_deviceStateEpoch has the value recorded with it (-1: none
+    // yet). Lock held.
+    IDirect3DVertexDeclaration9* lastDecl = nullptr;
+    LONG lastDeclEpoch = -1;
+    IDirect3DBaseTexture9* lastTex[8] = {};
+    LONG lastTexEpoch = -1;
     // Direct3D 9 draws only inside BeginScene/EndScene, and presents only outside: a scene
     // opens with the first draw and closes before anything presents or reads back. Lock held.
     void OpenScene();
     void CloseScene();
+    // Something drew (opened a scene) since the last PresentTarget. Lock held.
+    bool DrewSincePresent() const { return drew_; }
 
     void AddOwner(Owner* o);     // Lock held
     void RemoveOwner(Owner* o);  // Lock held
@@ -101,6 +115,7 @@ private:
     IDirect3D9* d3d_ = nullptr;
     IDirect3DDevice9* dev_ = nullptr;
     HWND window_ = nullptr;  // the device's own (hidden) window, on a thread of its own
+    HANDLE windowThread_ = nullptr;
     UINT devW_ = 0, devH_ = 0;  // its implicit back buffer (decided at creation)
     HWND hint_ = nullptr;       // SetWindowHint's
     HWND devWindow_ = nullptr;  // the implicit swap chain's window (the game's, or window_)
@@ -110,9 +125,15 @@ private:
     IDirect3DSwapChain9* swap_ = nullptr;  // for a target larger than the implicit back buffer
     HWND swapWnd_ = nullptr;
     UINT swapW_ = 0, swapH_ = 0;
+    UINT swapInterval_ = 0;
+    bool immediateRefused_ = false;  // an immediate swap chain's Present failed: not tried again on this device
+    HWND swapFailWnd_ = nullptr;  // the swap chain PrepareTarget couldn't make on this device
+    UINT swapFailW_ = 0, swapFailH_ = 0, swapFailInterval_ = 0;
+    DWORD swapFailAt_ = 0;  // when it last failed (tried again 2 s on)
     std::vector<Owner*> owners_;
     unsigned generation_ = 0;
     bool inScene_ = false;
+    bool drew_ = false;
     bool failed_ = false;  // creation failed: not retried every frame
     DWORD failedAt_ = 0;
 };

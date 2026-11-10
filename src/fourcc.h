@@ -1,0 +1,51 @@
+// The FourCC formats Blt converts through A8R8G8B8 (as the drivers under ddraw.dll did):
+// DXT1-5 (S3TC) blocks (Wine's test_compressed_surface_stretch on Windows), packed YUY2/UYVY
+// and planar YV12/I420 (video decoded into an offscreen surface and blitted to the screen).
+#pragma once
+
+#include <cstdint>
+
+#include <windows.h>
+
+namespace dd2d9 {
+
+struct Buffer;
+
+// A8R8G8B8 pixels standing for part of a FourCC surface, its window from (left, top) on: the
+// surface's pixel (x, y) at bits + (y - top) * pitch + (x - left) * 4.
+struct ArgbWindow {
+    uint8_t* bits;
+    LONG pitch;
+    int left = 0, top = 0;
+    uint32_t* Row(int y) const { return reinterpret_cast<uint32_t*>(bits + (y - top) * pitch); }  // from `left` on
+};
+// `b` (DXT or YUV) into `out`: rows y0 to y1 (DXT: from y0's block row on), columns x0 to x1
+// (whole DXT blocks, whole YUV pairs). The window starts no later than those blocks and pairs.
+void DecodeFourCC(const Buffer* b, const ArgbWindow& out, int y0, int y1, int x0, int x1);
+// All of `b` into `argb` (b's size, `pitch` bytes a row).
+void DecodeFourCC(const Buffer* b, uint8_t* argb, LONG pitch);
+// The part of `b` that `r` touches, from `in` (which holds it): whole DXT blocks (pixels past
+// the surface's edge repeat its last row and column) or whole YUV pixel pairs (chroma the
+// pair's average).
+void EncodeFourCC(const ArgbWindow& in, Buffer* b, const RECT& r);
+// A colour key of a FourCC surface as the A8R8G8B8 its pixels decode to: DXT keys are
+// R5G6B5 (the blocks' colours), YUY2/UYVY keys a pixel pair as the surface packs it (the
+// first pixel's colour).
+uint32_t FourCCKeyToArgb(DWORD fourCC, DWORD key);
+// A YUV surface's (YUY2, UYVY, YV12, I420) colour key lo..hi (one value but for a range),
+// compared in its own Y, U and V (the key's bytes as FourCCKeyToArgb reads them), component
+// by component: YUV to RGB clamps and rounds (every Y below 16 is black), so a decoded pixel
+// can match a key it doesn't hold, and a box of YUV values isn't a range of A8R8G8B8 ones.
+// Sets the alpha of each pixel of `argb` (b decoded by DecodeFourCC, the same rows and
+// columns) to 0 where the key matches, 255 elsewhere. A component's high value below its low
+// value is the low value.
+void MarkYuvKey(const Buffer* b, const ArgbWindow& argb, DWORD lo, DWORD hi, int y0, int y1, int x0, int x1);
+// DXT to DXT of the same format, no stretching: d and s the same size, their left and top on
+// a block boundary; the blocks they cover copied as they are (within one buffer, in the
+// order that reads each block row before it is written).
+void CopyBlocks(Buffer* dst, const RECT& d, const Buffer* src, const RECT& s);
+// Planar (YV12 / I420) to planar of the same format, no stretching: d and s the same size,
+// their left and top even (the chroma planes copied by 2x2 block).
+void CopyPlanar(Buffer* dst, const RECT& d, const Buffer* src, const RECT& s);
+
+}  // namespace dd2d9

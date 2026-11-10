@@ -356,6 +356,48 @@ static int RunD3D6(IDirectDraw4* dd, IDirectDrawSurface4* rt) {
     Log("dip sphere      hash %08x  %7.1f frames/s, %7.1f us a frame in the call (%lu vertices, %lu triangles)", hp,
         frames / (t1 - t0), g_callTime / frames * 1e6, n, DWORD(si.size() / 3));
 
+    // The same sphere through IDirect3DDevice2, one DrawIndexedPrimitive per row of it (a
+    // game's sub-meshes of one vertex array): fewer indices than half the vertices, so only
+    // those used are transformed (B §8.1). The clip status after the first row and after
+    // all of them is part of the hash.
+    IDirect3DDevice2* dev2 = nullptr;
+    if (FAILED(dev->QueryInterface(IID_IDirect3DDevice2, reinterpret_cast<void**>(&dev2)))) return Log("FAIL Device2"), 1;
+    D3DCLIPSTATUS rowStatus[2] = {};
+    auto drawRows = [&] {
+        D3DRECT r = {0, 0, kW, kH};
+        vp->Clear2(1, &r, D3DCLEAR_TARGET, 0x00101010, 1.0f, 0);
+        D3DCLIPSTATUS cs = {D3DCLIPSTATUS_STATUS | D3DCLIPSTATUS_EXTENTS2, 0, 1e9f, -1e9f, 1e9f, -1e9f, 0, 0};
+        dev->SetClipStatus(&cs);
+        dev->BeginScene();
+        const DWORD row = 96 * 6;
+        const double c0 = Now();
+        for (DWORD at = 0; at < si.size(); at += row) {
+            dev2->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, D3DVT_VERTEX, sv.data(), n, si.data() + at, row, 0);
+            if (!at) dev->GetClipStatus(&rowStatus[0]);
+        }
+        g_callTime += Now() - c0;
+        dev->GetClipStatus(&rowStatus[1]);
+        dev->EndScene();
+    };
+    drawRows();
+    const uint32_t hr2 = Fnv(rowStatus, sizeof(rowStatus), Pixels(rt, "dip-rows"));
+    g_callTime = 0;
+    frames = 0;
+    const double r0 = Now();
+    double r1 = r0;
+    while (r1 - r0 < g_seconds) {
+        drawRows();
+        frames++;
+        if (!(frames & 7)) Pixels(rt, "dip-rows-t");
+        r1 = Now();
+    }
+    Log("dip rows (dev2) hash %08x status %08lx  %7.1f frames/s, %7.1f us a frame in the calls (%lu draws; first row's "
+        "extents %g..%g x %g..%g, all rows' status %08lx)",
+        hr2, rowStatus[0].dwStatus, frames / (r1 - r0), g_callTime / frames * 1e6, DWORD(si.size() / (96 * 6)),
+        double(rowStatus[0].minx), double(rowStatus[0].maxx), double(rowStatus[0].miny), double(rowStatus[0].maxy),
+        rowStatus[1].dwStatus);
+    dev2->Release();
+
     // Many small draws of transformed vertices (a 2D game's sprites, a HUD): 2048 quads a
     // frame, each its own DrawPrimitive, half textured, at two depths and rhw (the per-draw
     // work: binding, the transformed vertices' checks). And one quad with a bad rhw (0) and z

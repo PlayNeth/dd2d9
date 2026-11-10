@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.5.0',
+  version : '1.6.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -20,9 +20,18 @@ endforeach
 static_link = ['-static', '-static-libgcc', '-static-libstdc++']
 
 ddraw = shared_library('ddraw',
-  'src/main.cpp', 'src/util.cpp', 'src/ddraw.cpp', 'src/surface.cpp', 'src/blit.cpp', 'src/presenter.cpp', 'src/gpu.cpp',
-    'src/gpures.cpp', 'src/convert.cpp', 'src/dxt.cpp', 'src/d3d7.cpp', 'src/d3d6obj.cpp', 'src/d3d6vp.cpp',
-    'src/d3d6dev.cpp', 'src/d3d6pipe.cpp', 'src/input.cpp', 'src/hooks.cpp', 'src/compat.cpp', 'src/video.cpp', 'src/overlay.cpp',
+  'src/main.cpp', 'src/attach.cpp', 'src/blit.cpp', 'src/blitcore.cpp', 'src/blitfourcc.cpp',
+    'src/buffer.cpp', 'src/clipper.cpp', 'src/compat.cpp', 'src/compatdisplay.cpp', 'src/compatgdi.cpp',
+    'src/compatsys.cpp', 'src/config.cpp', 'src/convert.cpp', 'src/d3d6dev.cpp', 'src/d3d6draw.cpp',
+    'src/d3d6drv.cpp', 'src/d3d6exec.cpp', 'src/d3d6obj.cpp', 'src/d3d6vp.cpp', 'src/d3d6xform.cpp',
+    'src/d3d7draw.cpp', 'src/d3d7obj.cpp', 'src/d3d7pipe.cpp', 'src/d3d7sb.cpp', 'src/d3d7state.cpp',
+    'src/d3dxlate.cpp', 'src/ddcaps.cpp', 'src/ddcreate.cpp', 'src/ddgdi.cpp', 'src/ddhook.cpp',
+    'src/ddmode.cpp', 'src/ddraw.cpp', 'src/ddscreen.cpp', 'src/ddtiming.cpp', 'src/ddwindow.cpp',
+    'src/format.cpp', 'src/fourcc.cpp', 'src/gpu.cpp', 'src/gpucontext.cpp', 'src/gpudepth.cpp',
+    'src/gpudraw.cpp', 'src/gpuformat.cpp', 'src/gpusurf.cpp', 'src/gputex.cpp', 'src/hooks.cpp',
+    'src/input.cpp', 'src/inputpaint.cpp', 'src/lock.cpp', 'src/log.cpp', 'src/overlay.cpp',
+    'src/palette.cpp', 'src/presentconv.cpp', 'src/presenter.cpp', 'src/presentpass.cpp', 'src/quadpass.cpp',
+    'src/surface.cpp', 'src/util.cpp', 'src/video.cpp',
   name_prefix : '',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,

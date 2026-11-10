@@ -6,13 +6,6 @@
 namespace dd2d9 {
 namespace d6 {
 
-// The reference slot of the interface pointer a game gave (XP releases through it).
-static int SlotOfIface(Surface* s, void* iface) {
-    for (int v : {1, 2, 3, 4, 7})
-        if (s->Iface(v) == iface) return Surface::SlotFor(v);
-    return Surface::kRefV1;
-}
-
 Viewport* VpFrom(IUnknown* p) { return p ? static_cast<Viewport*>(reinterpret_cast<IDirect3DViewport3*>(p)) : nullptr; }
 
 // UpdateViewportCache (C §1.6): nothing for degenerate data (the previous mapping stays).
@@ -43,7 +36,18 @@ bool MakeMap(const D3DVIEWPORT2& v, VpMap* m) {
     return true;
 }
 
-Viewport::Viewport(D3D* d3d) : d3d_(d3d), id(d3d->nextViewportId++) { data.dwSize = sizeof(D3DVIEWPORT2); }
+void ExtentRect(const VpMap& m, const float ext[4], D3DRECT* r) {
+    const LONG vx1 = LONG(m.X), vy1 = LONG(m.Y), vx2 = LONG(m.X + m.W), vy2 = LONG(m.Y + m.H);
+    r->x1 = std::max(LONG(floorf(ext[0] + 0.5f)) - 1, vx1);
+    r->y1 = std::max(LONG(floorf(ext[1] + 0.5f)) - 1, vy1);
+    r->x2 = std::min(LONG(floorf(ext[2] + 0.5f)) + 1, vx2);
+    r->y2 = std::min(LONG(floorf(ext[3] + 0.5f)) + 1, vy2);
+}
+
+Viewport::Viewport(D3D* d3d) : d3d_(d3d), id(d3d->nextViewportId++) {
+    data.dwSize = sizeof(D3DVIEWPORT2);
+    g_liveViewports.push_back(this);
+}
 
 Viewport::~Viewport() {
     for (Light* l : lights) {
@@ -53,20 +57,15 @@ Viewport::~Viewport() {
     lights.clear();
     g_lightGen++;
     if (dev) dev->RemoveViewport(this);
-    if (d3d_) {
-        auto it = std::find(d3d_->viewports.begin(), d3d_->viewports.end(), this);
-        if (it != d3d_->viewports.end()) d3d_->viewports.erase(it);
-    }
+    if (d3d_) Unlink(d3d_->viewports, this);
     // XP never releases the background depth surface; one set through SetBackgroundDepth2
     // (which took a reference) is released here (C §For dd2d9 6).
     if (bgDepth && bgDepthSlot >= 0) bgDepth->Release(bgDepthSlot);
+    Unlink(g_liveViewports, this);
 }
 
 void Viewport::Orphan() {
-    if (d3d_) {
-        auto it = std::find(d3d_->viewports.begin(), d3d_->viewports.end(), this);
-        if (it != d3d_->viewports.end()) d3d_->viewports.erase(it);
-    }
+    if (d3d_) Unlink(d3d_->viewports, this);
     d3d_ = nullptr;
 }
 
@@ -193,12 +192,7 @@ HRESULT Viewport::TransformVertices(DWORD n, D3DTRANSFORMDATA* d, DWORD flags, D
         const float rhw = pw != 0.0f ? 1.0f / pw : 2097152.0f;
         WORD code = 0;
         if (clipped) {
-            if (px < 0) code |= D3DCLIP_LEFT;
-            if (px > pw) code |= D3DCLIP_RIGHT;
-            if (py > pw) code |= D3DCLIP_TOP;
-            if (py < 0) code |= D3DCLIP_BOTTOM;
-            if (pz < 0) code |= D3DCLIP_FRONT;
-            if (pz > pw) code |= D3DCLIP_BACK;
+            code = WORD(ClipCode01(px, py, pz, pw));
             D3DHVERTEX& h = d->lpHOut[i];
             h.dwFlags = code;
             // Back in the viewport's own clip coordinates (the inverse Mclip).
@@ -237,11 +231,7 @@ HRESULT Viewport::TransformVertices(DWORD n, D3DTRANSFORMDATA* d, DWORD flags, D
     ex[1] = std::max(ex[1] - adj, m.Y);
     ex[2] = std::min(ex[2] + adj, m.X + m.W);
     ex[3] = std::min(ex[3] + adj, m.Y + m.H);
-    const LONG vx1 = LONG(m.X), vy1 = LONG(m.Y), vx2 = LONG(m.X + m.W), vy2 = LONG(m.Y + m.H);
-    d->drExtent.x1 = std::max(LONG(floorf(ex[0] + 0.5f)) - 1, vx1);
-    d->drExtent.y1 = std::max(LONG(floorf(ex[1] + 0.5f)) - 1, vy1);
-    d->drExtent.x2 = std::min(LONG(floorf(ex[2] + 0.5f)) + 1, vx2);
-    d->drExtent.y2 = std::min(LONG(floorf(ex[3] + 0.5f)) + 1, vy2);
+    ExtentRect(m, ex, &d->drExtent);
     if (!offscreen) return DDERR_INVALIDPARAMS;  // XP faults after the work
     *offscreen = clipped ? (n ? andCodes : 0xFFFFFFFF) : 0;
     return D3D_OK;
@@ -268,7 +258,8 @@ HRESULT Viewport::GetBackground(D3DMATERIALHANDLE* h, WINBOOL* valid) {
 // The previous surface is released and the new one kept without a reference (sic).
 HRESULT Viewport::SetBackgroundDepth(IDirectDrawSurface* s) {
     Guard l;
-    if (bgDepth) bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : SlotOfIface(bgDepth, bgDepthIface));
+    if (bgDepth)
+        bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : Surface::SlotFor(VersionOfIface(bgDepth, bgDepthIface)));
     bgDepth = s ? Surface::From(s) : nullptr;
     bgDepthIface = s;
     bgDepthSlot = -1;
@@ -283,7 +274,8 @@ HRESULT Viewport::SetBackgroundDepth2(IDirectDrawSurface4* s) {
         if (!n) return DDERR_INVALIDPARAMS;
         n->AddRef(Surface::kRefV1);  // QueryInterface(IID_IDirectDrawSurface)
     }
-    if (bgDepth) bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : SlotOfIface(bgDepth, bgDepthIface));
+    if (bgDepth)
+        bgDepth->Release(bgDepthSlot >= 0 ? bgDepthSlot : Surface::SlotFor(VersionOfIface(bgDepth, bgDepthIface)));
     bgDepth = n;
     bgDepthIface = n ? n->Iface(1) : nullptr;
     bgDepthSlot = n ? Surface::kRefV1 : -1;
@@ -312,8 +304,8 @@ HRESULT Viewport::GetBackgroundDepth2(IDirectDrawSurface4** s, WINBOOL* valid) {
 
 // ---- clearing (C §1.11-1.13)
 
-HRESULT Viewport::ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>* out) const {
-    if (!rects) return D3D_OK;  // nothing cleared (Wine's test_clear_rect_count on Windows)
+void Viewport::ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>* out) const {
+    if (!rects) return;  // nothing cleared (Wine's test_clear_rect_count on Windows)
     // To the viewport. d3dim clips a version 1 device's rectangles to the render target
     // only, but the drivers then held the clear to the viewport (Wine's test_clear; AMD's
     // didn't).
@@ -324,7 +316,6 @@ HRESULT Viewport::ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>*
         RECT r = {rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2}, c;
         if (IntersectRect(&c, &r, &clip)) out->push_back(c);
     }
-    return D3D_OK;
 }
 
 HRESULT Viewport::Clear(DWORD n, D3DRECT* rects, DWORD flags) {
@@ -340,8 +331,7 @@ HRESULT Viewport::Clear(DWORD n, D3DRECT* rects, DWORD flags) {
         if (FAILED(hr)) return hr;
     }
     std::vector<RECT> list;
-    HRESULT hr = ProcessRects(n, rects, &list);
-    if (FAILED(hr)) return hr;
+    ProcessRects(n, rects, &list);
     if (list.empty()) return D3D_OK;  // nothing is cleared
     DWORD color = 0;
     Surface* tex = nullptr;
@@ -375,8 +365,7 @@ HRESULT Viewport::Clear2(DWORD n, D3DRECT* rects, DWORD flags, D3DCOLOR color, D
         if (FAILED(hr)) return hr;
     }
     std::vector<RECT> list;
-    const HRESULT hr = ProcessRects(n, rects, &list);
-    if (FAILED(hr)) return hr;
+    ProcessRects(n, rects, &list);
     if (!list.empty()) ClearRects(dev, list, flags & 7, color, z, stencil);
     return D3D_OK;
 }
@@ -392,7 +381,6 @@ HRESULT Viewport::AddLight(IDirect3DLight* p) {
     if (light->vp) return D3DERR_LIGHTHASVIEWPORT;
     lights.push_back(light);
     light->vp = this;
-    lightsDirty = true;
     g_lightGen++;
     light->AddRef();
     return D3D_OK;
@@ -405,7 +393,6 @@ HRESULT Viewport::DeleteLight(IDirect3DLight* p) {
     if (light->vp != this) return D3DERR_LIGHTNOTINTHISVIEWPORT;
     lights.erase(std::find(lights.begin(), lights.end(), light));
     light->vp = nullptr;
-    lightsDirty = true;
     g_lightGen++;
     light->Release();
     return D3D_OK;

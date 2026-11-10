@@ -572,7 +572,7 @@ d3dim700 there is **no hardware-device lookup and no D3DRENDERSTATE_EVICTMANAGED
 ## Implementation notes for dd2d9 (on D3D9)
 
 **Where it hooks in.** `ddraw.cpp:81` sends unknown IIDs to `D3D7Query`, which today returns E_NOINTERFACE for
-IDirect3D/2/3 and for non-DD7 objects (`d3d7.cpp:2041-2047`); `surface.cpp:321` sends unknown IIDs to the D7VK proxy
+IDirect3D/2/3 and for non-DD7 objects (`D3D7Query` in `d3d7obj.cpp`); `surface.cpp:321` sends unknown IIDs to the D7VK proxy
 only. Add a `D3DLegacyQuery(DDraw*, riid, out, ddVersion)` for `!dd->dd7` objects and a `D3DLegacyQuerySurface(Surface*,
 riid, out, version)` that implements the surface protocol (texture cache list on `Surface`, released in the Surface
 destructor where `D3DProxySurfaceDestroyed` already sits), returning E_INVALIDARG for other IIDs when Direct3D is
@@ -580,7 +580,7 @@ enabled (`g_config.d3d`), E_NOINTERFACE when disabled (= "no d3dim.dll").
 
 **One Direct3D object, three vtables.** A `Direct3D3Obj` deriving from IDirect3D, IDirect3D2 and IDirect3D3 (three
 sub-objects, as d3dim does), with `outer_` = the DirectDraw interface version like `Direct3D7::outer_`
-(`d3d7.cpp:215-227`); keep it in a new `DDraw::d3dLegacy` next to `d3d7`, destroyed in the same place as
+(`d3d7int.h`); keep it in a new `DDraw::d3dLegacy` next to `d3d7`, destroyed in the same place as
 `D3D7Destroy`, force-destroying its devices/lights/materials/viewports.
 
 **Devices.** The drawing machinery of `Device7` (the `GpuContext` from `gpures.h`: SetTargets, states, Draw) is what a
@@ -593,7 +593,7 @@ mono lighting); accept its creation and report its desc so that games which pick
 
 **Caps.** RGB/MMX/Ramp descs are fixed tables (above): emit them verbatim per interface version (keep the v1/v2 RGB
 desc with no alpha blending — games pick paths from it). HAL desc from `GpuGetCaps()` as `HalDesc()` does for DX7
-(`d3d7.cpp` HAL table in d3d7-direct3d.md), converted to D3DDEVICEDESC: dwFlags 0x7FF, dcmColorModel D3DCOLOR_RGB,
+(`d3d7obj.cpp`'s HAL table in d3d7-direct3d.md), converted to D3DDEVICEDESC: dwFlags 0x7FF, dcmColorModel D3DCOLOR_RGB,
 dtcTransformCaps {8, CLIP}, bClipping TRUE, dlcLightingCaps {0x10, 0xF, RGB, 8 or 0}, render depths DDBD_16|DDBD_32 (no
 DDBD_8), dwMaxBufferSize 0, dwMaxVertexCount 0x400 (as XP substitutes for 0), v3 fields from D3D9 (blend stages /
 textures clamped to 8); no HWTRANSFORMANDLIGHT-style fix-ups, no added HWRASTERIZATION (a real DX7 driver sets it

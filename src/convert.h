@@ -1,8 +1,8 @@
-// Rows of pixels to A8R8G8B8, exactly as PixelToARGB converts one (util.cpp), with SSE2 for
+// Rows of pixels to A8R8G8B8, exactly as PixelToARGB converts one (format.cpp), with SSE2 for
 // the common layouts: 8-bit palettized (a table), 16-bit 565/555/1555/4444 and 32-bit RGB
 // (24-bit RGB unkeyed: four pixels from three words),
 // with an optional colour key (keyed pixels become 0, transparent black). Used for textures
-// and render targets on their way to the GPU (gpures.cpp).
+// and render targets on their way to the GPU (gpusurf.cpp, gpuformat.cpp).
 #pragma once
 #include "common.h"
 
@@ -36,7 +36,7 @@ private:
     uint32_t lut_[256];
 };
 
-// Rows of A8R8G8B8 into a format's pixels, exactly as ARGBToPixel makes one (util.cpp), with
+// Rows of A8R8G8B8 into a format's pixels, exactly as ARGBToPixel makes one (format.cpp), with
 // SSE2 for 16-bit formats of contiguous channels and 32-bit X8R8G8B8 / A8R8G8B8; others
 // through a table per channel. `orMask` is set on every pixel written. Not palettized.
 class RowPacker {
@@ -56,5 +56,24 @@ private:
     uint32_t mask32_ = 0;               // k32: the bits kept
     uint32_t t_[4][256];                // kTable: blue, green, red, alpha
 };
+
+// One pixel of 1 to 4 bytes, read or written as its format lays it out.
+inline uint32_t ReadPixel(const uint8_t* p, DWORD bytes) {
+    switch (bytes) {
+    case 1: return p[0];
+    case 2: return *reinterpret_cast<const uint16_t*>(p);
+    case 3: return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16);
+    default: return *reinterpret_cast<const uint32_t*>(p);
+    }
+}
+
+inline void WritePixel(uint8_t* p, DWORD bytes, uint32_t v) {
+    switch (bytes) {
+    case 1: p[0] = uint8_t(v); break;
+    case 2: *reinterpret_cast<uint16_t*>(p) = uint16_t(v); break;
+    case 3: p[0] = uint8_t(v); p[1] = uint8_t(v >> 8); p[2] = uint8_t(v >> 16); break;
+    default: *reinterpret_cast<uint32_t*>(p) = v; break;
+    }
+}
 
 }  // namespace dd2d9

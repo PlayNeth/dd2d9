@@ -44,7 +44,9 @@ SendStringAFn RealSendStringA() {
 }
 
 // The game's MCI devices drawing into a window: by alias (lower case), the window and
-// whether the game placed the picture itself. Under g_videoLock.
+// whether the game placed the picture itself. Under g_videoLock, which is never held while
+// the image's position is asked (ToReal, InWindowToReal: g_lock, taken by any thread that
+// may also move a window and so come here).
 struct Device {
     HWND window;
     bool placed;
@@ -95,7 +97,7 @@ bool ToReal(HWND window, long r[4]) {
     RECT image;
     SIZE mode;
     HWND shown;
-    if (!ShownImage(&image, &mode, &shown) || shown != window || mode.cx <= 0 || mode.cy <= 0) return false;
+    if (!GameImage(&image, &mode, &shown) || shown != window || mode.cx <= 0 || mode.cy <= 0) return false;
     MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&image), 2);  // into client coordinates
     const LONG iw = image.right - image.left, ih = image.bottom - image.top;
     auto x = [&](long v) { return long(image.left + LONG(int64_t(v) * iw / mode.cx)); };
@@ -141,6 +143,11 @@ std::string Translate(const std::string& cmd, std::string* natural, HWND* natura
     InitOnce();
     EnterCriticalSection(&g_videoLock);
     std::string out = cmd;
+    // "put ... destination at x y w h": the window it draws in and where the numbers are,
+    // translated once the lock is let go.
+    HWND putWindow = nullptr;
+    size_t putAt = 0;
+    long r[4] = {};
     if (verb == "window" && t.size() >= 4 && Lower(t[2]) == "handle") {
         long h;
         if (Lower(t[3]) == "default") g_devices->erase(alias);
@@ -156,21 +163,10 @@ std::string Translate(const std::string& cmd, std::string* natural, HWND* natura
         for (size_t i = 2; i < t.size(); i++) {
             if (Lower(t[i]) != "destination") continue;
             d.placed = true;
-            long r[4];
             if (i + 5 < t.size() && Lower(t[i + 1]) == "at" && Number(t[i + 2], &r[0]) && Number(t[i + 3], &r[1]) &&
                 Number(t[i + 4], &r[2]) && Number(t[i + 5], &r[3])) {
-                const long g[4] = {r[0], r[1], r[2], r[3]};
-                if (ToReal(d.window, r)) {
-                    std::string s = t[0] + " " + t[1];
-                    for (size_t k = 2; k < t.size(); k++) {
-                        s += " ";
-                        if (k >= i + 2 && k <= i + 5) s += std::to_string(r[k - i - 2]);
-                        else s += t[k];
-                    }
-                    DD2D9_LOG("video \"%s\": destination %ld,%ld %ldx%ld in the game's coordinates, %ld,%ld %ldx%ld on the screen",
-                              alias.c_str(), g[0], g[1], g[2], g[3], r[0], r[1], r[2], r[3]);
-                    out = s;
-                }
+                putWindow = d.window;
+                putAt = i;
             } else if (i + 1 >= t.size() || Lower(t[i + 1]) != "at") {
                 d.placed = false;  // back to the default: the natural size, placed at the next play
             }
@@ -201,6 +197,20 @@ std::string Translate(const std::string& cmd, std::string* natural, HWND* natura
         }
     }
     LeaveCriticalSection(&g_videoLock);
+    if (putWindow) {
+        const long g[4] = {r[0], r[1], r[2], r[3]};
+        if (ToReal(putWindow, r)) {
+            std::string s = t[0] + " " + t[1];
+            for (size_t k = 2; k < t.size(); k++) {
+                s += " ";
+                if (k >= putAt + 2 && k <= putAt + 5) s += std::to_string(r[k - putAt - 2]);
+                else s += t[k];
+            }
+            DD2D9_LOG("video \"%s\": destination %ld,%ld %ldx%ld in the game's coordinates, %ld,%ld %ldx%ld on the screen",
+                      alias.c_str(), g[0], g[1], g[2], g[3], r[0], r[1], r[2], r[3]);
+            out = s;
+        }
+    }
     return out;
 }
 
@@ -377,9 +387,9 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
     if (!g_cmdDevices) g_cmdDevices = new std::map<MCIDEVICEID, CmdDevice>;
     auto& devs = *g_cmdDevices;
     MCI_DGV_PUT_PARMS put = {};
-    bool translated = false, natural = false;
+    bool translated = false, natural = false, isPut = false;
     long window[4] = {0, 0, 0, 0};  // where to put the child window first (width 0: nowhere)
-    CmdDevice dev = {};
+    CmdDevice dev = {};  // (a copy: translated without the lock)
     if (msg == MCI_CLOSE) {
         if (id == MCI_ALL_DEVICE_ID) devs.clear();
         else devs.erase(id);
@@ -393,21 +403,31 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
         else if (it != devs.end()) devs.erase(it);
         RecountAll();
     } else if (msg == MCI_PUT && parms && devs.count(id)) {
-        CmdDevice& d = devs[id];
+        dev = devs[id];
+        isPut = true;
+    } else if (msg == MCI_PLAY && devs.count(id)) {
+        dev = devs[id];
+        natural = !dev.placed;
+    }
+    LeaveCriticalSection(&g_videoLock);
+    if (isPut) {
+        CmdDevice& d = dev;
         // (The rectangle is read only when the game says it gave one: MCI_DGV_RECT.)
         if (flags & MCI_DGV_RECT) put = *reinterpret_cast<const MCI_DGV_PUT_PARMS*>(parms);
         // (One call may place both the window and the picture, the same rectangle for both.)
         const RECT given = put.rc;
+        bool setWindow = false, setPlaced = false;  // what this call decided, to write back alone
         if ((flags & MCI_DGV_PUT_WINDOW) && d.child && (flags & MCI_DGV_RECT)) {
             // The game placing the player's window inside its own: as an MCIWnd window is.
             long r[4] = {given.left, given.top, given.right, given.bottom};
             if (InWindowToReal(d.window, r)) {
                 put.rc = RECT{r[0], r[1], r[2], r[3]};
-                d.gameWindow = translated = true;
+                d.gameWindow = translated = setWindow = true;
             }
         }
         if ((flags & MCI_DGV_PUT_DESTINATION) && !((flags & MCI_DGV_PUT_WINDOW) && translated)) {
             d.placed = (flags & MCI_DGV_RECT) != 0;
+            setPlaced = true;
             if (d.placed) {
                 const long g[4] = {given.left, given.top, given.right, given.bottom};
                 long r[4] = {g[0], g[1], g[2], g[3]};
@@ -420,11 +440,15 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
                 }
             }
         }
-    } else if (msg == MCI_PLAY && devs.count(id)) {
-        dev = devs[id];
-        natural = !dev.placed;
+        // (Only those: the game may have moved the player's window on another thread meanwhile,
+        // DeviceWindowToReal setting gameWindow.)
+        EnterCriticalSection(&g_videoLock);
+        if (auto it = g_cmdDevices->find(id); it != g_cmdDevices->end()) {
+            if (setWindow) it->second.gameWindow = true;
+            if (setPlaced) it->second.placed = d.placed;
+        }
+        LeaveCriticalSection(&g_videoLock);
     }
-    LeaveCriticalSection(&g_videoLock);
     PutChildWindow(id, window);
     if (natural) PlaceNaturalCmd(id, dev);
     if (translated) return real(id, msg, flags, reinterpret_cast<DWORD_PTR>(&put));
@@ -520,17 +544,24 @@ void AfterStringCommand(const std::string& cmd, MCIERROR e) {
 bool DeviceWindowToReal(HWND h, long r[4]) {
     if (!h || !g_cmdShown) return false;
     InitOnce();
+    HWND window = nullptr;
     EnterCriticalSection(&g_videoLock);
-    bool done = false;
     if (g_cmdDevices)
-        for (auto& d : *g_cmdDevices)
-            if (d.second.child && d.second.own == h && InWindowToReal(d.second.window, r)) {
-                d.second.gameWindow = true;
-                done = true;
+        for (const auto& d : *g_cmdDevices)
+            if (d.second.child && d.second.own == h) {
+                window = d.second.window;
                 break;
             }
     LeaveCriticalSection(&g_videoLock);
-    return done;
+    if (!window || !InWindowToReal(window, r)) return false;
+    EnterCriticalSection(&g_videoLock);
+    for (auto& d : *g_cmdDevices)
+        if (d.second.child && d.second.own == h) {
+            d.second.gameWindow = true;
+            break;
+        }
+    LeaveCriticalSection(&g_videoLock);
+    return true;
 }
 
 // ---------------------------------------------------------------- MCIWnd
@@ -555,7 +586,7 @@ bool Scale(HWND parent, double* sx, double* sy) {
     RECT image;
     SIZE mode;
     HWND shown;
-    if (!ShownImage(&image, &mode, &shown) || shown != parent || mode.cx <= 0 || mode.cy <= 0) return false;
+    if (!GameImage(&image, &mode, &shown) || shown != parent || mode.cx <= 0 || mode.cy <= 0) return false;
     *sx = double(image.right - image.left) / mode.cx;
     *sy = double(image.bottom - image.top) / mode.cy;
     return true;

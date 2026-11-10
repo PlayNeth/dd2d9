@@ -1,5 +1,5 @@
-// dd2d9's Direct3D 3-6: devices (B), and the emulated DX6 driver behind them that turns
-// their state into Direct3D 9's (B §1.4).
+// dd2d9's Direct3D 3-6: devices (B): creation, state, transforms, viewports, scenes, the
+// render target, caps and the draw entry points. The driver behind them: d3d6drv.cpp.
 #include "d3d6int.h"
 
 #include <algorithm>
@@ -12,11 +12,6 @@ Device* DevFrom(IDirect3DDevice* p) { return static_cast<Device::F1*>(p)->o; }
 Device* DevFrom(IDirect3DDevice2* p) { return static_cast<Device::F2*>(p)->o; }
 Device* DevFrom(IDirect3DDevice3* p) { return static_cast<Device::F3*>(p)->o; }
 
-template <class T> static void Unlink(std::vector<T>& v, T x) {
-    auto it = std::find(v.begin(), v.end(), x);
-    if (it != v.end()) v.erase(it);
-}
-
 // ---------------------------------------------------------------- creation (B §1.3)
 
 Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* rt, int rtVersion, Surface* z,
@@ -24,6 +19,7 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
     : d3d(d3d), dd(d3d->dd), kind(kind), guid(guid), version(version), rt(rt), rtVersion(rtVersion), z(z), pal(pal),
       ddHold(d3d->dd), ctx(d3d->dd->GetGpu()) {
     f1.o = f2.o = f3.o = this;
+    g_liveDevices.push_back(this);
     if (kind == kHAL) {
         HalHalDesc(&hal);
         HalHelDesc(&hel);
@@ -42,11 +38,11 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
     }
     if (version >= 2 && pal) pal->AddRef();
     std::fill(std::begin(rs), std::end(rs), 0xFFFFFFFFu);
-    rs[13] = rs[58] = rs[59] = 0;  // so that their ~0 defaults count as changes
     for (auto& t : tss) std::fill(std::begin(t), std::end(t), 0xFFFFFFFFu);
     for (auto& t : dtss) std::fill(std::begin(t), std::end(t), 0xFFFFFFFFu);
     ctx.SetTargets(rt, z);
-    // The defaults, in XP's order, through the public paths (the driver sees every one).
+    // The defaults, in XP's order, each sent to the driver: set as an execute buffer sets
+    // states, not compared with what rs holds (0xFFFFFFFF, some states' default too).
     const bool v3 = version >= 3;
     const DWORD colorKey = version < 2 && (kind == kHAL || kind == kRef);
     const DWORD mono = (kind == kRamp) ? TRUE : FALSE;
@@ -58,13 +54,13 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
         {31, 0}, {32, 0}, {33, 0}, {34, 0}, {35, 0}, {36, D(0.0f)}, {37, D(1.0f)}, {38, D(1.0f)}, {39, 0},
         {40, 0}, {41, colorKey}, {28, FALSE}, {43, 0}, {44, D3DTADDRESS_WRAP}, {45, D3DTADDRESS_WRAP}, {46, 0},
         {47, 0}, {48, 0}, {49, 1}};
-    for (const auto& d : defs) SetRS(d[0], d[1], false);
-    for (DWORD s = 64; s <= 95; s++) SetRS(s, 0, false);
+    for (const auto& d : defs) SetRS(d[0], d[1], true);
+    for (DWORD s = 64; s <= 95; s++) SetRS(s, 0, true);
     const DWORD stencil[][2] = {{52, FALSE}, {53, D3DSTENCILOP_KEEP}, {54, D3DSTENCILOP_KEEP}, {55, D3DSTENCILOP_KEEP},
                                 {56, D3DCMP_ALWAYS}, {57, 0}, {58, 0xFFFFFFFF}, {59, 0xFFFFFFFF}, {60, 0xFFFFFFFF},
                                 {11, mono}};
-    for (const auto& d : stencil) SetRS(d[0], d[1], false);
-    for (DWORD s = 128; s <= 135; s++) SetRS(s, 0, false);
+    for (const auto& d : stencil) SetRS(d[0], d[1], true);
+    for (DWORD s = 128; s <= 135; s++) SetRS(s, 0, true);
     ls.colorVertex = true;
     for (DWORD s = 0; s < 8; s++) DrvTexture(s, nullptr);
     for (DWORD s = 0; s < 8; s++) {
@@ -93,9 +89,9 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
                               {D3DTSS_BUMPENVLOFFSET, 0}};
         for (const auto& e : t) SetTSS(s, e[0], e[1]);
     }
-    SetRS(17, D3DFILTER_NEAREST, false);
-    SetRS(18, D3DFILTER_NEAREST, false);
-    SetRS(21, D3DTBLEND_MODULATE, false);  // last
+    SetRS(17, D3DFILTER_NEAREST, true);
+    SetRS(18, D3DFILTER_NEAREST, true);
+    SetRS(21, D3DTBLEND_MODULATE, true);  // last
     Use u(this);  // creates the Direct3D 9 device now and sends all of it
 }
 
@@ -111,6 +107,7 @@ Device::~Device() {
     for (ExecBuf* b : execBufs) b->dev = nullptr;  // XP destroys them under the game
     execBufs.clear();
     if (d3d) Unlink(d3d->devices, this);
+    Unlink(g_liveDevices, this);
     {
         GpuGuard g(dd->GetGpu());
         ctx.SetTargets(nullptr, nullptr);
@@ -180,15 +177,8 @@ void Device::SurfaceGone() {
 }
 
 void Device::ForgetSurface(Surface* s) {
-    bool targets = false;
-    if (z == s) {
-        z = nullptr;
-        targets = true;
-    }
-    if (rt == s) {
-        rt = nullptr;
-        targets = true;
-    }
+    if (z == s) z = nullptr;
+    if (rt == s) rt = nullptr;
     for (Surface*& t : dtex)
         if (t == s) t = nullptr;
     const DWORD h = static_cast<SurfaceInfo*>(s->d3dLegacy) ? static_cast<SurfaceInfo*>(s->d3dLegacy)->texHandle : 0;
@@ -197,299 +187,11 @@ void Device::ForgetSurface(Surface* s) {
         if (rs[1] == h) rs[1] = 0;  // TEXTUREHANDLE (C §4.1)
         if (dTexHandle == h) dTexHandle = 0;
     }
+    // The context's textures go whatever s was: it keeps those of the last draw, which the
+    // device may no longer name (BindTextures9 sets them again at the next).
     GpuGuard g(dd->GetGpu());
     ctx.SetTargets(rtUnheld ? nullptr : rt, z);  // (always: it only stores the two)
-    (void)targets;
     for (DWORD i = 0; i < 8; i++) ctx.SetTexture(i, nullptr);
-}
-
-// ---------------------------------------------------------------- the emulated driver (B §1.4)
-
-// Pushes everything to a new (or reset, or shared) Direct3D 9 device. Use held.
-void Device::PushAll() {
-    tssSentMask[0] = tssSentMask[1] = 0;
-    alphaSentMask = 0;
-    // What the vertices bring: Direct3D 9 gets transformed vertices only (d3d6pipe.cpp),
-    // with the fog factor in specular alpha.
-    ctx.SetRenderState(137, FALSE);  // LIGHTING
-    ctx.SetRenderState(140, 0);      // FOGVERTEXMODE NONE
-    ctx.SetRenderState(136, TRUE);   // CLIPPING
-    ctx.SetRenderState(151, 0);      // VERTEXBLEND
-    ctx.SetRenderState(152, 0);      // CLIPPLANEENABLE
-    for (DWORD s = 1; s < 256; s++) PushRS9(s);
-    for (DWORD st = 0; st < 8; st++)
-        for (DWORD t = 1; t < 24; t++) PushStage9(st, t);
-    PushStageOps9();
-    PushAlpha9();
-    ctx.SetRenderState(128, dWrap0);
-    ctx.SetTargets(rtUnheld ? nullptr : rt, z);  // a Z buffer set as the target is no colour target
-    SetViewport9();
-}
-
-// Render states Direct3D 9 has with the same meaning (B §Implementation notes).
-void Device::PushRS9(DWORD s) {
-    const DWORD v = rs[s];
-    switch (s) {
-    case 7: {  // ZENABLE: W buffering only where D3D9 has it
-        const bool w = (hal.dpcTriCaps.dwRasterCaps & D3DPRASTERCAPS_WBUFFER) != 0 && kind == kHAL;
-        ctx.SetRenderState(7, v == D3DZB_USEW && !w ? DWORD(D3DZB_TRUE) : v);
-        break;
-    }
-    case 15: case 24: case 25: case 41:
-        PushAlpha9();
-        PushStageOps9();
-        break;
-    case 27:
-        ctx.SetRenderState(27, v);
-        PushStageOps9();
-        break;
-    case 47: {  // ZBIAS: D3D9's DEPTHBIAS (195), a float
-        const float bias = -0.000005f * float(LONG(v));
-        ctx.SetRenderState(195, D(bias));
-        break;
-    }
-    case 8: case 9: case 14: case 16: case 19: case 20: case 22: case 23: case 26: case 28: case 29:
-    case 34: case 35: case 36: case 37: case 38: case 48: case 52: case 53: case 54: case 55: case 56: case 57:
-    case 58: case 59: case 60:
-        ctx.SetRenderState(s, v);
-        break;
-    default:
-        if (s >= 129 && s <= 135) ctx.SetRenderState(s, v);  // WRAP1-7 (WRAP0: the driver's copy)
-        break;
-    }
-}
-
-void Device::PushStage9(DWORD stage, DWORD t) {
-    const DWORD v = dtss[stage][t];
-    if (v == 0xFFFFFFFF && t != D3DTSS_BORDERCOLOR) return;  // never set
-    switch (t) {
-    case D3DTSS_COLOROP: case D3DTSS_COLORARG1: case D3DTSS_COLORARG2:
-    case D3DTSS_ALPHAOP: case D3DTSS_ALPHAARG1: case D3DTSS_ALPHAARG2:
-        if (stage <= 1) PushStageOps9();
-        else ctx.SetTextureStageState(stage, t, v);
-        break;
-    case D3DTSS_ADDRESS:
-        ctx.SetSamplerState(stage, 1, v);
-        ctx.SetSamplerState(stage, 2, v);
-        break;
-    case D3DTSS_ADDRESSU: ctx.SetSamplerState(stage, 1, v); break;
-    case D3DTSS_ADDRESSV: ctx.SetSamplerState(stage, 2, v); break;
-    case D3DTSS_BORDERCOLOR: ctx.SetSamplerState(stage, 4, v); break;
-    case D3DTSS_MAGFILTER: {
-        static const DWORD kMap[] = {0, 1, 2, 2, 2, 3};
-        ctx.SetSamplerState(stage, 5, v < 6 ? kMap[v] : 2);
-        break;
-    }
-    case D3DTSS_MINFILTER: ctx.SetSamplerState(stage, 6, v <= 3 ? v : 2); break;
-    case D3DTSS_MIPFILTER: ctx.SetSamplerState(stage, 7, v >= 2 && v <= 3 ? v - 1 : 0); break;
-    case D3DTSS_MIPMAPLODBIAS: ctx.SetSamplerState(stage, 8, v); break;
-    case D3DTSS_MAXMIPLEVEL: ctx.SetSamplerState(stage, 9, v); break;
-    case D3DTSS_MAXANISOTROPY: ctx.SetSamplerState(stage, 10, v); break;
-    default:
-        if ((t >= 7 && t <= 11) || t == 22 || t == 23) ctx.SetTextureStageState(stage, t, v);
-        break;
-    }
-}
-
-// A hardware device textures only from texture surfaces (Wine's test_texture_wrong_caps).
-Surface* Device::StageSurface(DWORD stage) const {
-    Surface* s = dTexHandle ? (stage == 0 ? SurfaceForHandle(dTexHandle) : nullptr) : dtex[stage];
-    if (s && kind == kHAL && !(s->desc.ddsCaps.dwCaps & DDSCAPS_TEXTURE)) return nullptr;
-    return s;
-}
-
-// Stage 0 and 1's ops and arguments and the alpha test, as PushStageOps9 and PushAlpha9 last
-// sent them (they run at every draw): only changes go to D3D9. Forgotten in PushAll.
-void Device::SetTSS9(DWORD stage, DWORD t, DWORD v) {
-    const DWORD bit = 1u << t;
-    if ((tssSentMask[stage] & bit) && tssSent[stage][t] == v) return;
-    tssSentMask[stage] |= bit;
-    tssSent[stage][t] = v;
-    ctx.SetTextureStageState(stage, t, v);
-}
-
-void Device::SetAlphaRS9(int i, DWORD v) {
-    static const DWORD kStates[3] = {15, 24, 25};
-    if ((alphaSentMask & (1u << i)) && alphaSent[i] == v) return;
-    alphaSentMask |= 1u << i;
-    alphaSent[i] = v;
-    ctx.SetRenderState(kStates[i], v);
-}
-
-// Stages 0 and 1: while TEXTUREHANDLE is set only stage 0 runs; legacy MODULATE takes alpha
-// from the texture when it has alpha, else from the vertex (B §1.4: the reference
-// rasterizer's span choice for MODULATE(TEXTURE, DIFFUSE) / SELECTARG1(TEXTURE)).
-void Device::PushStageOps9() {
-    const DWORD* s0 = dtss[0];
-    for (DWORD t : {D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_COLORARG2, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2})
-        if (s0[t] != 0xFFFFFFFF) SetTSS9(0, t, s0[t]);
-    const DWORD op1 = dTexHandle ? DWORD(D3DTOP_DISABLE) : dtss[1][D3DTSS_COLOROP];
-    DWORD alphaOp = s0[D3DTSS_ALPHAOP];
-    Surface* tex = StageSurface(0);
-    if (alphaOp == D3DTOP_SELECTARG1 && s0[D3DTSS_ALPHAARG1] == D3DTA_TEXTURE && s0[D3DTSS_COLOROP] == D3DTOP_MODULATE &&
-        s0[D3DTSS_COLORARG1] == D3DTA_TEXTURE && (s0[D3DTSS_COLORARG2] == D3DTA_DIFFUSE || s0[D3DTSS_COLORARG2] == D3DTA_CURRENT) &&
-        op1 == D3DTOP_DISABLE && tex && !TextureHasAlpha(tex) && !tex->buf->fmt.fourcc) {
-        // Texture alpha is 1 (or 0 where colour-keyed): MODULATE gives the vertex alpha.
-        alphaOp = D3DTOP_MODULATE;
-        SetTSS9(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
-    }
-    // Colour keying works on the texel alone on XP: with the game's alpha unused (no blending,
-    // no alpha test), the alpha test of the key emulation gets the texture's alpha
-    // (Wine's test_colorkey_precision: MODULATEALPHA with a vertex alpha of 0).
-    const bool keyOn = rs[41] == TRUE && tex && tex->hasCk[kCkSrcBlt] && s0[D3DTSS_COLOROP] != D3DTOP_DISABLE;
-    if (keyOn && rs[27] != TRUE && rs[15] != TRUE) {
-        alphaOp = D3DTOP_SELECTARG1;
-        SetTSS9(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-    } else if (keyOn && !TextureHasAlpha(tex) && alphaOp == D3DTOP_SELECTARG2) {
-        // With blending, the vertex alpha kept but keyed texels still dropped: the texture's
-        // alpha is 1 except there, so MODULATE gives the same alpha everywhere else.
-        alphaOp = D3DTOP_MODULATE;
-        SetTSS9(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-    }
-    if (alphaOp != 0xFFFFFFFF) SetTSS9(0, D3DTSS_ALPHAOP, alphaOp);
-    for (DWORD t : {D3DTSS_COLORARG1, D3DTSS_COLORARG2, D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2})
-        if (dtss[1][t] != 0xFFFFFFFF) SetTSS9(1, t, dtss[1][t]);
-    if (op1 != 0xFFFFFFFF) SetTSS9(1, D3DTSS_COLOROP, op1);
-}
-
-// COLORKEYENABLE: keyed texels were uploaded transparent; an alpha test drops them.
-void Device::PushAlpha9() {
-    ctx.SetColorKeyEnable(rs[41] == TRUE);
-    Surface* t = StageSurface(0);
-    const bool key = rs[41] == TRUE && t && t->hasCk[kCkSrcBlt];
-    if (rs[15] == TRUE || !key) {
-        SetAlphaRS9(0, rs[15] == TRUE);
-        SetAlphaRS9(1, rs[24] & 0xFF);
-        SetAlphaRS9(2, rs[25] == 0xFFFFFFFF ? DWORD(D3DCMP_ALWAYS) : rs[25]);
-    } else {
-        SetAlphaRS9(0, TRUE);
-        SetAlphaRS9(1, 0);
-        SetAlphaRS9(2, D3DCMP_GREATER);
-    }
-}
-
-// At each draw: the stage textures (a handle resolves now), and what depends on them.
-void Device::BindTextures9() {
-    for (DWORD i = 0; i < 8; i++) ctx.SetTexture(i, StageSurface(i));
-    PushStageOps9();
-    PushAlpha9();
-}
-
-// A render state as the driver gets it (B §1.4).
-void Device::DrvRS(DWORD s, DWORD v) {
-    switch (s) {
-    case 1:  // TEXTUREHANDLE: the stage-0 texture (0: none)
-        dTexHandle = v;
-        dtex[0] = nullptr;
-        PushStageOps9();
-        PushAlpha9();
-        return;
-    case 3:  // TEXTUREADDRESS
-        dtss[0][D3DTSS_ADDRESS] = dtss[0][D3DTSS_ADDRESSU] = dtss[0][D3DTSS_ADDRESSV] = v;
-        PushStage9(0, D3DTSS_ADDRESS);
-        return;
-    case 5: case 6: {  // WRAPU / WRAPV
-        const DWORD bit = s == 5 ? D3DWRAP_U : D3DWRAP_V;
-        dWrap0 = v ? (dWrap0 | bit) : (dWrap0 & ~bit);
-        ctx.SetRenderState(128, dWrap0);
-        return;
-    }
-    case 128:
-        dWrap0 = v;
-        ctx.SetRenderState(128, v);
-        return;
-    case 17:  // TEXTUREMAG
-        dtss[0][D3DTSS_MAGFILTER] = v == D3DFILTER_LINEAR ? D3DTFG_LINEAR : D3DTFG_POINT;
-        PushStage9(0, D3DTSS_MAGFILTER);
-        return;
-    case 18: {  // TEXTUREMIN
-        static const DWORD kMin[7][2] = {{0, 0},
-                                         {D3DTFN_POINT, D3DTFP_NONE},
-                                         {D3DTFN_LINEAR, D3DTFP_NONE},
-                                         {D3DTFN_POINT, D3DTFP_POINT},
-                                         {D3DTFN_LINEAR, D3DTFP_POINT},
-                                         {D3DTFN_POINT, D3DTFP_LINEAR},
-                                         {D3DTFN_LINEAR, D3DTFP_LINEAR}};
-        if (v < 1 || v > 6) return;  // other values: no change
-        dtss[0][D3DTSS_MINFILTER] = kMin[v][0];
-        dtss[0][D3DTSS_MIPFILTER] = kMin[v][1];
-        PushStage9(0, D3DTSS_MINFILTER);
-        PushStage9(0, D3DTSS_MIPFILTER);
-        return;
-    }
-    case 21: {  // TEXTUREMAPBLEND
-        DWORD* t = dtss[0];
-        switch (v) {
-        case D3DTBLEND_MODULATE: case D3DTBLEND_MODULATEMASK:
-            t[D3DTSS_COLOROP] = D3DTOP_MODULATE;
-            t[D3DTSS_COLORARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
-            t[D3DTSS_ALPHAOP] = D3DTOP_SELECTARG1;
-            t[D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-            break;
-        case D3DTBLEND_DECALALPHA:
-            t[D3DTSS_COLOROP] = D3DTOP_BLENDTEXTUREALPHA;
-            t[D3DTSS_COLORARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
-            t[D3DTSS_ALPHAOP] = D3DTOP_SELECTARG2;
-            t[D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-            break;
-        case D3DTBLEND_MODULATEALPHA:
-            t[D3DTSS_COLOROP] = t[D3DTSS_ALPHAOP] = D3DTOP_MODULATE;
-            t[D3DTSS_COLORARG1] = t[D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_COLORARG2] = t[D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-            break;
-        case D3DTBLEND_ADD:
-            t[D3DTSS_COLOROP] = D3DTOP_ADD;
-            t[D3DTSS_COLORARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
-            t[D3DTSS_ALPHAOP] = D3DTOP_SELECTARG2;
-            t[D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
-            t[D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-            break;
-        default:  // DECAL, DECALMASK, COPY and anything else
-            t[D3DTSS_COLOROP] = t[D3DTSS_ALPHAOP] = D3DTOP_SELECTARG1;
-            t[D3DTSS_COLORARG1] = t[D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
-            break;
-        }
-        dtss[1][D3DTSS_COLOROP] = D3DTOP_DISABLE;
-        PushStageOps9();
-        return;
-    }
-    case 43:
-        dtss[0][D3DTSS_BORDERCOLOR] = v;
-        PushStage9(0, D3DTSS_BORDERCOLOR);
-        return;
-    case 44:
-        dtss[0][D3DTSS_ADDRESSU] = v;
-        PushStage9(0, D3DTSS_ADDRESSU);
-        return;
-    case 45:
-        dtss[0][D3DTSS_ADDRESSV] = v;
-        PushStage9(0, D3DTSS_ADDRESSV);
-        return;
-    case 46:
-        dtss[0][D3DTSS_MIPMAPLODBIAS] = v;
-        PushStage9(0, D3DTSS_MIPMAPLODBIAS);
-        return;
-    default:
-        PushRS9(s);  // ANISOTROPY and the other legacy states: nothing (only stored)
-        return;
-    }
-}
-
-void Device::DrvTSS(DWORD stage, DWORD t, DWORD v) {
-    if (t >= 32) return;
-    dtss[stage][t] = v;
-    if (t == D3DTSS_ADDRESS) dtss[stage][D3DTSS_ADDRESSU] = dtss[stage][D3DTSS_ADDRESSV] = v;
-    PushStage9(stage, t);
-}
-
-void Device::DrvTexture(DWORD stage, Surface* s) {
-    dtex[stage] = s;
-    if (stage <= 1 && s) dTexHandle = 0;  // binding a texture on stage 0 or 1 ends TEXTUREHANDLE
 }
 
 // ---------------------------------------------------------------- render states (B §1.1)
@@ -767,7 +469,6 @@ HRESULT Device::Download(Viewport* vp) {
     if (!vp->dataSet) return D3DERR_VIEWPORTDATANOTSET;
     MakeMap(vp->data, &map);  // degenerate data keeps the previous mapping
     downloaded = vp->id;
-    vp->lightsDirty = true, g_lightGen++;
     ApplyViewport9();
     return D3D_OK;
 }
@@ -941,7 +642,7 @@ HRESULT Device::EndSceneI() {
 
 // ---------------------------------------------------------------- render target (B §7.1)
 
-HRESULT Device::SetRenderTargetI(Surface* s, int sVersion) {
+HRESULT Device::SetRenderTargetI(Surface* s) {
     if (!s) return DDERR_INVALIDOBJECT;
     if (version == 1) return D3DERR_DEVICEAGGREGATED;
     const DWORD caps = s->desc.ddsCaps.dwCaps;
@@ -966,7 +667,6 @@ HRESULT Device::SetRenderTargetI(Surface* s, int sVersion) {
     Surface* nz = AttachedZ(s);
     if (!nz && z) return DDERR_INVALIDPARAMS;  // a Z buffer can be gained, not lost
     // A version 2 device holds the new target's IDirectDrawSurface (v1) interface (B §7.1).
-    (void)sVersion;
     const int rtSlot = version == 2 ? Surface::kRefV1 : Surface::kRefV4;
     s->AddRef(rtSlot);
     if (nz) nz->AddRef(Surface::kRefV1);
@@ -994,16 +694,13 @@ HRESULT Device::F2::SetRenderTarget(IDirectDrawSurface* s, DWORD) {
     Guard l;
     Surface* x = Surface::From(s);
     if (!x) return DDERR_INVALIDOBJECT;
-    int v = 1;
-    for (int k : {1, 2, 3, 4, 7})
-        if (x->Iface(k) == s) v = k;
-    return o->SetRenderTargetI(x, v);
+    return o->SetRenderTargetI(x);
 }
 
 HRESULT Device::F3::SetRenderTarget(IDirectDrawSurface4* s, DWORD) {
     if (!s) return DDERR_INVALIDOBJECT;
     Guard l;
-    return o->SetRenderTargetI(Surface::From(s), 4);
+    return o->SetRenderTargetI(Surface::From(s));
 }
 
 HRESULT Device::F2::GetRenderTarget(IDirectDrawSurface** out) {
@@ -1035,26 +732,6 @@ HRESULT Device::GetCapsI(D3DDEVICEDESC* h, D3DDEVICEDESC* s) {
     memcpy(s, &hel, s->dwSize);
     return D3D_OK;
 }
-// The bump map formats a hardware device lists where the GPU has them with the bump-mapping
-// operations (DirectX 6 and 7: environment-mapped bump mapping).
-static void AddBumpFormats(std::vector<DDPIXELFORMAT>* list) {
-    const GpuCaps c = GpuGetCaps();
-    auto bump = [&](bool have, DWORD bits, DWORD du, DWORD dv, DWORD lum) {
-        if (!have) return;
-        DDPIXELFORMAT f = {};
-        f.dwSize = sizeof(f);
-        f.dwFlags = DDPF_BUMPDUDV | (lum ? DDPF_BUMPLUMINANCE : 0);
-        f.dwBumpBitCount = bits;
-        f.dwBumpDuBitMask = du;
-        f.dwBumpDvBitMask = dv;
-        f.dwBumpLuminanceBitMask = lum;
-        list->push_back(f);
-    };
-    bump(c.bumpV8U8, 16, 0xFF, 0xFF00, 0);
-    bump(c.bumpL6V5U5, 16, 0x1F, 0x3E0, 0xFC00);
-    bump(c.bumpX8L8V8U8, 24, 0xFF, 0xFF00, 0xFF0000);
-}
-
 
 // B §7.4: XP's inclusion list (and FOURCC formats) among what dd2d9 textures can be.
 HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) {
@@ -1180,116 +857,6 @@ HRESULT Device::GetClipStatusI(D3DCLIPSTATUS* cs) {
     return D3D_OK;
 }
 
-// ---------------------------------------------------------------- execute buffers (B §9)
-
-HRESULT Device::CreateExecuteBufferI(D3DEXECUTEBUFFERDESC* d, IDirect3DExecuteBuffer** out, IUnknown* outer) {
-    if (!d || d->dwSize != sizeof(D3DEXECUTEBUFFERDESC) || !out) return DDERR_INVALIDPARAMS;
-    if (outer) return CLASS_E_NOAGGREGATION;
-    Guard l;
-    *out = nullptr;
-    const DWORD max = (kind == kHAL ? hal : hel).dwMaxBufferSize;
-    if (!d->dwFlags || !d->dwBufferSize || (max && d->dwBufferSize > max)) return DDERR_INVALIDPARAMS;
-    if (d->dwBufferSize > 0x10000000) return E_OUTOFMEMORY;  // (a vector that size would throw)
-    ExecBuf* b = new (std::nothrow) ExecBuf(this, d->dwBufferSize);
-    if (!b) return E_OUTOFMEMORY;
-    execBufs.push_back(b);
-    *out = b;
-    return D3D_OK;
-}
-
-// Execute (C §6.1): the viewport is current for the call.
-// log=2: one line per Execute, what its instruction stream holds (walked in order, branches
-// not followed): the opcodes with their record counts, triangles and vertices processed.
-static void TraceExecute(const ExecBuf* eb, DWORD flags) {
-    static const char* const kOps[] = {"?", "POINT", "LINE", "TRIANGLE", "MATRIXLOAD", "MATRIXMULTIPLY",
-                                       "STATETRANSFORM", "STATELIGHT", "STATERENDER", "PROCESSVERTICES",
-                                       "TEXTURELOAD", "EXIT", "BRANCHFORWARD", "SPAN", "SETSTATUS"};
-    DWORD counts[15] = {};
-    const D3DEXECUTEDATA& ed = eb->data;
-    const uint8_t* base = eb->mem.data();
-    const size_t size = eb->mem.size();
-    size_t pos = ed.dwInstructionOffset;
-    while (pos + sizeof(D3DINSTRUCTION) <= size) {
-        const auto* ins = reinterpret_cast<const D3DINSTRUCTION*>(base + pos);
-        const DWORD op = ins->bOpcode < 15 ? ins->bOpcode : 0;
-        counts[op] += ins->wCount;
-        if (ins->bOpcode == D3DOP_EXIT) break;
-        pos += sizeof(D3DINSTRUCTION) + size_t(ins->bSize) * ins->wCount;
-    }
-    std::string ops;
-    char part[48];
-    for (DWORD i = 1; i < 15; i++) {
-        if (!counts[i]) continue;
-        snprintf(part, sizeof(part), "%s%s x%lu", ops.empty() ? " " : ", ", kOps[i], static_cast<unsigned long>(counts[i]));
-        ops += part;
-    }
-    DD2D9_TRACE("Execute %p (%s): %lu vertices,%s", static_cast<const void*>(eb),
-                flags == D3DEXECUTE_CLIPPED ? "clipped" : "unclipped", static_cast<unsigned long>(ed.dwVertexCount),
-                ops.c_str());
-}
-
-HRESULT Device::ExecuteE(ExecBuf* eb, Viewport* vp, DWORD flags) {
-    if (!eb) return DDERR_INVALIDOBJECT;
-    Guard l;
-    if (!vp) vp = cur;
-    if (!vp) return DDERR_INVALIDPARAMS;  // XP faults inside its SEH frame
-    if (vp->dev != this) return DDERR_INVALIDPARAMS;
-    Viewport* prev = cur;
-    cur = vp;  // no reference
-    if (downloaded != vp->id) {
-        const HRESULT hr = Download(vp);
-        if (FAILED(hr)) {
-            cur = prev;
-            return hr;
-        }
-    }
-    // XP leaves the viewport current, unreferenced, on the errors below; restored here (a
-    // later SetCurrentViewport would release a reference never taken).
-    if (LogLevel() >= 2) TraceExecute(eb, flags);
-    HRESULT hr = eb->dev != this ? DDERR_INVALIDPARAMS : eb->locked ? D3DERR_EXECUTE_LOCKED : ExecuteI(eb, flags);
-    cur = prev;
-    return hr;
-}
-
-HRESULT Device::F1::Execute(IDirect3DExecuteBuffer* b, IDirect3DViewport* v, DWORD flags) {
-    return o->ExecuteE(static_cast<ExecBuf*>(b), VpFrom(v), flags);
-}
-
-// The execute buffer walked as XP's D3DHAL_ExecutePick walks it (ExecuteI with `picking`:
-// transforms and state, no drawing), the hits kept for GetPickRecords. Its result is ignored,
-// as XP's: D3D_OK.
-HRESULT Device::F1::Pick(IDirect3DExecuteBuffer* b, IDirect3DViewport* v, DWORD, D3DRECT* r) {
-    if (!b || !v || !r) return DDERR_INVALIDOBJECT;
-    Guard l;
-    ExecBuf* eb = static_cast<ExecBuf*>(b);
-    if (eb->dev != o || VpFrom(v)->dev != o) return DDERR_INVALIDPARAMS;
-    if (eb->locked) return D3DERR_EXECUTE_LOCKED;
-    o->pickRecs.clear();
-    // What the walk's vertices would leave in the clip status, extents and statistics is
-    // put back: a pick isn't a draw.
-    const DWORD status = o->status;
-    float ext[4];
-    memcpy(ext, o->ext, sizeof(ext));
-    const D3DSTATS stats = o->stats;
-    o->picking = r;
-    o->ExecuteE(eb, VpFrom(v), D3DEXECUTE_CLIPPED);
-    o->picking = nullptr;
-    o->status = status;
-    memcpy(o->ext, ext, sizeof(ext));
-    o->stats = stats;
-    return D3D_OK;
-}
-
-// As XP: the records copied when there is room for all of them, the count written always.
-HRESULT Device::F1::GetPickRecords(DWORD* n, D3DPICKRECORD* recs) {
-    if (!n) return DDERR_INVALIDPARAMS;  // XP writes it unchecked
-    Guard l;
-    const DWORD count = DWORD(o->pickRecs.size());
-    if (recs && *n >= count) std::copy(o->pickRecs.begin(), o->pickRecs.end(), recs);
-    *n = count;
-    return D3D_OK;
-}
-
 // ---------------------------------------------------------------- draws (B §8)
 
 static const DWORD kVertexTypeFvf[4] = {0, D3DFVF_VERTEX, D3DFVF_LVERTEX, D3DFVF_TLVERTEX};
@@ -1304,7 +871,7 @@ HRESULT Device::F2::DrawIndexedPrimitive(D3DPRIMITIVETYPE t, D3DVERTEXTYPE vt, v
                                          DWORD flags) {
     if (DWORD(vt) < 1 || DWORD(vt) > 3) return DDERR_INVALIDPARAMS;
     Guard l;
-    return o->DrawCommon(t, kVertexTypeFvf[vt], static_cast<const uint8_t*>(v), 32, n, idx, ni, flags, nullptr);
+    return o->DrawCommon(t, kVertexTypeFvf[vt], static_cast<const uint8_t*>(v), 32, n, idx, ni, flags, nullptr, true);
 }
 
 HRESULT Device::F3::DrawPrimitive(D3DPRIMITIVETYPE t, DWORD fvf, void* v, DWORD n, DWORD flags) {
@@ -1328,7 +895,7 @@ static bool Gather6(DWORD fvf, const D3DDRAWPRIMITIVESTRIDEDDATA& d, DWORD n, st
     } catch (const std::exception&) {
         return false;
     }
-    const UINT posSize = (fvf & 0x0E) == D3DFVF_XYZ ? 12 : FvfSize6(fvf & 0x0E);
+    const UINT posSize = FvfSize6(fvf & 0x0E);
     const DWORD tex = (fvf >> 8) & 0xF;
     for (DWORD i = 0; i < n; i++) {
         uint8_t* o = out->data() + size_t(i) * stride;
@@ -1417,14 +984,22 @@ HRESULT Device::VertexI(const void* v) {
     if (!inBegin || beginIndexed || !v) return D3D_OK;  // XP writes through a stale pointer
     const UINT size = FvfSize6(beginFvf);
     const auto* p = static_cast<const uint8_t*>(v);
-    batchV.insert(batchV.end(), p, p + size);
+    try {
+        batchV.insert(batchV.end(), p, p + size);
+    } catch (const std::bad_alloc&) {  // (XP's batch is drawn when full; this one grows)
+        return E_OUTOFMEMORY;
+    }
     return D3D_OK;
 }
 
 HRESULT Device::IndexI(WORD i) {
     Guard l;
     if (!inBegin || !beginIndexed) return D3D_OK;
-    batchI.push_back(i);
+    try {
+        batchI.push_back(i);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    }
     return D3D_OK;
 }
 

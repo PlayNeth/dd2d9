@@ -1,5 +1,5 @@
 // dd2d9's Direct3D 3-6: the Direct3D object and its descriptors, lights, materials,
-// textures, execute buffers, vertex buffers, and the hand-off from DirectDraw (A).
+// textures, vertex buffers, and the hand-off from DirectDraw (A).
 #include "d3d6int.h"
 
 #include <cfloat>
@@ -173,14 +173,13 @@ void DescsFor(int i, int version, D3DDEVICEDESC* hal, D3DDEVICEDESC* hel) {
 }
 
 bool CodeOk(const void* cb) { return cb && !IsBadCodePtr(reinterpret_cast<FARPROC>(const_cast<void*>(cb))); }
+}  // namespace
 
-// The surface interface version of a pointer the game passed.
 int VersionOfIface(Surface* s, void* iface) {
     for (int v : {1, 2, 3, 4, 7})
         if (s->Iface(v) == iface) return v;
     return 1;
 }
-}  // namespace
 
 // ---------------------------------------------------------------- Direct3D object
 
@@ -280,7 +279,6 @@ HRESULT D3D::CreateLight(IDirect3DLight** out, IUnknown* outerUnk) {
 
 HRESULT D3D::CreateMaterial(Material** out, IUnknown* outerUnk) {
     if (outerUnk) return CLASS_E_NOAGGREGATION;
-    if (!out) return DDERR_INVALIDPARAMS;  // v1/v2 fault on XP
     Guard l;
     *out = nullptr;
     Material* m = new (std::nothrow) Material(this);
@@ -305,8 +303,8 @@ HRESULT D3D::F2::CreateMaterial(IDirect3DMaterial2** out, IUnknown* outerUnk) {
     return hr;
 }
 HRESULT D3D::F3::CreateMaterial(IDirect3DMaterial3** out, IUnknown* outerUnk) {
-    if (outerUnk) return CLASS_E_NOAGGREGATION;
-    if (!out) return DDERR_INVALIDPARAMS;  // (XP v1/v2 fault; nothing is made)
+    if (outerUnk) return CLASS_E_NOAGGREGATION;  // (before the pointer check, unlike v1/v2)
+    if (!out) return DDERR_INVALIDPARAMS;
     Material* m;
     const HRESULT hr = o->CreateMaterial(&m, outerUnk);
     if (SUCCEEDED(hr)) *out = &m->f3;
@@ -315,11 +313,15 @@ HRESULT D3D::F3::CreateMaterial(IDirect3DMaterial3** out, IUnknown* outerUnk) {
 
 HRESULT D3D::CreateViewport(Viewport** out, IUnknown* outerUnk) {
     if (outerUnk) return CLASS_E_NOAGGREGATION;
-    if (!out) return DDERR_INVALIDPARAMS;
     Guard l;
     *out = nullptr;
-    Viewport* v = new (std::nothrow) Viewport(this);
-    if (!v) return E_OUTOFMEMORY;
+    Viewport* v;
+    try {  // (the constructor registers it too: that may throw as well)
+        viewports.reserve(viewports.size() + 1);
+        v = new Viewport(this);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    }
     viewports.push_back(v);
     *out = v;
     return D3D_OK;
@@ -330,22 +332,22 @@ HRESULT D3D::F1::CreateViewport(IDirect3DViewport** out, IUnknown*) {
     if (!out) return DDERR_INVALIDPARAMS;  // (would leak a viewport no one can reach)
     Viewport* v;
     const HRESULT hr = o->CreateViewport(&v, nullptr);
-    if (out) *out = SUCCEEDED(hr) ? v : nullptr;
+    *out = SUCCEEDED(hr) ? v : nullptr;
     return hr;
 }
 HRESULT D3D::F2::CreateViewport(IDirect3DViewport2** out, IUnknown*) {
     if (!out) return DDERR_INVALIDPARAMS;
     Viewport* v;
     const HRESULT hr = o->CreateViewport(&v, nullptr);
-    if (out) *out = SUCCEEDED(hr) ? v : nullptr;
+    *out = SUCCEEDED(hr) ? v : nullptr;
     return hr;
 }
 HRESULT D3D::F3::CreateViewport(IDirect3DViewport3** out, IUnknown* outerUnk) {
     if (outerUnk) return CLASS_E_NOAGGREGATION;
     if (!out) return DDERR_INVALIDPARAMS;
     Viewport* v;
-    const HRESULT hr = o->CreateViewport(&v, outerUnk);
-    if (out && hr != CLASS_E_NOAGGREGATION) *out = SUCCEEDED(hr) ? v : nullptr;
+    const HRESULT hr = o->CreateViewport(&v, nullptr);
+    *out = SUCCEEDED(hr) ? v : nullptr;
     return hr;
 }
 
@@ -386,8 +388,13 @@ HRESULT D3D::CreateDeviceI(REFCLSID guid, Surface* rt, int rtVersion, int versio
         if (kind == kRamp && z->buf->fmt.a) return DDERR_INVALIDPARAMS;  // stencil
         if (hw && !(zc & DDSCAPS_VIDEOMEMORY)) return D3DERR_ZBUFF_NEEDS_VIDEOMEMORY;
     }
-    Device* d = new (std::nothrow) Device(this, kind, guid, version, rt, rtVersion, z, rt->palette);
-    if (!d) return E_OUTOFMEMORY;
+    Device* d;
+    try {  // (the constructor registers it too: that may throw as well)
+        devices.reserve(devices.size() + 1);
+        d = new Device(this, kind, guid, version, rt, rtVersion, z, rt->palette);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    }
     devices.push_back(d);
     // The x87 control word only with DDSCL_FPUSETUP (A step 8), on this thread.
     if (dd->CoopFlags() & DDSCL_FPUSETUP) _controlfp(_PC_24 | _RC_NEAR | _MCW_EM, _MCW_PC | _MCW_RC | _MCW_EM);
@@ -435,9 +442,14 @@ HRESULT D3D::F3::CreateVertexBuffer(D3DVERTEXBUFFERDESC* desc, IDirect3DVertexBu
     if (desc->dwNumVertices >= 0x10000) return D3DERR_TOOMANYVERTICES;
     if (desc->dwCaps & D3DVBCAPS_OPTIMIZED) return DDERR_INVALIDPARAMS;
     if ((desc->dwFVF & 0xFFFFF000) || !FvfSize6(desc->dwFVF)) return D3DERR_INVALIDVERTEXFORMAT;
-    VBuf* vb = new (std::nothrow) VBuf(o, *desc, flags);
-    if (!vb) return E_OUTOFMEMORY;
-    o->vbufs.push_back(vb);
+    VBuf* vb = nullptr;
+    try {
+        vb = new VBuf(o, *desc, flags);
+        o->vbufs.push_back(vb);
+    } catch (const std::bad_alloc&) {  // (its memory: an exception mustn't leave the call)
+        delete vb;
+        return E_OUTOFMEMORY;
+    }
     *out = vb;
     return D3D_OK;
 }
@@ -493,11 +505,6 @@ void D3D::Teardown() {
     vbufs.clear();
 }
 
-template <class T> static void Unlink(std::vector<T*>& v, T* x) {
-    auto it = std::find(v.begin(), v.end(), x);
-    if (it != v.end()) v.erase(it);
-}
-
 // ---------------------------------------------------------------- light (C §2)
 
 HRESULT Light::QueryInterface(REFIID r, void** out) {
@@ -517,7 +524,7 @@ ULONG Light::Release() {
         Guard l;
         if (vp) {  // only after a teardown cut it loose
             Unlink(vp->lights, this);
-            vp->lightsDirty = true, g_lightGen++;
+            g_lightGen++;
         }
         if (d3d_) Unlink(d3d_->lights, this);
         delete this;
@@ -541,7 +548,7 @@ HRESULT Light::SetLight(D3DLIGHT* in) {
     }
     Guard g;
     memcpy(&data, in, in->dwSize);
-    if (vp) vp->lightsDirty = true, g_lightGen++;
+    if (vp) g_lightGen++;
     return D3D_OK;
 }
 
@@ -782,68 +789,6 @@ HRESULT Texture::Load(Texture* srcTex) {
 HRESULT Texture::F1::Load(IDirect3DTexture* src) { return o->Load(TexFrom(src)); }
 HRESULT Texture::F2::Load(IDirect3DTexture2* src) { return o->Load(TexFrom(src)); }
 
-// ---------------------------------------------------------------- execute buffer (C §5)
-
-ExecBuf::ExecBuf(Device* dev, DWORD size) : dev(dev), mem(size, 0) {}
-
-ExecBuf::~ExecBuf() {
-    if (dev) Unlink(dev->execBufs, this);
-}
-
-HRESULT ExecBuf::QueryInterface(REFIID r, void** out) {
-    if (!out) return DDERR_INVALIDPARAMS;
-    *out = nullptr;
-    if (IsEqualGUID(r, IID_IUnknown) || IsEqualGUID(r, IID_IDirect3DExecuteBuffer)) {
-        AddRef();
-        *out = this;
-        return S_OK;
-    }
-    return E_NOINTERFACE;
-}
-
-ULONG ExecBuf::Release() {
-    const LONG r = InterlockedDecrement(&ref_);
-    if (r == 0) {
-        Guard l;
-        delete this;
-    }
-    return ULONG(std::max<LONG>(r, 0));
-}
-
-HRESULT ExecBuf::Lock(D3DEXECUTEBUFFERDESC* d) {
-    if (!d || d->dwSize != sizeof(D3DEXECUTEBUFFERDESC)) return DDERR_INVALIDPARAMS;
-    Guard l;
-    if (locked) return D3DERR_EXECUTE_LOCKED;
-    locked = true;
-    d->dwSize = sizeof(D3DEXECUTEBUFFERDESC);
-    d->dwFlags = D3DDEB_LPDATA;
-    d->dwCaps = 0;
-    d->dwBufferSize = DWORD(mem.size());
-    d->lpData = mem.data();
-    return D3D_OK;
-}
-
-HRESULT ExecBuf::Unlock() {
-    Guard l;
-    if (!locked) return D3DERR_EXECUTE_NOT_LOCKED;
-    locked = false;
-    return D3D_OK;
-}
-
-HRESULT ExecBuf::SetExecuteData(D3DEXECUTEDATA* d) {
-    if (!d || d->dwSize != sizeof(D3DEXECUTEDATA)) return DDERR_INVALIDPARAMS;
-    Guard l;
-    data = *d;
-    return D3D_OK;
-}
-
-HRESULT ExecBuf::GetExecuteData(D3DEXECUTEDATA* d) {
-    if (!d) return DDERR_INVALIDPARAMS;
-    Guard l;
-    *d = data;
-    return D3D_OK;
-}
-
 // ---------------------------------------------------------------- vertex buffer (C §7)
 
 UINT FvfSize6(DWORD fvf) {
@@ -992,17 +937,16 @@ void D3DLegacySurfaceGone(Surface* s) {
     if (info) {
         for (const SurfaceInfo::Entry& e : info->cache) e.obj->SurfaceGone();
     }
-    // Devices of this DirectDraw object let go of it (Z buffers, stage textures, handles),
-    // and viewports of a background depth surface kept without a reference (XP dangles).
-    if (auto* d3d = static_cast<D3D*>(s->dd->d3dLegacy)) {
-        for (Device* d : d3d->devices) d->ForgetSurface(s);
-        for (Viewport* v : d3d->viewports)
-            if (v->bgDepth == s) {
-                v->bgDepth = nullptr;
-                v->bgDepthIface = nullptr;
-                v->bgDepthSlot = -1;
-            }
-    }
+    // Devices let go of it (Z buffers, stage textures, handles), and viewports of a
+    // background depth surface kept without a reference (XP dangles): all of them, as those
+    // the DirectDraw object's teardown cut loose may still hold it.
+    for (Device* d : g_liveDevices) d->ForgetSurface(s);
+    for (Viewport* v : g_liveViewports)
+        if (v->bgDepth == s) {
+            v->bgDepth = nullptr;
+            v->bgDepthIface = nullptr;
+            v->bgDepthSlot = -1;
+        }
     if (info) {
         if (info->texHandle) {
             const DWORD h = info->texHandle;

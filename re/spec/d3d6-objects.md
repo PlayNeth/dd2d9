@@ -888,9 +888,9 @@ vertices (with D3DVOP_CLIP) are written in clip space, inside ones in screen spa
 
 ## Implementation notes for dd2d9 (on D3D9)
 
-dd2d9 implements Direct3D 7 in `src/d3d7.cpp` over `GpuContext` (`src/gpures.h`: SetTransform,
+dd2d9 implements Direct3D 7 in `src/d3d7*.cpp` over `GpuContext` (`src/gpures.h`: SetTransform,
 SetViewport, SetMaterial/SetLight/LightEnable, Clear, Draw with an FVF and optional 16-bit
-indices) and has a CPU ProcessVertices (d3d7.cpp "ProcessVertices (V §8.5)": Layout, transform,
+indices) and has a CPU ProcessVertices (d3d7pipe.cpp, `Process` (V §8.5): Layout, transform,
 light, clip). The DX3–6 objects map onto that as follows.
 
 **Viewport → D3D9 viewport + projection.** Set the D3D9 viewport to (X, Y, W, H) with MinZ 0,

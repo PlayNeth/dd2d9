@@ -195,6 +195,14 @@ static int RunBlit() {
             RECT r = {0, 0, W / 2, H / 2};
             dst->Blt(nullptr, bg, &r, DDBLT_WAIT, nullptr);
         });
+        Measure("stretch 64x64 -> 600x450 (Blt)", bpp, 600 * 450, [&](int) {
+            RECT r = {0, 0, 64, 64}, d = {20, 15, 620, 465};
+            dst->Blt(&d, sheet, &r, DDBLT_WAIT, nullptr);
+        });
+        Measure("shrink 640x480 -> 400x300 (Blt)", bpp, 400 * 300, [&](int) {
+            RECT d = {0, 0, 400, 300};
+            dst->Blt(&d, bg, nullptr, DDBLT_WAIT, nullptr);
+        });
         Measure("scroll 640x479 up a row (Blt)", bpp, W * (H - 1), [&](int) {
             RECT s = {0, 1, W, H}, d = {0, 0, W, H - 1};
             dst->Blt(&d, dst, &s, DDBLT_WAIT, nullptr);
