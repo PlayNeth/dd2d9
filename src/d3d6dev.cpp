@@ -823,10 +823,15 @@ HRESULT Device::F3::GetDirect3D(IDirect3D3** out) {
     return o->d3d->InnerQuery(IID_IDirect3D3, reinterpret_cast<void**>(out));
 }
 
+// As Direct3D 7's (S §For dd2d9 17, B item 19), against this device's own description.
 HRESULT Device::F3::ValidateDevice(LPDWORD passes) {
     if (!passes) return DDERR_INVALIDPARAMS;
-    *passes = 1;
-    return D3D_OK;
+    Guard l;
+    DWORD textures = 0;
+    for (DWORD s = 0; s < 8; s++)
+        if (o->stageTex[s]) textures |= 1u << s;
+    const D3DDEVICEDESC& desc = o->kind == kHAL ? o->hal : o->hel;
+    return ValidateStages(o->tss, textures, desc.dwTextureOpCaps, desc.wMaxTextureBlendStages, desc.wMaxSimultaneousTextures, passes);
 }
 
 // ---------------------------------------------------------------- clip status (B §8.7)

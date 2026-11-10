@@ -90,7 +90,6 @@ public:
         d3d_->AddRef();  // its buffer surface holds the DirectDraw interface (D §CreateVertexBuffer)
     }
     ~VertexBuffer7() {
-        GpuVbGone(gpu_);
         d3d_->Release();
     }
 
@@ -149,10 +148,6 @@ public:
     bool hasClipCodes_ = false;
     bool optimized_ = false;
     DWORD locks_ = 0;
-
-    // The GPU copy (gpures.h's GpuVb): drawn from instead of sending the vertices with every
-    // draw, kept equal to mem_ (which the game may write any time, through Lock's pointer).
-    GpuVb* gpu_ = nullptr;
 
 private:
     LONG ref_ = 1;
@@ -327,8 +322,13 @@ public:
         D3DLIGHT7 l = {};
         bool set = false, enabled = false;
         bool dirty = false;  // changed since last sent to D3D9
+        bool onGpu = false;  // enabled in D3D9 (SendLightEnables)
     };
     std::vector<Light> lights_;
+    // More lights enabled than the GPU lights at once (SendLightEnables chooses among them
+    // for each object: again when the world matrix changes).
+    bool lightsOver_ = false;
+    bool lightsOverLogged_ = false;
     D3DCLIPSTATUS cs_ = {};
     // The clip status drawing updates (as XP's front end): kept only once the game has asked
     // for it (GetClipStatus), as it costs a transform of every untransformed vertex drawn.
@@ -368,6 +368,7 @@ private:
     void PushKeyAlpha();  // the alpha test and stage 0's alpha op, with COLORKEYENABLE's emulation
     void PushTransform(DWORD t);
     void PushLight(DWORD i);
+    void SendLightEnables(bool all);
     D3DMATRIX* Matrix(DWORD t);
     HRESULT SetRS(DWORD s, DWORD v);                     // not recorded
     HRESULT SetTSS(DWORD stage, DWORD t, DWORD v);
@@ -385,7 +386,7 @@ private:
     HRESULT Replay(const StateBlock* b);
     DWORD NewHandle(StateBlock* b);
     HRESULT DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT stride, DWORD n, const WORD* idx, DWORD ni,
-                       bool fromVB, const GpuVbSource* gpuVb = nullptr);
+                       bool fromVB);
     HRESULT DrawVB(D3DPRIMITIVETYPE t, VertexBuffer7* vb, DWORD start, DWORD n, const WORD* idx, DWORD ni);
     const WORD* SafeIndices(const WORD* idx, DWORD ni, DWORD n);
     DWORD ClipSpacePlanes(float (*out)[4]) const;

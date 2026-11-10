@@ -3,6 +3,7 @@
 #include "gpuint.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace dd2d9 {
 
@@ -110,6 +111,15 @@ void GpuContext::SetTransform(DWORD type, const float* m16) {
         memcpy(&p_->proj, m16, sizeof(p_->proj));
         p_->projDirty = g_config.pixelCenter || p_->fold[0] != 1.0f || p_->fold[1] != 0.0f || p_->fold[2] != 1.0f ||
                         p_->fold[3] != 0.0f;
+        // The depth this projection gives a point at a given w (emulated W buffering of
+        // transformed vertices drawn among untransformed ones, Draw): with w = z * _34 + _44
+        // it is (z * _33 + _43) / w = far + perRhw / w. A perspective projection only (w grows
+        // with z), nearer points getting the smaller depth.
+        const float m33 = m16[10], m34 = m16[11], m43 = m16[14], m44 = m16[15];
+        const float wFar = m34 != 0.0f ? m33 / m34 : 0.0f, perRhw = m43 - m44 * wFar;
+        p_->wProj = m34 > 0.0f && std::isfinite(wFar) && std::isfinite(perRhw) && wFar > 0.0f && perRhw < 0.0f;
+        p_->wDepthFar = wFar;
+        p_->wDepthPerRhw = perRhw;
     }
     if (p_->dev) p_->dev->SetTransform(D3DTRANSFORMSTATETYPE(type), reinterpret_cast<const D3DMATRIX*>(m16));
 }

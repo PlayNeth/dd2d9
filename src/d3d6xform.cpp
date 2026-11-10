@@ -193,8 +193,8 @@ inline __m128 Channel(__m128i c, int shift) {
 
 }  // namespace
 
-void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
-                    bool extents, PVert* out, DWORD lo, DWORD hi) {
+DWORD TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
+                     bool extents, PVert* out, DWORD lo, DWORD hi) {
     // The four-lane code divides and takes roots on every lane and picks the answers after,
     // where the scalar code skips (a vertex outside, a light on the vertex): with the game's
     // floating-point exceptions unmasked (some runtimes' default) that would trap. Masked
@@ -567,6 +567,7 @@ void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD
     for (; i < aTo; i++) attributes(i);
     if (extents) memcpy(d->ext, ext, sizeof(ext));
     if (clip && n) d->status = MergeClipStatus(d->status, orCodes, andCodes);
+    return orCodes;
 }
 
 }  // namespace d6

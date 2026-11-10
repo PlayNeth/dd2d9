@@ -111,7 +111,7 @@ const WORD* Device7::SafeIndices(const WORD* idx, DWORD ni, DWORD n) {
 
 // fromVB: the vertices are a vertex buffer's (a transformed one's leave the clip status alone).
 HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT stride, DWORD n, const WORD* idx,
-                            DWORD ni, bool fromVB, const GpuVbSource* gpuVb) {
+                            DWORD ni, bool fromVB) {
     if (!ValidPrim(t)) return DDERR_INVALIDPARAMS;  // undefined on XP (V §5.3)
     const UINT prims = PrimCount(t, idx ? ni : n);
     if (!prims || !n) return D3D_OK;
@@ -153,7 +153,6 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
         v = withNormal.data();
         stride = newStride;
         fvf |= D3DFVF_NORMAL;
-        gpuVb = nullptr;  // (other vertices than the buffer's)
     }
     Use u(this);
     if (!u.ok) return D3D_OK;
@@ -169,7 +168,7 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
         }
     }
     SendFog(fvf);
-    ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE, nullptr, 0, gpuVb);
+    ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE);
     return D3D_OK;
 }
 
@@ -516,12 +515,6 @@ HRESULT Device7::DrawVB(D3DPRIMITIVETYPE t, VertexBuffer7* vb, DWORD start, DWOR
             return clipped_.empty() ? D3D_OK
                                     : DrawCommon(ot, vb->fvf_, clipped_.data(), vb->stride_,
                                                  DWORD(clipped_.size() / vb->stride_), nullptr, 0, true);
-    }
-    // Untransformed vertices: Direct3D 9 transforms them as they are, from the buffer's GPU
-    // copy where it can.
-    if (!transformed) {
-        const GpuVbSource src = {&vb->gpu_, vb->mem_.data(), UINT(size_t(vb->stride_) * vb->count_)};
-        return DrawCommon(t, vb->fvf_, mem, vb->stride_, n, idx, ni, true, &src);
     }
     return DrawCommon(t, vb->fvf_, mem, vb->stride_, n, idx, ni, true);
 }

@@ -733,12 +733,14 @@ Device* DevFrom(IDirect3DDevice3* p);
 // get their position and clip code only (for the clip status and extents, as XP's
 // transform of all of them made them, except where Device2 dereferences: B §8.1), or
 // nothing where neither is kept.
-void TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
-                    bool extents, PVert* out, DWORD lo = 0, DWORD hi = 0xFFFFFFFF);
+// Returns the vertices' clip codes ORed (with clip: all n of them; 0: every one inside).
+DWORD TransformVerts(Device* d, const uint8_t* src, UINT stride, DWORD fvf, DWORD n, bool clip, bool light,
+                     bool extents, PVert* out, DWORD lo = 0, DWORD hi = 0xFFFFFFFF);
 // Draws PVerts (indexed or not): screen coordinates as they are where clip is false or every
-// vertex is inside, else clipped against XP's volume first.
+// vertex is inside, else clipped against XP's volume first. inside: the caller knows that
+// every vertex has clip code 0 (from TransformVerts).
 void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx, DWORD ni, bool clip,
-                DWORD ntex);
+                DWORD ntex, bool inside = false);
 // Several index lists of one primitive type (parts: offset and count in idx), each drawn as
 // DrawPVerts draws it, in one draw where that changes nothing (GpuContext::Draw).
 void DrawPVertsBatch(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx,

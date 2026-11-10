@@ -13,6 +13,7 @@
 #pragma once
 #include "common.h"
 
+#include <emmintrin.h>
 #include <vector>
 
 struct IDirect3D9;
@@ -25,6 +26,37 @@ struct IDirect3DVertexDeclaration9;
 namespace dd2d9 {
 
 IDirect3D9* CreateD3D9();  // Windows' d3d9.dll or the game's, as configured
+
+// The lowest and highest of n 16-bit indices (none: 0xFFFF and 0), sixteen at a time: a mesh
+// draw's indices are gone through for their range by the front end and again by
+// GpuContext::Draw, and one at a time that took as long as packing its vertices.
+inline void IndexRange16(const WORD* idx, size_t n, WORD* lo, WORD* hi) {
+    WORD l = 0xFFFF, h = 0;
+    size_t i = 0;
+    if (n >= 16) {
+        // (SSE2 has only the signed 16-bit minimum and maximum: the indices with their top
+        // bit flipped keep their order as signed numbers.)
+        const __m128i flip = _mm_set1_epi16(short(0x8000));
+        __m128i mn = _mm_set1_epi16(0x7FFF), mx = _mm_set1_epi16(short(0x8000));
+        for (; i + 8 <= n; i += 8) {
+            const __m128i v = _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(idx + i)), flip);
+            mn = _mm_min_epi16(mn, v);
+            mx = _mm_max_epi16(mx, v);
+        }
+        alignas(16) WORD a[8], b[8];
+        _mm_store_si128(reinterpret_cast<__m128i*>(a), _mm_xor_si128(mn, flip));
+        _mm_store_si128(reinterpret_cast<__m128i*>(b), _mm_xor_si128(mx, flip));
+        for (int k = 0; k < 8; k++) {
+            if (a[k] < l) l = a[k];
+            if (b[k] > h) h = b[k];
+        }
+    }
+    for (; i < n; i++) {
+        if (idx[i] < l) l = idx[i];
+        if (idx[i] > h) h = idx[i];
+    }
+    *lo = l, *hi = h;
+}
 
 // GpuContext::Draw sets a vertex declaration or a stage's texture only when it isn't the one
 // it set last on that device (Gpu::lastDecl, Gpu::lastTex). Anything else that sets a
@@ -116,6 +148,7 @@ private:
     IDirect3DDevice9* dev_ = nullptr;
     HWND window_ = nullptr;  // the device's own (hidden) window, on a thread of its own
     HANDLE windowThread_ = nullptr;
+    bool windowThreadHolds_ = false;  // that thread keeps dd2d9 loaded while it runs (MakeWindow)
     UINT devW_ = 0, devH_ = 0;  // its implicit back buffer (decided at creation)
     HWND hint_ = nullptr;       // SetWindowHint's
     HWND devWindow_ = nullptr;  // the implicit swap chain's window (the game's, or window_)

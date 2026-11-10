@@ -18,7 +18,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.6.0"
+#define DD2D9_VERSION "1.7.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -154,9 +154,10 @@ struct DisplayGuard {
     DisplayGuard& operator=(const DisplayGuard&) = delete;
 };
 
-// Waits for `h` while still handling messages sent to this thread's windows
-// (another thread may be waiting on one of them). Returns false on timeout.
-bool WaitPumping(HANDLE h, DWORD timeoutMs);
+// Waits for `h` (or `other`, if given: whichever comes first) while still handling messages
+// sent to this thread's windows (another thread may be waiting on one of them). Returns
+// false on timeout.
+bool WaitPumping(HANDLE h, DWORD timeoutMs, HANDLE other = nullptr);
 
 // Every COM object we hand out starts with { vtable, kMagic, impl* } so an
 // incoming interface pointer can be validated and mapped back to its object.

@@ -76,6 +76,8 @@ private:
 
     DDraw* dd_;
     HANDLE thread_ = nullptr;
+    HMODULE threadHold_ = nullptr;  // dd2d9, held loaded for the thread (null: not held; Start)
+    HANDLE doneEvent_ = nullptr;    // set by the thread when it is done with the presenter (Stop)
     HANDLE dirtyEvent_ = nullptr;
     volatile bool running_ = false;
     volatile bool active_ = false;

@@ -110,21 +110,41 @@ struct NearestIndex {
 NearestIndex g_nearest;
 
 // Scratch buffers reused from blit to blit; every blit runs with g_lock held.
-std::vector<int> g_xmap;
+std::vector<int> g_xmap, g_ymap;
 std::vector<uint8_t> g_temp;
 std::vector<uint8_t> g_keyRow;  // a stretched / mirrored keyed row's source pixels, gathered
 
-// Maps each clipped destination column to a source column.
+// Maps the clipped destination columns (or rows) lo..hi-1 to source ones: column x of a
+// destination d0..d0+dw-1 takes source column s0 + (x - d0) * sw / dw (from the other end
+// when mirrored). Stepped from the first one's quotient and remainder, which gives the same
+// numbers as dividing for each (a 64-bit division a column, a call in 32-bit code, took as
+// long as a small stretch's pixels).
 // Destination rectangles can be huge when a clipper is attached (only the
 // clipped part is drawn), so the mapping is done in 64-bit arithmetic.
-static const int* BuildXMap(const BlitJob& j) {
-    const int64_t dw = int64_t(j.d0.right) - j.d0.left, sw = int64_t(j.s0.right) - j.s0.left;
-    g_xmap.resize(size_t(j.dc.right - j.dc.left));
-    for (int x = j.dc.left; x < j.dc.right; x++) {
-        int64_t rx = int64_t(x) - j.d0.left;
-        if (j.mirrorX) rx = dw - 1 - rx;
-        g_xmap[size_t(x - j.dc.left)] = int(j.s0.left + rx * sw / dw);
+static void BuildMap(std::vector<int>& map, int64_t d0, int64_t dw, int64_t s0, int64_t sw, bool mirror, int lo, int hi) {
+    map.resize(size_t(hi - lo));
+    if (hi <= lo || dw <= 0) return;
+    int64_t rx = int64_t(lo) - d0;
+    if (mirror) rx = dw - 1 - rx;
+    int64_t v = s0 + rx * sw / dw, rem = rx * sw % dw;
+    const int64_t q = sw / dw, r = sw % dw;
+    int* out = map.data();
+    for (int n = hi - lo; n > 0; n--) {
+        *out++ = int(v);
+        if (!mirror) {
+            v += q, rem += r;
+            if (rem >= dw) v++, rem -= dw;
+        } else {
+            v -= q, rem -= r;
+            if (rem < 0) v--, rem += dw;
+        }
     }
+}
+
+// Maps each clipped destination column to a source column.
+static const int* BuildXMap(const BlitJob& j) {
+    BuildMap(g_xmap, j.d0.left, int64_t(j.d0.right) - j.d0.left, j.s0.left, int64_t(j.s0.right) - j.s0.left, j.mirrorX,
+             j.dc.left, j.dc.right);
     return g_xmap.data();
 }
 
@@ -265,16 +285,49 @@ __attribute__((noinline)) static void KeyRows(const BlitJob& j, const int* xmap)
     }
 }
 
+// A run of destination columns that take the same source column (a row stretched wider).
+struct StretchRun {
+    int sx, at;  // the source column; the run's first destination column (from the clipped left)
+};
+std::vector<StretchRun> g_runs;
+
 // A stretched or mirrored copy without keys or the OR mask: each row's source columns gathered
 // straight into the destination row (out of line, as KeyRows; kept apart from it, which the
 // keyed sprites' speed depends on), a row repeated where the stretch makes it taller.
+// Stretched to three times the width or more, a row is runs of one pixel: each run is written
+// with whole 16-byte stores of that pixel, as many as the longest run takes (the same number
+// for every run, so nothing branches on a run's length; what a store writes past its run the
+// next runs write over). The last runs, whose stores would pass the row's end, and narrower
+// stretches go pixel by pixel. (A 64-pixel picture stretched across a 640x480 screen: half
+// the time of its rows.)
 template <typename T>
 __attribute__((noinline)) static void StretchRows(const BlitJob& j, const int* __restrict xmap) {
     const int n = j.dc.right - j.dc.left;
+    constexpr int kPer = 16 / int(sizeof(T));  // pixels a store
+    size_t safe = 0;  // the runs written with stores (0: pixel by pixel)
+    int stores = 0;
+    if (int64_t(j.d0.right) - j.d0.left >= 3 * (int64_t(j.s0.right) - j.s0.left)) {
+        g_runs.clear();
+        int longest = 0;
+        for (int i = 0; i < n;) {
+            int e = i + 1;
+            while (e < n && xmap[e] == xmap[i]) e++;
+            g_runs.push_back({xmap[i], i});
+            longest = std::max(longest, e - i);
+            i = e;
+        }
+        stores = (longest + kPer - 1) / kPer;
+        while (safe < g_runs.size() && g_runs[safe].at + stores * kPer <= n) safe++;
+    }
+    const StretchRun* const runs = g_runs.data();
+    const size_t runCount = safe ? g_runs.size() : 0;
+    BuildMap(g_ymap, j.d0.top, int64_t(j.d0.bottom) - j.d0.top, j.s0.top, int64_t(j.s0.bottom) - j.s0.top, j.mirrorY, j.dc.top,
+             j.dc.bottom);
+    const int* const ymap = g_ymap.data();
     int lastSy = -1;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         T* __restrict drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
-        const int sy = MapY(j, y);
+        const int sy = ymap[y - j.dc.top];
         if (sy == lastSy) {
             memcpy(drow, reinterpret_cast<const uint8_t*>(drow) - j.dpitch, size_t(n) * sizeof(T));
             continue;
@@ -282,7 +335,25 @@ __attribute__((noinline)) static void StretchRows(const BlitJob& j, const int* _
         lastSy = sy;
         // (drow never overlaps the source: an overlapping blit's source is copied aside first.)
         const T* __restrict srow = reinterpret_cast<const T*>(j.src + sy * j.spitch);
-        for (int i = 0; i < n; i++) drow[i] = srow[xmap[i]];
+        if (!safe) {
+            for (int i = 0; i < n; i++) drow[i] = srow[xmap[i]];
+            continue;
+        }
+        if (stores == 1) {
+            for (size_t i = 0; i < safe; i++)
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(drow + runs[i].at), Simd<T>::Set(srow[runs[i].sx]));
+        } else {
+            for (size_t i = 0; i < safe; i++) {
+                const __m128i v = Simd<T>::Set(srow[runs[i].sx]);
+                T* o = drow + runs[i].at;
+                for (int k = 0; k < stores; k++) _mm_storeu_si128(reinterpret_cast<__m128i*>(o + k * kPer), v);
+            }
+        }
+        for (size_t i = safe; i < runCount; i++) {
+            const T p = srow[runs[i].sx];
+            const int end = i + 1 < runCount ? runs[i + 1].at : n;
+            for (int x = runs[i].at; x < end; x++) drow[x] = p;
+        }
     }
 }
 

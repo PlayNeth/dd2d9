@@ -625,6 +625,103 @@ static int Run(int w, int h, int bpp) {
         }
         if (sprite) sprite->Release();
 
+        {
+            // More lights enabled than the GPU lights at once (8 as a rule; a HAL device
+            // reports no limit, as XP lit its vertices itself): the ones that light the object
+            // most are used. Eight dim green lights enabled first, then a bright red one: the
+            // red one must show (D3D9 refused the ninth, whichever it was).
+            struct LitVertex {
+                float x, y, z, nx, ny, nz;
+            };
+            const LitVertex quad[4] = {{-0.5f, 0.5f, 0.5f, 0, 0, -1}, {0.5f, 0.5f, 0.5f, 0, 0, -1},
+                                       {-0.5f, -0.5f, 0.5f, 0, 0, -1}, {0.5f, -0.5f, 0.5f, 0, 0, -1}};
+            D3DMATRIX id = {};
+            id._11 = id._22 = id._33 = id._44 = 1;
+            D3DMATRIX oldW, oldV, oldP;
+            dev->GetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
+            dev->GetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
+            dev->GetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &id);
+            const D3DRENDERSTATETYPE states[] = {D3DRENDERSTATE_LIGHTING, D3DRENDERSTATE_AMBIENT, D3DRENDERSTATE_CULLMODE,
+                                                 D3DRENDERSTATE_ZENABLE, D3DRENDERSTATE_SPECULARENABLE,
+                                                 D3DRENDERSTATE_ALPHABLENDENABLE};
+            const DWORD values[] = {TRUE, 0, D3DCULL_NONE, D3DZB_FALSE, FALSE, FALSE};
+            DWORD old[6] = {}, oldOp = 0;
+            for (int k = 0; k < 6; k++) {
+                dev->GetRenderState(states[k], &old[k]);
+                dev->SetRenderState(states[k], values[k]);
+            }
+            dev->GetTextureStageState(0, D3DTSS_COLOROP, &oldOp);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+            D3DMATERIAL7 white = {}, oldMat = {};
+            white.diffuse.r = white.diffuse.g = white.diffuse.b = white.diffuse.a = 1.0f;
+            dev->GetMaterial(&oldMat);
+            dev->SetMaterial(&white);
+            for (DWORD i = 0; i < 9; i++) {
+                D3DLIGHT7 lt = {};
+                lt.dltType = D3DLIGHT_DIRECTIONAL;
+                lt.dvDirection.z = 1.0f;
+                if (i < 8) lt.dcvDiffuse.g = 0.02f;
+                else lt.dcvDiffuse.r = 0.9f;
+                dev->SetLight(i, &lt);
+                dev->LightEnable(i, TRUE);
+            }
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+            dev->BeginScene();
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZ | D3DFVF_NORMAL, const_cast<LitVertex*>(quad), 4, 0);
+            dev->EndScene();
+            const DWORD lit = pixel(w / 2, h / 2);
+            for (DWORD i = 0; i < 9; i++) dev->LightEnable(i, FALSE);
+            dev->SetMaterial(&oldMat);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, oldOp);
+            for (int k = 0; k < 6; k++) dev->SetRenderState(states[k], old[k]);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
+            dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
+            CHECK(((lit >> 16) & 0xFF) >= 200 && ((lit >> 8) & 0xFF) >= 20,
+                  "nine lights enabled, the brightest one last: the quad is 0x%06lx (red from the ninth, green from the others)",
+                  lit & 0xFFFFFF);
+        }
+
+        {
+            // ValidateDevice: one pass for what the device can draw; an operation or an
+            // argument that names nothing, or more stages than the device reports, is refused
+            // with the stage setup's error and no passes.
+            D3DDEVICEDESC7 vc = {};
+            dev->GetCaps(&vc);
+            DWORD saved[8][7] = {};
+            for (DWORD s = 0; s < 8; s++)
+                for (DWORD t = 1; t <= 6; t++) dev->GetTextureStageState(s, D3DTEXTURESTAGESTATETYPE(t), &saved[s][t]);
+            DWORD p0 = 77, p1 = 77, p2 = 77, p3 = 77, p4 = 77;
+            const HRESULT ok = dev->ValidateDevice(&p0);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, 99);
+            const HRESULT badOp = dev->ValidateDevice(&p1);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+            dev->SetTextureStageState(0, D3DTSS_COLORARG2, 9);
+            const HRESULT badArg = dev->ValidateDevice(&p2);
+            dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, 99);
+            const HRESULT badAlpha = dev->ValidateDevice(&p3);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            HRESULT tooMany = D3DERR_TOOMANYOPERATIONS;  // (a device with all 8 stages: nothing to try)
+            if (vc.wMaxTextureBlendStages < 8) {
+                for (DWORD s = 0; s <= vc.wMaxTextureBlendStages; s++) dev->SetTextureStageState(s, D3DTSS_COLOROP, D3DTOP_MODULATE);
+                tooMany = dev->ValidateDevice(&p4);
+            } else {
+                p4 = 0;
+            }
+            for (DWORD s = 0; s < 8; s++)
+                for (DWORD t = 1; t <= 6; t++) dev->SetTextureStageState(s, D3DTEXTURESTAGESTATETYPE(t), saved[s][t]);
+            CHECK(ok == D3D_OK && p0 == 1 && badOp == D3DERR_UNSUPPORTEDCOLOROPERATION && p1 == 0 &&
+                      badArg == D3DERR_UNSUPPORTEDCOLORARG && p2 == 0 && badAlpha == D3DERR_UNSUPPORTEDALPHAOPERATION && p3 == 0 &&
+                      tooMany == D3DERR_TOOMANYOPERATIONS && p4 == 0,
+                  "ValidateDevice: 0x%08lx/%lu, an unknown colour operation 0x%08lx/%lu, argument 0x%08lx/%lu, alpha "
+                  "operation 0x%08lx/%lu, a stage too many 0x%08lx/%lu (%u stages)",
+                  ok, p0, badOp, p1, badArg, p2, badAlpha, p3, tooMany, p4, vc.wMaxTextureBlendStages);
+        }
+
         // W buffering (D3DZB_USEW): a slanted floor drawn twice, first cut into an 8x8 grid
         // (red), then as two triangles (green, less-or-equal depth test), its depth linear in
         // w as games computed it. A Z buffer interpolates that differently for the two cuts
@@ -696,6 +793,47 @@ static int Run(int w, int h, int bpp) {
                 CHECK((nearPx & 0x00FF00) && !(nearPx & 0xFF0000) && (hugePx & 0x0000FF) && !(hugePx & 0xFFFF00),
                       "W buffering after a vertex with a huge rhw: the near square 0x%06lx (green), the huge one 0x%06lx (blue)",
                       nearPx & 0xFFFFFF, hugePx & 0xFFFFFF);
+                // Transformed and untransformed vertices in one scene (a game's own
+                // transformed models over a world Direct3D transforms): both are ordered by
+                // w, the range from the projection matrix (near plane 10, far 1000). A wall
+                // from untransformed vertices at w 100 (blue), then a transformed square
+                // nearer than it (green, w 50) and one farther (red, w 200).
+                D3DMATRIX id = {}, oldW, oldV, oldP, persp = {};
+                id._11 = id._22 = id._33 = id._44 = 1.0f;
+                dev->GetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
+                dev->GetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
+                dev->GetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
+                persp._11 = persp._22 = 1.0f;
+                persp._33 = 1000.0f / 990.0f;
+                persp._34 = 1.0f;
+                persp._43 = -10.0f * 1000.0f / 990.0f;
+                dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &id);
+                dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &id);
+                dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &persp);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                struct WallVertex {
+                    float x, y, z;
+                    DWORD c;
+                };
+                const WallVertex wall[4] = {{-50, 50, 100, 0xFF0000FF}, {50, 50, 100, 0xFF0000FF},
+                                            {-50, -50, 100, 0xFF0000FF}, {50, -50, 100, 0xFF0000FF}};
+                const float cx = w / 2.0f, cy = h / 2.0f;
+                dev->BeginScene();
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZ | D3DFVF_DIFFUSE, const_cast<WallVertex*>(wall), 4, 0);
+                square(cx - 60, cy - 20, cx - 20, cy + 20, 0.5f, 1.0f / 50, 0xFF00FF00);
+                square(cx + 20, cy - 20, cx + 60, cy + 20, 0.5f, 1.0f / 200, 0xFFFF0000);
+                square(cx - 10, cy + 40, cx + 10, cy + 60, 0.0f, 13131952.0f, 0xFFFFFFFF);
+                dev->EndScene();
+                const DWORD wallPx = pixel(int(cx), int(cy)), frontPx = pixel(int(cx) - 40, int(cy)),
+                            behindPx = pixel(int(cx) + 40, int(cy)), hugePx2 = pixel(int(cx), int(cy) + 50);
+                CHECK((wallPx & 0xFFFFFF) == (behindPx & 0xFFFFFF) && (wallPx & 0x0000FF) && !(wallPx & 0xFFFF00) &&
+                          (frontPx & 0x00FF00) && !(frontPx & 0xFF00FF) && (hugePx2 & 0x00FF00) && (hugePx2 & 0xFF0000) && (hugePx2 & 0x0000FF),
+                      "W buffering, transformed vertices over untransformed ones: the wall 0x%06lx (blue), a square nearer "
+                      "0x%06lx (green), one farther 0x%06lx (blue), one with a huge rhw 0x%06lx (white)",
+                      wallPx & 0xFFFFFF, frontPx & 0xFFFFFF, behindPx & 0xFFFFFF, hugePx2 & 0xFFFFFF);
+                dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
+                dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
+                dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
             }
             // NFS III's light maps: everything alpha blended with depth writes on, the road a
             // grid (red), then two lights added on top (green, blue), each cut differently and
@@ -1099,8 +1237,9 @@ static int Run(int w, int h, int bpp) {
             if (src) src->Release();
             if (dst) dst->Release();
 
-            // A vertex buffer drawn from again and again: dd2d9 draws it from a Direct3D 9
-            // copy. Every draw must show what the buffer holds then: unchanged, drawn from an
+            // A vertex buffer drawn from again and again (1.6.0 drew it from a Direct3D 9 copy,
+            // which was slower than sending the vertices and is gone; the checks stay). Every
+            // draw must show what the buffer holds then: unchanged, drawn from an
             // offset with indices, after the game wrote it again (Lock), written through the
             // pointer an earlier Lock gave (as XP allows), and rewritten before every draw (a
             // dynamic buffer).

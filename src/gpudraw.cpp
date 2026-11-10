@@ -5,7 +5,6 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
-#include <new>
 #include <emmintrin.h>
 
 namespace dd2d9 {
@@ -73,107 +72,9 @@ static float WScaleRhw(const uint8_t* src, UINT stride, UINT n, float maxRhw) {
     return held;
 }
 
-void GpuVbGone(GpuVb* vb) {
-    if (!vb) return;
-    if (vb->gpu) {
-        GpuGuard l(*vb->gpu);
-        vb->Drop();
-        vb->gpu->RemoveOwner(vb);
-    }
-    delete vb;
-}
-
-bool GpuContext::Impl::DrawFromCopy(const GpuVbSource& src, DWORD primType, const void* verts, UINT stride,
-                                    UINT vertexCount, const WORD* indices, UINT indexCount, WORD lo, WORD hi,
-                                    UINT primCount) {
-    const size_t offset = static_cast<const uint8_t*>(verts) - static_cast<const uint8_t*>(src.mem);
-    if (!stride || offset % stride || offset >= src.bytes) return false;
-    const UINT base = UINT(offset / stride);
-    // The vertices the draw uses, as bytes of the buffer.
-    const size_t first = (size_t(base) + (indices ? lo : 0)) * stride;
-    const size_t used = size_t(indices ? UINT(hi - lo) + 1 : vertexCount) * stride;
-    if (first + used > src.bytes) return false;
-    const UINT indexBytes = indexCount * UINT(sizeof(WORD));
-    if (indices && indexBytes > kIndexBytes) return false;
-    GpuVb*& g = *src.slot;
-    if (!g && !(g = new (std::nothrow) GpuVb)) return false;
-    if (g->gpu != &gpu) {
-        if (g->gpu) return false;  // another DirectDraw object's device has it
-        g->gpu = &gpu;
-        gpu.AddOwner(g);
-    }
-    if (g->skip) {
-        g->skip--;
-        return false;
-    }
-    // The game may write the vertices meanwhile (another thread, through a kept pointer): the
-    // shadow is taken first and the copy written from it, so the two always agree.
-    const auto* mem = static_cast<const uint8_t*>(src.mem);
-    if (!g->vb || g->shadow.size() != src.bytes) {
-        g->Drop();
-        if (!g->drawn) {  // made at the buffer's second draw: one drawn once costs nothing more
-            g->drawn = true;
-            return false;
-        }
-        void* p = nullptr;
-        bool made = false;
-        try {
-            g->shadow.assign(mem, mem + src.bytes);
-            made = SUCCEEDED(dev->CreateVertexBuffer(src.bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &g->vb,
-                                                     nullptr)) &&
-                   SUCCEEDED(g->vb->Lock(0, 0, &p, 0));
-        } catch (const std::exception&) {
-        }
-        if (!made) {
-            g->Drop();
-            g->skip = GpuVb::kDynamicSkip;  // (not tried again at every draw)
-            return false;
-        }
-        memcpy(p, g->shadow.data(), src.bytes);
-        g->vb->Unlock();
-        g->changedRun = 0;
-    } else if (memcmp(g->shadow.data() + first, mem + first, used) != 0) {
-        void* p = nullptr;
-        if (FAILED(g->vb->Lock(UINT(first), UINT(used), &p, 0))) return false;
-        memcpy(g->shadow.data() + first, mem + first, used);
-        memcpy(p, g->shadow.data() + first, used);
-        g->vb->Unlock();
-        if (++g->changedRun >= GpuVb::kDynamicRun) {
-            g->changedRun = 0;
-            g->skip = GpuVb::kDynamicSkip;
-        }
-    } else {
-        g->changedRun = 0;
-    }
-    if (indices) {
-        if (!indexBuf && FAILED(dev->CreateIndexBuffer(kIndexBytes, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY,
-                                                      D3DFMT_INDEX16, D3DPOOL_DEFAULT, &indexBuf, nullptr))) {
-            indexBuf = nullptr;
-            return false;
-        }
-        const bool wrap = indexPos + indexBytes > kIndexBytes;
-        if (wrap) indexPos = 0;
-        void* p = nullptr;
-        if (FAILED(indexBuf->Lock(indexPos, indexBytes, &p, wrap ? D3DLOCK_DISCARD : D3DLOCK_NOOVERWRITE))) return false;
-        memcpy(p, indices, indexBytes);
-        indexBuf->Unlock();
-        dev->SetIndices(indexBuf);
-    }
-    // (Draw*UP leave stream 0 and the indices unset: both are set for every draw from a copy.)
-    dev->SetStreamSource(0, g->vb, 0, stride);
-    if (indices) {
-        dev->DrawIndexedPrimitive(D3DPRIMITIVETYPE(primType), INT(base), lo, UINT(hi - lo) + 1,
-                                  indexPos / UINT(sizeof(WORD)), primCount);
-        indexPos += indexBytes;
-    } else {
-        dev->DrawPrimitive(D3DPRIMITIVETYPE(primType), base, primCount);
-    }
-    return true;
-}
-
 void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride, UINT vertexCount,
                       const WORD* indices, UINT indexCount, UINT primCount, bool zEnabled, const DrawSeg* segs,
-                      UINT segCount, const GpuVbSource* vb) {
+                      UINT segCount) {
     Impl& p = *p_;
     if (!p.dev || !primCount || !verts || !vertexCount) return;
     if (segCount < 2) segs = nullptr, segCount = 0;
@@ -202,6 +103,13 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     RECT flatRect = {};
     p.flat2d = false;
     const bool tl = (fvf & 0x0E) == 0x04 && stride >= 16;
+    // Emulated W buffering: untransformed vertices take their depth from the projection
+    // matrix, and once the game has drawn some, so do its transformed ones (their w put
+    // through the same projection: one order for both, as in a W buffer). A game that only
+    // draws transformed vertices keeps the scale found from them (g_wScale), which spends
+    // the depth buffer's bits better than a projection's near plane does.
+    if (p.wEmulate && !tl) p.wMixed = true;
+    const bool wRange = p.wEmulate && p.wMixed && p.wProj;
     // Several draws (segs): their vertices only, each scanned once (between their ranges may
     // lie vertices none of them uses).
     static std::vector<std::pair<UINT, UINT>> spans;  // (every caller holds g_lock)
@@ -263,8 +171,8 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // Untextured rhw flattened (below): the whole draw's or none.
         bool apart = (scan.minRhw > 0.0f && scan.maxRhw > scan.minRhw * 10000.0f) && (!p.tex[0] || scan.minRhw == 0.0f);
         // (Vertices nearer than a W buffer reaches among them: each draw's scale on its own.)
-        if (p.wEmulate && scan.maxRhw > kWNearest) return drawEach();
-        if (p.wEmulate) {  // the W scale each would have been drawn with, the scale as one
+        if (p.wEmulate && !wRange && scan.maxRhw > kWNearest) return drawEach();
+        if (p.wEmulate && !wRange) {  // the W scale each would have been drawn with, the scale as one
             const float all = scan.maxRhw * g_wScale > 1.0f ? 0.5f / scan.maxRhw : g_wScale;
             float s = g_wScale;
             for (UINT k = 0; k < segCount && !apart; k++) {
@@ -388,8 +296,9 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // vertex, a triangle's corners before the nearest one got another scale than those
         // after (its depth warped); an infinite rhw (bad, above) made it 0 and every depth
         // after it 1 until the next whole clear. (Not from an rhw above kWNearest.)
-        const float scaleRhw = wz ? WScaleRhw(src, stride, vertexCount, maxRhw) : 0.0f;
-        if (wz && scaleRhw * g_wScale > 1.0f) g_wScale = 0.5f / scaleRhw;
+        // (Not with the projection's range, wRange: that has no scale.)
+        const float scaleRhw = wz && !wRange ? WScaleRhw(src, stride, vertexCount, maxRhw) : 0.0f;
+        if (scaleRhw * g_wScale > 1.0f) g_wScale = 0.5f / scaleRhw;
         if (clampZ || badRhw || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
             for (UINT i = 0; i < vertexCount; i++) {
@@ -402,7 +311,10 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                 // The scale keeps the nearest w seen within [0, 1], 24 bits for the rest.
                 if (wz) {
                     const float rhw = v[3] >= FLT_MIN && std::isfinite(v[3]) ? v[3] : 0.0f;  // (bad: as far as can be)
-                    v[2] = rhw > kWNearest ? 0.0f : 1.0f - rhw * g_wScale;
+                    // (wRange: nearer than the near plane is the nearest there can be, past
+                    // the far plane the farthest, as a W buffer's range ends.)
+                    if (wRange) v[2] = std::clamp(p.wDepthFar + p.wDepthPerRhw * rhw, 0.0f, 1.0f);
+                    else v[2] = rhw > kWNearest ? 0.0f : 1.0f - rhw * g_wScale;
                 }
                 if (flatRhw) v[3] = 1.0f;
                 else if (badRhw && (!(v[3] >= FLT_MIN) || !std::isfinite(v[3]))) v[3] = minRhw;
@@ -436,25 +348,17 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                   tl ? zlo : 0.0f, tl ? zhi : 0.0f, tl ? wlo : 0.0f, tl ? whi : 0.0f, flat2d ? " FLAT2D" : "");
     }
     p.gpu.OpenScene();
-    // From the vertex buffer's GPU copy: untransformed vertices, as the game wrote them (none
-    // of the changes above are made to those).
-    const bool fromCopy = vb && !segs && (fvf & 0x0E) != 0x04;
     if (indices) {
         // Only the vertices the indices use are copied to the GPU (D3D9 takes them from the
         // lowest one): a few triangles from a big vertex buffer don't send all of it.
-        WORD lo = 0xFFFF, hi = 0;
-        for (UINT i = 0; i < indexCount; i++) {
-            lo = std::min(lo, indices[i]);
-            hi = std::max(hi, indices[i]);
-        }
+        WORD lo, hi;
+        IndexRange16(indices, indexCount, &lo, &hi);
         // No indices, or one past the vertices: D3D9 would read past what it copied. (The
         // callers replace such indices with vertex 0 already, as XP's runtime tolerated them.)
         if (lo > hi || hi >= vertexCount) return;
-        if (!fromCopy ||
-            !p.DrawFromCopy(*vb, primType, verts, stride, vertexCount, indices, indexCount, lo, hi, primCount))
-            p.dev->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(primType), lo, UINT(hi - lo) + 1, primCount, indices,
-                                          D3DFMT_INDEX16, verts, stride);
-    } else if (!fromCopy || !p.DrawFromCopy(*vb, primType, verts, stride, vertexCount, nullptr, 0, 0, 0, primCount)) {
+        p.dev->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(primType), lo, UINT(hi - lo) + 1, primCount, indices, D3DFMT_INDEX16,
+                                      verts, stride);
+    } else {
         p.dev->DrawPrimitiveUP(D3DPRIMITIVETYPE(primType), primCount, verts, stride);
     }
     p.rt->buf->cpuStale = true;

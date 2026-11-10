@@ -76,6 +76,22 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcA(h, m, w, l);
 }
 
+// A DLL's own function, read from its export table: Windows' real one, where the test
+// compares with it (GetProcAddress hands a game dd2d9's hook for a hooked function).
+static void* RealExport(HMODULE m, const char* name) {
+    auto* b = reinterpret_cast<BYTE*>(m);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(b + reinterpret_cast<IMAGE_DOS_HEADER*>(b)->e_lfanew);
+    const DWORD dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (!dir) return nullptr;
+    auto* ed = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(b + dir);
+    auto* names = reinterpret_cast<DWORD*>(b + ed->AddressOfNames);
+    auto* ords = reinterpret_cast<WORD*>(b + ed->AddressOfNameOrdinals);
+    auto* funcs = reinterpret_cast<DWORD*>(b + ed->AddressOfFunctions);
+    for (DWORD i = 0; i < ed->NumberOfNames; i++)
+        if (strcmp(reinterpret_cast<char*>(b + names[i]), name) == 0) return b + funcs[ords[i]];
+    return nullptr;
+}
+
 static HWND MakeWindow(DWORD style, int w, int h) {
     WNDCLASSA wc = {};
     wc.lpfnWndProc = WndProc;
@@ -1152,14 +1168,14 @@ static int RunFullscreen8(int modeW, int modeH) {
         using RectFn = BOOL(WINAPI*)(HWND, RECT*);
         using MapFn = int(WINAPI*)(HWND, HWND, POINT*, UINT);
         HMODULE user32 = GetModuleHandleA("user32.dll");
-        const auto realClientRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(user32, "GetClientRect")));
-        const auto realMap = reinterpret_cast<MapFn>(reinterpret_cast<void*>(GetProcAddress(user32, "MapWindowPoints")));
+        const auto realClientRect = reinterpret_cast<RectFn>(RealExport(user32, "GetClientRect"));
+        const auto realMap = reinterpret_cast<MapFn>(RealExport(user32, "MapWindowPoints"));
         RECT cr;
         realClientRect(hwnd, &cr);
         realMap(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
         // (The real monitor too: dd2d9 shows the game its mode as the monitor.)
         using MonFn = BOOL(WINAPI*)(HMONITOR, MONITORINFO*);
-        const auto realMonitorInfo = reinterpret_cast<MonFn>(reinterpret_cast<void*>(GetProcAddress(user32, "GetMonitorInfoA")));
+        const auto realMonitorInfo = reinterpret_cast<MonFn>(RealExport(user32, "GetMonitorInfoA"));
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
         realMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
@@ -1820,6 +1836,56 @@ static int RunLifetime() {
     r = dd->Release();
     CHECK(r == 0, "lifetime: DirectDraw released (refcount %lu)", r);
     DestroyWindow(hwnd);
+
+    {
+        // A game DLL that releases DirectDraw as it is unloaded (from its DllMain, under the
+        // loader lock): dd2d9's threads can't end until that lock is free, and waiting for
+        // their end took 3 s at every such unload (and left the presenter behind). The object
+        // has shown something, so its presenter and device are up.
+        char path[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+        char* slash = n && n < MAX_PATH ? strrchr(path, '\\') : nullptr;
+        HMODULE wc = nullptr;
+        if (slash && size_t(slash - path) < MAX_PATH - 16) {
+            strcpy(slash + 1, "wincaller.dll");
+            wc = LoadLibraryA(path);
+        }
+        using HoldFn = void(WINAPI*)(IUnknown*, IUnknown*);
+        const auto hold = wc ? reinterpret_cast<HoldFn>(reinterpret_cast<void*>(GetProcAddress(wc, "ReleaseAtUnload"))) : nullptr;
+        IDirectDraw7* dd2 = nullptr;
+        if (hold) DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd2), IID_IDirectDraw7, nullptr);
+        if (dd2) {
+            HWND w2 = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+            dd2->SetCooperativeLevel(w2, DDSCL_NORMAL);
+            DDSURFACEDESC2 pd = {};
+            pd.dwSize = sizeof(pd);
+            pd.dwFlags = DDSD_CAPS;
+            pd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+            IDirectDrawSurface7* prim = nullptr;
+            hr = dd2->CreateSurface(&pd, &prim, nullptr);
+            if (prim) {
+                DDBLTFX fx = {};
+                fx.dwSize = sizeof(fx);
+                fx.dwFillColor = 0x00FF00;
+                RECT fill = {0, 0, 100, 100};
+                for (int i = 0; i < 10; i++) {
+                    prim->Blt(&fill, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+                    Pump();
+                    Sleep(20);
+                }
+            }
+            hold(prim, dd2);
+            const DWORD t0 = GetTickCount();
+            FreeLibrary(wc);
+            wc = nullptr;
+            const DWORD took = GetTickCount() - t0;
+            CHECK(prim && took < 1000, "lifetime: DirectDraw released by a DLL as it is unloaded, in %lu ms (primary 0x%08lx)", took, hr);
+            DestroyWindow(w2);
+        } else {
+            fprintf(g_out, "SKIP DirectDraw released by a DLL as it is unloaded: wincaller.dll not next to ddtest\n");
+        }
+        if (wc) FreeLibrary(wc);
+    }
     return 0;
 }
 
@@ -2389,10 +2455,24 @@ static int RunMouse() {
         using PointFn = BOOL(WINAPI*)(POINT*);
         using CallFn = BOOL(WINAPI*)(PointFn, POINT*);
         const auto call = wc ? reinterpret_cast<CallFn>(reinterpret_cast<void*>(GetProcAddress(wc, "CallPointFn"))) : nullptr;
+        {
+            // A game that looks a translated function up at run time (Windows 95 and NT code
+            // paths picked by name) gets dd2d9's translation too, as through its imports.
+            const HMODULE u = GetModuleHandleA("user32.dll");
+            const void* looked = reinterpret_cast<void*>(GetProcAddress(u, "GetCursorPos"));
+            const void* viaImport = reinterpret_cast<void*>(&GetCursorPos);
+            const void* lookedMove = reinterpret_cast<void*>(GetProcAddress(u, "MoveWindow"));
+            const void* untouched = reinterpret_cast<void*>(GetProcAddress(u, "GetDesktopWindow"));
+            CHECK(looked == viaImport && looked != RealExport(u, "GetCursorPos") && lookedMove != RealExport(u, "MoveWindow") &&
+                      untouched == RealExport(u, "GetDesktopWindow"),
+                  "GetProcAddress: GetCursorPos and MoveWindow looked up at run time are dd2d9's (%d %d %d), another function Windows' (%d)",
+                  looked == viaImport, looked != RealExport(u, "GetCursorPos"), lookedMove != RealExport(u, "MoveWindow"),
+                  untouched == RealExport(u, "GetDesktopWindow"));
+        }
         if (call) {
             const PointFn hook = &GetCursorPos;  // (read from ddtest's import: dd2d9's)
             const auto real =
-                reinterpret_cast<PointFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorPos")));
+                reinterpret_cast<PointFn>(RealExport(GetModuleHandleA("user32.dll"), "GetCursorPos"));
             SetCursorPos(320, 240);
             POINT game = {}, windows = {}, truth = {};
             GetCursorPos(&game);
@@ -2447,7 +2527,7 @@ static int RunMouse() {
         // rectangle mapped back a pixel short and that pixel stayed to repaint.
         using InvalidateFn = BOOL(WINAPI*)(HWND, const RECT*, BOOL);
         const auto realInvalidate = reinterpret_cast<InvalidateFn>(
-            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "InvalidateRect")));
+            RealExport(GetModuleHandleA("user32.dll"), "InvalidateRect"));
         const double scale = std::min(double(sw) / 640, double(sh) / 480);
         const long ix = long((sw - 640 * scale) / 2), iy = long((sh - 480 * scale) / 2);
         RECT parts[2] = {{ix + 141, iy + 77, ix + 244, iy + 151}, {0, iy + 77, ix / 2, iy + 151}};
@@ -2506,7 +2586,7 @@ static int RunMouse() {
                 // Into the game window's real client coordinates (its ClientToScreen is translated).
                 using PointFn = BOOL(WINAPI*)(HWND, POINT*);
                 const auto realClientToScreen = reinterpret_cast<PointFn>(
-                    reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "ClientToScreen")));
+                    RealExport(GetModuleHandleA("user32.dll"), "ClientToScreen"));
                 POINT o = {0, 0};
                 realClientToScreen(hwnd, &o);
                 OffsetRect(&wr, -o.x, -o.y);
@@ -2553,7 +2633,7 @@ static int RunMouse() {
                 if (HWND child = reinterpret_cast<HWND>(sp.dwReturn)) {
                     using RectFn = BOOL(WINAPI*)(HWND, RECT*);
                     const auto realWindowRect = reinterpret_cast<RectFn>(
-                        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+                        RealExport(GetModuleHandleA("user32.dll"), "GetWindowRect"));
                     realWindowRect(child, &cw);
                 }
                 // (Only where the picture goes: the rest of the game's window stays the game's.)
@@ -2613,7 +2693,7 @@ static int RunMouse() {
                 ShowWindow(popup, SW_SHOW);
                 using RectFn = BOOL(WINAPI*)(HWND, RECT*);
                 const auto realWindowRect = reinterpret_cast<RectFn>(
-                    reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+                    RealExport(GetModuleHandleA("user32.dll"), "GetWindowRect"));
                 RECT pr = {};
                 realWindowRect(popup, &pr);
                 CHECK(labs(pr.left - ix) <= 1 && labs(pr.top - iy) <= 1 && labs(pr.right - pr.left - long(640 * scale)) <= 1 &&
@@ -2663,7 +2743,7 @@ static int RunMouse() {
                 mciSendStringA("play x wait", nullptr, 0, nullptr);
                 using RectFn = BOOL(WINAPI*)(HWND, RECT*);
                 const auto realWindowRect = reinterpret_cast<RectFn>(
-                    reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+                    RealExport(GetModuleHandleA("user32.dll"), "GetWindowRect"));
                 RECT cw = {};
                 realWindowRect(child, &cw);
                 out[0] = 0;
@@ -2689,7 +2769,7 @@ static int RunMouse() {
         // game's screen (the game draws it there unclipped).
         using SetPosFn = BOOL(WINAPI*)(int, int);
         const auto realSetCursorPos =
-            reinterpret_cast<SetPosFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "SetCursorPos")));
+            reinterpret_cast<SetPosFn>(RealExport(GetModuleHandleA("user32.dll"), "SetCursorPos"));
         SetWindowPos(hwnd, nullptr, 0, 0, 640, 480, SWP_NOZORDER | SWP_NOACTIVATE);  // (not pumped: not covered yet)
         realSetCursorPos(sw - 1, sh - 1);
         POINT p = {};
@@ -2753,7 +2833,7 @@ static int RunMouse() {
         }
         using RectFn = BOOL(WINAPI*)(HWND, RECT*);
         const auto realWindowRect =
-            reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("user32.dll"), "GetWindowRect")));
+            reinterpret_cast<RectFn>(RealExport(GetModuleHandleA("user32.dll"), "GetWindowRect"));
         RECT w = {}, box = {};
         realWindowRect(hwnd, &w);
         const int region = GetWindowRgnBox(hwnd, &box);
@@ -2761,6 +2841,11 @@ static int RunMouse() {
         CHECK(region == ERROR || (box.left <= 0 && box.top <= 0 && box.right >= sw && box.bottom >= sh),
               "restored after going exclusive while minimized: its region shows the screen (%d: %ld,%ld-%ld,%ld)", region,
               box.left, box.top, box.right, box.bottom);
+        // One monitor: no region at all (the frame is off the screen; under Wine a region
+        // became an X11 shape that cut into the picture once the game changed its frame).
+        CHECK(GetSystemMetrics(SM_CMONITORS) > 1 || region == ERROR,
+              "exclusive mode on the only monitor: the window has no region (%d, %d monitor(s))", region,
+              GetSystemMetrics(SM_CMONITORS));
     }
     dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
     CHECK(ScreenMetric(SM_CXSCREEN) == sw, "the real screen again out of exclusive mode");
@@ -2931,8 +3016,8 @@ static int RunNoWindowChanges() {
     HMODULE u32 = GetModuleHandleA("user32.dll");
     using MetricsFn = int(WINAPI*)(int);
     using RectFn = BOOL(WINAPI*)(HWND, RECT*);
-    const auto realMetrics = reinterpret_cast<MetricsFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetSystemMetrics")));
-    const auto realWindowRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetWindowRect")));
+    const auto realMetrics = reinterpret_cast<MetricsFn>(RealExport(u32, "GetSystemMetrics"));
+    const auto realWindowRect = reinterpret_cast<RectFn>(RealExport(u32, "GetWindowRect"));
     const int sw = realMetrics(SM_CXSCREEN), sh = realMetrics(SM_CYSCREEN);
     HWND hwnd = MakeWindow(WS_POPUP, 640, 480);
     IDirectDraw7* dd = nullptr;
@@ -3010,9 +3095,9 @@ bool borderless;
 
 void Init(bool isBorderless) {
     HMODULE u32 = GetModuleHandleA("user32.dll");
-    realMetrics = reinterpret_cast<MetricsFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetSystemMetrics")));
-    realWindowRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetWindowRect")));
-    realClientRect = reinterpret_cast<RectFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetClientRect")));
+    realMetrics = reinterpret_cast<MetricsFn>(RealExport(u32, "GetSystemMetrics"));
+    realWindowRect = reinterpret_cast<RectFn>(RealExport(u32, "GetWindowRect"));
+    realClientRect = reinterpret_cast<RectFn>(RealExport(u32, "GetClientRect"));
     sw = realMetrics(SM_CXSCREEN);
     sh = realMetrics(SM_CYSCREEN);
     borderless = isBorderless;

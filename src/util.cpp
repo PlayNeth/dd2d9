@@ -16,14 +16,16 @@ void EnterDisplayLock() {
     }
 }
 
-bool WaitPumping(HANDLE h, DWORD timeoutMs) {
+bool WaitPumping(HANDLE h, DWORD timeoutMs, HANDLE other) {
+    const HANDLE hs[2] = {h, other};
+    const DWORD n = other ? 2 : 1;
     const DWORD start = GetTickCount();
     for (;;) {
         const DWORD elapsed = GetTickCount() - start;
-        if (elapsed >= timeoutMs) return WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
-        DWORD r = MsgWaitForMultipleObjects(1, &h, FALSE, timeoutMs - elapsed, QS_SENDMESSAGE);
-        if (r == WAIT_OBJECT_0) return true;
-        if (r != WAIT_OBJECT_0 + 1) return false;
+        if (elapsed >= timeoutMs) return WaitForMultipleObjects(n, hs, FALSE, 0) < WAIT_OBJECT_0 + n;
+        DWORD r = MsgWaitForMultipleObjects(n, hs, FALSE, timeoutMs - elapsed, QS_SENDMESSAGE);
+        if (r < WAIT_OBJECT_0 + n) return true;
+        if (r != WAIT_OBJECT_0 + n) return false;
         MSG msg;
         PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);  // dispatches the sent messages
     }

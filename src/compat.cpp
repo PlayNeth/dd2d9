@@ -181,7 +181,11 @@ ImportHook kLockHooks[] = {
 };
 
 // Functions looked up at run time (games that also ran on Windows 95 find
-// GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's.
+// GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's. Every table
+// installed so far counts (hooks.cpp keeps them): the options' here, and the mouse, paint
+// and movie translations made when the game sets a display mode (a game that picks
+// GetCursorPos or MoveWindow by name got Windows' own, untranslated). A function looked up
+// before its table was installed stays Windows'.
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 GetProcAddressFn g_getProcAddress;
 struct HookTable {
@@ -194,9 +198,7 @@ HookTable g_tables[7];
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
     if (p)
-        for (const HookTable& t : g_tables)
-            for (size_t i = 0; t.on && i < t.n; i++)
-                if (*t.hooks[i].original == reinterpret_cast<void*>(p)) return reinterpret_cast<FARPROC>(t.hooks[i].replacement);
+        if (void* hook = InstalledHookFor(reinterpret_cast<void*>(p))) return reinterpret_cast<FARPROC>(hook);
     return p;
 }
 

@@ -3,6 +3,97 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.7.0
+Faster stretched blits, Direct3D 3–6 mesh draws and Direct3D 7 vertex buffers, and fixes: a 3-second stall
+when a game DLL releases DirectDraw as it is unloaded, more lights than the GPU takes,
+`ValidateDevice`, functions looked up at run time, and emulated W buffering of transformed
+vertices among untransformed ones.
+
+- **A game DLL that releases DirectDraw as it is unloaded no longer stalls for 3 seconds.**
+  Released from a DLL's `DllMain` (under the loader lock), DirectDraw waited for its presenter
+  thread and its device window's thread to end, which they can't until that lock is free: 3 s
+  at every such unload, after which the presenter was left behind with its device. Now the
+  presenter's thread says when it is done with the presenter, which is all the release waits
+  for, and neither thread's end is waited for: each keeps dd2d9 loaded until it is out of
+  dd2d9's code. `ddtest` checks it (a DLL releasing a DirectDraw object that has shown
+  something, as it is unloaded: 3,003 ms before, 8 ms now, under Wine). A release at the
+  process's exit, and an ordinary one, are as before.
+- **Direct3D 7's vertex buffers are sent with every draw again.** 1.6.0 drew them from a
+  Direct3D 9 copy, comparing the vertices a draw uses with the copy at every draw (so that
+  whatever the game wrote was drawn). The compare read as much memory as sending the vertices
+  does, and the copy's own calls came on top: on Wine with DXVK, wrapbench's spheres from a
+  vertex buffer ran at 5,711 frames a second from the copy and 6,314 without it (the same
+  spheres from memory: 6,308 and 6,292). The copy, its index buffer and their bookkeeping are
+  gone; d3d7test's vertex buffer checks stay.
+- **Direct3D 7: more lights enabled than the GPU lights at once.** XP lit a HAL or software
+  device's vertices itself, with any number of lights, and those devices report no limit;
+  Direct3D 9 lights 8 at once (as a rule) and refused to enable a ninth, so which lights a
+  game lost depended on the order it enabled them in. With more enabled than the GPU takes,
+  dd2d9 now gives it the ones that light the object most (by colour, and for point and spot
+  lights by their attenuation at the object's place, none past their range), chosen again
+  when a light or the world matrix changes. An approximation, where 1.6.0 dropped lights by
+  order. d3d7test: eight dim lights, then a bright one (it was missing: 0x002900; now
+  0xe62400). No game is known to need it.
+- **Exclusive mode: the window gets a region only where there is another monitor** (Moto
+  Racer under Wine: the top of the picture cut off, the desktop showing there). dd2d9 grows
+  the game's window until its client area is the screen and gave it a region showing only that
+  part, so that the frame could not appear on a neighbouring monitor. Wine turns a region into
+  an X11 shape placed by the window's frame at that moment; Moto Racer takes its window's
+  caption away between two of its screens (with `SetWindowLong` alone), and the shape stayed
+  where the caption's frame had put it: 29 rows at the top and 3 columns at the left of the
+  picture were cut away. With one monitor the frame is off the screen anyway, so no region is
+  set there (one set before is removed); with several it is as before. A test that replays
+  the game's window calls shows the whole picture now under Wine 11, with and without a window
+  manager (openbox); `ddtest` checks that there is no region on a single monitor. 1.6.0 had
+  it too.
+- **Emulated W buffering: transformed vertices drawn among untransformed ones take their
+  depth from the projection matrix** (Direct3D 7). Untransformed vertices were given the
+  projection's own depth and transformed ones a depth from their `rhw` on a scale of its own,
+  so the two didn't agree on what is in front: a model the game transformed itself could
+  vanish behind a wall Direct3D transformed, though nearer. Once a game has drawn
+  untransformed vertices with W buffering, its transformed ones get the depth the projection
+  matrix gives their w (nearer than the near plane: the nearest there is; past the far plane:
+  the farthest), as a W buffer's range came from that matrix. A game that draws only
+  transformed vertices, or sets no perspective projection, keeps the scale found from its
+  vertices, which uses the depth buffer better than a near plane does. d3d7test: a wall at w
+  100, a transformed square at w 50 (it was hidden) and one at w 200. No game is known to
+  need it.
+- **`ValidateDevice` checks the stage setup** (Direct3D 6 and 7). It answered one pass for
+  anything. XP asks the driver, and dd2d9 can draw what Direct3D 7 can express, so one pass
+  stays the answer for a setup within what the device reports; a colour or alpha operation
+  the device's caps don't list, an argument that names nothing, or more stages or textures
+  than it reports now get the stage setup's own error (`D3DERR_UNSUPPORTEDCOLOROPERATION`,
+  `..COLORARG`, `..ALPHAOPERATION`, `..ALPHAARG`, `D3DERR_TOOMANYOPERATIONS`) and no passes,
+  as a driver of the time answered a game probing what it may use. d3d7test checks each.
+- **Functions a game looks up at run time get every translation, not only the options'.**
+  A game's `GetProcAddress` was answered with dd2d9's function for the compatibility
+  options' hooks (memory, processors, display settings), but not for the mouse, paint and
+  movie-window translations made when the game sets a display mode: a game picking
+  `GetCursorPos`, `ClientToScreen` or `MoveWindow` by name (code with a Windows 95 and an NT
+  path) got Windows' own, untranslated in a scaled mode. Every installed table counts now. A
+  function looked up before the game set a mode stays Windows'. No game is known to need it.
+
+Optimizations:
+- Stretched blits without colour keys (`Blt` to another size, mirrored or not): a row
+  stretched to three times its width or more is written a run of equal pixels at a time, with
+  16-byte stores, where every pixel was looked up on its own; the source column of each
+  destination column and the source row of each destination row are stepped, not divided for
+  (a 64-bit division each). wrapbench's `2d-stretch` blits (64x64 to up to 640x480, 16-bit):
+  15.6 to 10.5 µs each under Wine; 32-bit: 19.9 to 17.2 (there the time is the rows repeated
+  down the picture, as before). The pictures are the same byte for byte (18,000 stretches of
+  every size, part and mirroring in 8, 16 and 32 bits, hashed with 1.6.0's blitter and this
+  one).
+- Direct3D 3–6 mesh draws (`DrawIndexedPrimitive`, execute buffers): the indices are scanned
+  for their range sixteen at a time (three times a draw, as long as packing its vertices
+  took); where the transform found every vertex inside the clip volume, the guard-band pass
+  and the per-vertex test for projecting are skipped; the vertices are packed for the GPU with
+  fixed-size copies. A sphere of 1,089 vertices: 48–54 to 39–43 µs a draw under Wine;
+  d3dimbench's `dip sphere` 796 to 624 µs a frame in the call, `dip rows (dev2)` 1,712 to
+  1,485, `exec-rows` 250 to 220. Every hash, clip status and check as in 1.6.0. (The transform
+  and lighting loop itself was left: its remaining time is the lighting model's divisions and
+  square roots, and eight vertices at a time with AVX2 gained 1.36 times on that arithmetic,
+  about a tenth of a draw, for a second copy of the loop.)
+
 ## 1.6.0
 A windowed game's own GDI drawing into its window kept on screen beside dd2d9's frames
 (Swordman's windowed versions no longer flicker after a movie), then fixes across the whole

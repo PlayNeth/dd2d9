@@ -189,10 +189,19 @@ namespace {
 struct WindowThread {
     HWND hwnd = nullptr;
     HANDLE ready = nullptr;
+    HMODULE self = nullptr;  // dd2d9, held loaded for the thread (null: not held)
 };
+
+// The thread's way out: with the reference to dd2d9 that kept its code loaded given back
+// (the last one unloads dd2d9 from here).
+DWORD LeaveWindowThread(HMODULE self) {
+    if (self) FreeLibraryAndExitThread(self, 0);
+    return 0;
+}
 
 DWORD WINAPI RunWindowThread(void* p) {
     auto* t = static_cast<WindowThread*>(p);
+    const HMODULE self = t->self;
     static const bool registered = [] {
         WNDCLASSW wc = {};
         wc.lpfnWndProc = DefWindowProcW;
@@ -205,11 +214,11 @@ DWORD WINAPI RunWindowThread(void* p) {
                         : nullptr;
     t->hwnd = h;
     SetEvent(t->ready);  // t isn't touched after this
-    if (!h) return 0;
+    if (!h) return LeaveWindowThread(self);
     // Until the window is gone (WM_CLOSE, which DefWindowProcW answers with DestroyWindow).
     MSG msg;
     while (IsWindow(h) && GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
-    return 0;
+    return LeaveWindowThread(self);
 }
 
 }  // namespace
@@ -218,11 +227,17 @@ HWND Gpu::MakeWindow() {
     WindowThread t;
     t.ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!t.ready) return nullptr;
+    // The thread keeps dd2d9 loaded while it runs, so that Release needn't wait for its end.
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&RunWindowThread), &t.self))
+        t.self = nullptr;
+    const HMODULE held = t.self;
     HANDLE th = CreateThread(nullptr, 0, RunWindowThread, &t, 0, nullptr);
     if (th) WaitForSingleObject(t.ready, INFINITE);
+    else if (held) FreeLibrary(held);  // (no thread to give it back)
     CloseHandle(t.ready);
     if (th && !t.hwnd) CloseHandle(th);  // (ended already)
     else windowThread_ = th;  // it ends with its window (see Release)
+    windowThreadHolds_ = th && held;
     return t.hwnd;
 }
 
@@ -465,13 +480,14 @@ void Gpu::Release() {
     if (d3d_) d3d_->Release();
     d3d_ = nullptr;
     if (window_) {
-        // Destroyed by its own thread, which then ends: waited for, as dd2d9 may be unloaded
-        // next and the thread runs its code. The wait is capped for a release under the loader
-        // lock (a game DLL's static destructor at FreeLibrary): the thread's exit needs that
-        // lock, so there it always takes the 2 s.
+        // Destroyed by its own thread, which then ends. Not waited for: the thread holds
+        // dd2d9 loaded until it is out of its code (MakeWindow). A wait would take its whole
+        // time under the loader lock (a game DLL releasing DirectDraw as it is unloaded),
+        // which the thread's exit needs: 2 s it was, at every such unload. Only a thread that
+        // couldn't take that hold is waited for, as dd2d9 may be unloaded next.
         PostMessageW(window_, WM_CLOSE, 0, 0);
         window_ = nullptr;
-        if (windowThread_ && WaitForSingleObject(windowThread_, 2000) != WAIT_OBJECT_0)
+        if (windowThread_ && !windowThreadHolds_ && WaitForSingleObject(windowThread_, 2000) != WAIT_OBJECT_0)
             DD2D9_LOG("the device window's thread did not end in time");
     }
     if (windowThread_) CloseHandle(windowThread_);

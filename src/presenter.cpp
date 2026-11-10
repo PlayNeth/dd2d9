@@ -112,14 +112,28 @@ Presenter::~Presenter() {
         DeleteDC(gdiDc_);
     }
     if (dirtyEvent_) CloseHandle(dirtyEvent_);
+    if (doneEvent_) CloseHandle(doneEvent_);
     DeleteCriticalSection(&gammaLock_);
 }
 
 void Presenter::Start() {
     if (thread_) return;
     if (!dirtyEvent_) dirtyEvent_ = CreateEventA(nullptr, FALSE, TRUE, nullptr);
+    // Stop waits for the thread to be done with the presenter (doneEvent_), not for its end:
+    // a thread's exit needs the loader lock, which the stopping thread may hold (a game DLL
+    // releasing DirectDraw as it is unloaded: 3 s of waiting it was, and the presenter left
+    // behind). The thread keeps dd2d9 loaded until it is out of its code.
+    if (!doneEvent_) doneEvent_ = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    if (doneEvent_) ResetEvent(doneEvent_);
+    if (!doneEvent_ ||
+        !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&Presenter::ThreadProc), &threadHold_))
+        threadHold_ = nullptr;
     running_ = true;
     thread_ = CreateThread(nullptr, 0, ThreadProc, this, 0, nullptr);
+    if (!thread_ && threadHold_) {
+        FreeLibrary(threadHold_);
+        threadHold_ = nullptr;
+    }
     DD2D9_LOG("presenter thread started");
 }
 
@@ -130,7 +144,8 @@ bool Presenter::Stop() {
     SetEvent(dirtyEvent_);
     // The thread releases the device on its way out, and D3D9 may then send
     // messages to the game window, possibly owned by this thread.
-    const bool stopped = WaitPumping(thread_, 3000);
+    // (Or for its end: at the process's exit the thread is gone already, with nothing set.)
+    const bool stopped = WaitPumping(thread_, 3000, threadHold_ ? doneEvent_ : nullptr);
     if (!stopped) DD2D9_LOG("presenter thread did not stop in time; keeping its objects alive");
     CloseHandle(thread_);
     thread_ = nullptr;
@@ -150,8 +165,15 @@ DWORD WINAPI Presenter::ThreadProc(void* self) {
     // time slices, about 30 times a second: the picture moved at that rate whatever the
     // game's, and a fade the game blits in a few seconds showed few of its steps.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    static_cast<Presenter*>(self)->Loop();
-    return 0;
+    auto* p = static_cast<Presenter*>(self);
+    const HMODULE hold = p->threadHold_;
+    const HANDLE done = p->doneEvent_;
+    p->Loop();
+    if (!hold) return 0;
+    // Done with the presenter, which Stop may delete from here on: nothing of it is touched
+    // after this. Then out, giving back the hold on dd2d9 (the last one unloads it from here).
+    SetEvent(done);
+    FreeLibraryAndExitThread(hold, 0);
 }
 
 bool Presenter::WaitPresented(uint64_t afterSeq, DWORD timeoutMs) {

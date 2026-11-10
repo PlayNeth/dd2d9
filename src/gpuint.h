@@ -339,33 +339,6 @@ struct GpuTex final : Gpu::Owner, GpuTexCopy {
 
 IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, bool colorKey);
 
-// A Direct3D 7 vertex buffer's GPU copy (gpures.h), and what it holds (`shadow`, compared
-// with the game's vertices at each draw). Managed: a changed range is locked and written while
-// earlier draws from it may still be on the GPU. Dropped with the device's other resources (a
-// reset, a new device, the Gpu going); the next draw makes it again.
-struct GpuVb final : Gpu::Owner {
-    Gpu* gpu = nullptr;
-    IDirect3DVertexBuffer9* vb = nullptr;
-    std::vector<uint8_t> shadow;
-    // A buffer whose vertices changed at kDynamicRun draws in a row is rewritten for every
-    // draw: its next kDynamicSkip draws send their vertices as before (no compare, no copy),
-    // then it is tried again.
-    static constexpr UINT kDynamicRun = 4, kDynamicSkip = 256;
-    UINT changedRun = 0, skip = 0;
-    bool drawn = false;  // drawn from once (the copy is made at the second draw)
-    void Drop() {
-        if (vb) vb->Release();
-        vb = nullptr;
-        shadow.clear();
-        shadow.shrink_to_fit();
-    }
-    void ReleaseGpuResources() override { Drop(); }
-    void GpuReleased() override {
-        Drop();
-        gpu = nullptr;
-    }
-};
-
 // ---------------------------------------------------------------- drawing context (gpucontext.cpp, gpudraw.cpp)
 
 struct GpuContext::Impl final : Gpu::Owner {
@@ -401,6 +374,12 @@ struct GpuContext::Impl final : Gpu::Owner {
     bool cutoutStage[8] = {};
     bool wEmulate = false;  // ZENABLE = D3DZB_USEW on a GPU without W buffering
     int nativeW = -1;       // the GPU's own W buffering: -1 not asked yet
+    // Emulated W buffering where the game also draws untransformed vertices (wMixed, set by
+    // the first such draw): a transformed vertex's depth is wDepthFar + wDepthPerRhw * rhw,
+    // what the projection matrix gives an untransformed one at the same w (wProj: it is a
+    // perspective projection; see SetTransform).
+    bool wProj = false, wMixed = false;
+    float wDepthFar = 1.0f, wDepthPerRhw = 0.0f;
     DWORD rsMirror[256] = {};  // render states as last set through this context (drawtrace)
     bool zWrite = true;     // ZWRITEENABLE as the game set it; zWriteSet: as D3D9 has it
     bool zWriteSet = true;
@@ -433,11 +412,6 @@ struct GpuContext::Impl final : Gpu::Owner {
     DWORD lastFvf = 0xFFFFFFFF;  // Decl's last answer (most draws use the FVF of the one before)
     IDirect3DVertexDeclaration9* lastDecl = nullptr;
     std::vector<uint8_t> scratch;
-    // The indices of draws from a vertex buffer's GPU copy (DrawFromCopy), written one after
-    // the other and started over (DISCARD) when full.
-    static constexpr UINT kIndexBytes = 256 * 1024;
-    IDirect3DIndexBuffer9* indexBuf = nullptr;
-    UINT indexPos = 0;
 
     explicit Impl(Gpu& g) : gpu(g) {
         GpuGuard l(gpu);  // the presenter thread walks the owners with only the Gpu lock
@@ -455,9 +429,6 @@ struct GpuContext::Impl final : Gpu::Owner {
         decls.clear();
         lastFvf = 0xFFFFFFFF;
         lastDecl = nullptr;
-        if (indexBuf) indexBuf->Release();  // (D3DPOOL_DEFAULT: before a reset)
-        indexBuf = nullptr;
-        indexPos = 0;
         DeviceStateChanged();  // (a declaration Draw set may be gone)
         boundRt = boundZ = nullptr;
     }
@@ -470,10 +441,6 @@ struct GpuContext::Impl final : Gpu::Owner {
     void CutoutAddr(DWORD fvf, const void* verts, UINT stride, UINT count, DWORD (&want)[8][2]) const;
     void ClampCutouts(DWORD fvf, const void* verts, UINT stride, UINT count);
     void SetAddr(const DWORD (&want)[8][2]);  // the sampler address modes, where they differ
-    // Draws from the vertex buffer's GPU copy (made, or copied again, first); false when it
-    // can't, nothing drawn then.
-    bool DrawFromCopy(const GpuVbSource& src, DWORD primType, const void* verts, UINT stride, UINT vertexCount,
-                      const WORD* indices, UINT indexCount, WORD lo, WORD hi, UINT primCount);
     bool CoversTarget() const;
 };
 

@@ -655,6 +655,17 @@ unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) 
     return count;
 }
 
+void* InstalledHookFor(const void* real) {
+    void* found = nullptr;
+    AcquireSRWLockShared(&g_hookLock);
+    if (g_tables)
+        for (const Table& t : *g_tables)
+            for (size_t i = 0; !found && i < t.n; i++)
+                if (*t.hooks[i].original == real) found = t.hooks[i].replacement;
+    ReleaseSRWLockShared(&g_hookLock);
+    return found;
+}
+
 void UnpatchAll() {
     if (g_notifyCookie) {
         const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");

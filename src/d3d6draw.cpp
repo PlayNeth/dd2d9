@@ -158,14 +158,34 @@ struct Emitter {
 
 // The lowest and highest of ni indices (none: 0xFFFF and 0).
 inline void IndexRange(const WORD* idx, DWORD ni, DWORD* lo, DWORD* hi) {
-    DWORD l = 0xFFFF, h = 0;
-    for (DWORD i = 0; i < ni; i++) l = std::min<DWORD>(l, idx[i]), h = std::max<DWORD>(h, idx[i]);
+    WORD l, h;
+    IndexRange16(idx, ni, &l, &h);
     *lo = l, *hi = h;
 }
 
 // Vertices lo..hi drawn as they are: in screen coordinates, those with a clip code (inside
-// the guard band, drawn unclipped) projected first.
+// the guard band, drawn unclipped) projected first. (e.Expect(hi - lo + 1) came before.)
 inline void AddAsTheyAre(Emitter& e, const VpMap& m, const PVert* v, DWORD lo, DWORD hi, bool clip) {
+    if (!clip) {
+        // None has a clip code: screen position and colours (24 bytes in a row in a PVert
+        // as in the output) and the texture coordinates, with sizes the compiler knows.
+        static_assert(offsetof(PVert, sx) + 16 == offsetof(PVert, diffuse) && offsetof(PVert, diffuse) + 8 == offsetof(PVert, tex),
+                      "PVert: sx..specular, then tex");
+        uint8_t* o = e.buf.data() + size_t(e.count) * e.stride;
+        const UINT stride = e.stride;
+        const DWORD ntex = std::min<DWORD>(e.ntex, 8);
+        for (DWORD i = lo; i <= hi; i++, o += stride) {
+            memcpy(o, &v[i].sx, 24);
+            switch (ntex) {
+            case 0: break;
+            case 1: memcpy(o + 24, v[i].tex, 8); break;
+            case 2: memcpy(o + 24, v[i].tex, 16); break;
+            default: memcpy(o + 24, v[i].tex, 8 * ntex); break;
+            }
+        }
+        e.count += hi - lo + 1;
+        return;
+    }
     for (DWORD i = lo; i <= hi; i++) {
         if (clip && v[i].code) {
             PVert p = v[i];
@@ -193,8 +213,11 @@ struct PDraw {
 // for vertices drawn in order too (0, 1, 2... from where they start), as part of several.
 // False: nothing to draw.
 // gb: the vertex range's guard-band codes ORed, when known (outside none of them all).
+// inside: every vertex has clip code 0 (TransformVerts found so). The guard band holds the
+// clip volume, so none has a guard-band code either, and none needs projecting.
 bool EmitPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx, DWORD ni, bool clip,
-                DWORD ntex, Emitter& out, std::vector<WORD>& outIdx, bool seqIdx, PDraw* r, const WORD* gb = nullptr) {
+                DWORD ntex, Emitter& out, std::vector<WORD>& outIdx, bool seqIdx, PDraw* r, const WORD* gb = nullptr,
+                bool inside = false) {
     if (!ValidPrim(t) || !n) return false;
     // Worked on as a local (its count kept in a register, not reloaded after every byte
     // written), put back at the end.
@@ -207,7 +230,7 @@ bool EmitPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WO
         if (hi >= n) return false;  // past the vertices (XP reads whatever is there)
     }
     WORD orGb = gb ? *gb : 0, andGb = 0xFFFF;
-    if (clip && !gb) {
+    if (clip && !gb && !inside) {
         for (DWORD i = lo; i <= hi; i++) {
             const WORD c = GbCode(v[i]);
             orGb |= c;
@@ -222,7 +245,7 @@ bool EmitPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WO
     UINT prims;
     if (!clip || !orGb) {
         // Everything inside the guard band: as it is, in screen coordinates.
-        AddAsTheyAre(e, d->map, v, lo, hi, clip);
+        AddAsTheyAre(e, d->map, v, lo, hi, clip && !inside);
         if (idx) {
             const size_t at = outIdx.size();
             outIdx.resize(at + ni);
@@ -325,13 +348,13 @@ void SubmitPVerts(Device* d, D3DPRIMITIVETYPE t, const Emitter& e, const WORD* i
 }  // namespace
 
 void DrawPVerts(Device* d, D3DPRIMITIVETYPE t, const PVert* v, DWORD n, const WORD* idx, DWORD ni, bool clip,
-                DWORD ntex) {
+                DWORD ntex, bool inside) {
     ntex = std::min<DWORD>(ntex, 8);
     Emitter e(ntex, t_out, 0);
     std::vector<WORD>& outIdx = t_idx;
     outIdx.clear();
     PDraw r;
-    if (!EmitPVerts(d, t, v, n, idx, ni, clip, ntex, e, outIdx, false, &r)) return;
+    if (!EmitPVerts(d, t, v, n, idx, ni, clip, ntex, e, outIdx, false, &r, nullptr, inside)) return;
     SubmitPVerts(d, r.type, e, r.indexed ? outIdx.data() : nullptr, r.indexed ? DWORD(outIdx.size()) : 0, r.prims,
                  nullptr, 0);
 }
@@ -590,8 +613,9 @@ HRESULT Device::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT
         if (hi >= n) lo = 1, hi = 0;  // past the vertices: none lit (DrawPVerts draws nothing)
     }
     if (t_pverts.size() < n) t_pverts.resize(n);
-    TransformVerts(this, v, stride, fvf, n, clip, light, !(flags & D3DDP_DONOTUPDATEEXTENTS), t_pverts.data(), lo, hi);
-    DrawPVerts(this, t, t_pverts.data(), n, idx, ni, clip, std::min<DWORD>((fvf >> 8) & 0xF, 8));
+    const DWORD codes =
+        TransformVerts(this, v, stride, fvf, n, clip, light, !(flags & D3DDP_DONOTUPDATEEXTENTS), t_pverts.data(), lo, hi);
+    DrawPVerts(this, t, t_pverts.data(), n, idx, ni, clip, std::min<DWORD>((fvf >> 8) & 0xF, 8), clip && !codes);
     return D3D_OK;
 } catch (const std::bad_alloc&) {
     return E_OUTOFMEMORY;

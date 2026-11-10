@@ -237,8 +237,21 @@ HMONITOR DDraw::GameMonitor(HWND h) const {
 // The window covers its monitor in exclusive mode. ddraw.dll leaves the window's style
 // alone and draws over the whole screen, frame and all; dd2d9 presents into the client
 // area, so the window keeps its style (as games read it) and grows until its client
-// area is the monitor, the frame just outside it. A window region shows only that part,
-// so the frame can't appear on a monitor next to this one. g_displayLock held.
+// area is the monitor, the frame just outside it. With more than one monitor a window region
+// shows only that part, so the frame can't appear on a monitor next to this one
+// (NeedsCoverRegion). g_displayLock held.
+// Whether the covering window (rectangle w) gets a region showing only the monitor (m): where
+// its frame lies outside the monitor and there is another monitor for it to show on. With one
+// monitor the frame is off the screen and nothing more is needed. And a region is not free
+// under Wine, which turns it into an X11 shape whose place depends on whether the window has
+// a frame and a region at that moment: after Moto Racer took its caption away (SetWindowLong
+// alone) between two of its screens, the shape stayed where the caption's frame had put it
+// and cut the top 29 rows and the left 3 columns off the picture, the desktop showing there
+// (Wine 11, with and without a window manager).
+static bool NeedsCoverRegion(const RECT& w, const RECT& m) {
+    return !EqualRect(&w, &m) && GetSystemMetrics(SM_CMONITORS) > 1;
+}
+
 void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     MONITORINFO mi = {};
@@ -282,6 +295,11 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     coverPos_ = {r.left, r.top};
     RECT w = {};
     GetWindowRect(hwnd_, &w);
+    if (!NeedsCoverRegion(w, m)) {  // (one it got with another frame or monitor count goes)
+        RECT box;
+        if (GetWindowRgnBox(hwnd_, &box) != ERROR) SetWindowRgn(hwnd_, nullptr, TRUE);
+        return;
+    }
     if (HRGN rgn = CreateRectRgn(m.left - w.left, m.top - w.top, m.right - w.left, m.bottom - w.top)) {
         if (!SetWindowRgn(hwnd_, rgn, TRUE)) DeleteObject(rgn);  // owned by the window once set
     }
@@ -356,13 +374,14 @@ void DDraw::CheckCover(HWND h, bool moved) {
     RECT c = {};
     GetClientRect(h, &c);
     MapWindowPoints(h, nullptr, reinterpret_cast<POINT*>(&c), 2);
-    // Covering, and its region showing the monitor (none: made while it was minimized).
+    // Covering, and its region showing the monitor (none where none is needed; none where one
+    // is: made while it was minimized).
     RECT w = {}, box = {};
     GetWindowRect(h, &w);
     const RECT& m = mi.rcMonitor;
     const RECT want = {m.left - w.left, m.top - w.top, m.right - w.left, m.bottom - w.top};
     const int region = GetWindowRgnBox(h, &box);
-    const bool regionOk = region == SIMPLEREGION && EqualRect(&box, &want);
+    const bool regionOk = NeedsCoverRegion(w, m) ? region == SIMPLEREGION && EqualRect(&box, &want) : region == ERROR;
     const bool covers = EqualRect(&c, &mi.rcMonitor) != FALSE;
     if (covers && regionOk) return;
     if (moved && !covers) {
