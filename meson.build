@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.7.0',
+  version : '1.7.1',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')

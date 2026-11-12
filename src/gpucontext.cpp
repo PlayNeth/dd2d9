@@ -10,8 +10,10 @@ namespace dd2d9 {
 // Counts drawing on every render target: a copy made at serial n is of that drawing alone.
 unsigned g_drawSerial = 0;
 // Emulated W buffering's scale: 1/w times this is at most 1 for every vertex so far (it only
-// shrinks, when a nearer one comes). Gpu lock.
+// shrinks, when a nearer one comes, and only while no depth has been written with it:
+// g_wWritten). Gpu lock.
 float g_wScale = 1.0f;
+bool g_wWritten = false;
 // drawtrace=on: one whole frame's draws logged every 600 scenes (about 10 s).
 unsigned g_traceScene = 0;
 
@@ -45,7 +47,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
     if (state == D3DRS_ZENABLE) {
         // W buffering: D3D9's own where the GPU has it, else emulated for transformed
         // vertices (Draw); the depth test itself is an ordinary Z buffer's.
-        p_->wEmulate = false;
+        p_->wEmulate = p_->wAsked = false;
         if (value == D3DZB_USEW && p_->dev) {
             static bool logged;
             if (p_->nativeW < 0) {  // asked once (the game sets ZENABLE per draw, some of them)
@@ -54,7 +56,7 @@ void GpuContext::SetRenderState(DWORD state, DWORD value) {
             }
             const bool native = p_->nativeW > 0;
             if (!native) {
-                p_->wEmulate = true;
+                p_->wEmulate = p_->wAsked = true;
                 value = D3DZB_TRUE;
             }
             if (!logged) {
@@ -120,6 +122,9 @@ void GpuContext::SetTransform(DWORD type, const float* m16) {
         p_->wProj = m34 > 0.0f && std::isfinite(wFar) && std::isfinite(perRhw) && wFar > 0.0f && perRhw < 0.0f;
         p_->wDepthFar = wFar;
         p_->wDepthPerRhw = perRhw;
+        // Its near plane: where that depth is 0 (w = -perRhw / far).
+        p_->wNear = p_->wProj ? -perRhw / wFar : 0.0f;
+        if (!std::isfinite(p_->wNear) || p_->wNear <= 0.0f) p_->wProj = false, p_->wNear = 0.0f;
     }
     if (p_->dev) p_->dev->SetTransform(D3DTRANSFORMSTATETYPE(type), reinterpret_cast<const D3DMATRIX*>(m16));
 }
@@ -244,6 +249,9 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
             dev->SetViewport(&whole);
             for (const GpuSurf::Fill& f : zs->fills) {
                 D3DRECT rect = {f.r.left, f.r.top, f.r.right, f.r.bottom};
+                // (A fill of the whole buffer starts emulated W buffering's scale again, as Clear.)
+                if (f.r.left <= 0 && f.r.top <= 0 && f.r.right >= LONG(whole.Width) && f.r.bottom >= LONG(whole.Height))
+                    g_wScale = 1.0f, g_wWritten = false;
                 dev->Clear(1, &rect, D3DCLEAR_ZBUFFER | ((zs->fmt == D3DFMT_D24S8 || zs->fmt == kIntz) ? D3DCLEAR_STENCIL : 0), 0, f.z, 0);
             }
             dev->SetViewport(&vpSent);
@@ -399,7 +407,7 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
     // Emulated W buffering's scale starts again with each whole depth clear (a frame): one
     // stray near vertex shrinks it for that frame only, not for good.
-    if ((flags & D3DCLEAR_ZBUFFER) && whole) g_wScale = 1.0f;
+    if ((flags & D3DCLEAR_ZBUFFER) && whole) g_wScale = 1.0f, g_wWritten = false;
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
     if (flags & D3DCLEAR_TARGET) {
         p.rt->buf->cpuStale = true;

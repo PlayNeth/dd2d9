@@ -3,6 +3,45 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.7.1
+Two fixes for Unreal Tournament: the picture shifted down and to the right when the game
+started, and parts of the weapon drawn over the HUD.
+
+- **A window whose frame the game takes away with `SetWindowLong` alone covers the screen
+  again for its new frame.** Without `SWP_FRAMECHANGED`, Windows keeps the old frame, so the
+  client area still covered the screen and dd2d9 left the window alone (it also skipped
+  windows without `WS_VISIBLE`, and Unreal Tournament clears that in the same call while
+  its window stays on the screen). Under Wine the window manager placed the window by its
+  new frame: the picture started 30 rows lower and a few columns to the right, with its
+  bottom off the screen, until a change of resolution or colour depth covered the screen
+  again. Now the window is placed for the new frame, with `SWP_FRAMECHANGED` so that Windows
+  applies it, and a window without `WS_VISIBLE` stays that way. A frame changed while the
+  window is minimized is caught once it is restored, and a frame the game applied itself
+  (with `SWP_FRAMECHANGED`) is only noted. `ddtest` checks it (`fs8`:
+  the window is the screen afterwards, still hidden). It failed on 1.7.0.
+- **Emulated W buffering keeps one depth scale for what is in the depth buffer, and takes
+  its near end from the projection.** Depth is 1 − k/w. Without a projection, k was fitted
+  to the nearest vertex so far and shrank whenever a nearer one came. In a player's Unreal
+  Tournament trace, the game clears the depth buffer, draws its weapon (part of it nearer
+  than w 1), then draws its HUD and text at w 1. The scale shrank partway through the
+  weapon, so the parts drawn before then no longer compared with the ones drawn after: they
+  came out in front of nearer parts of the weapon and in front of the HUD.
+  - k now shrinks only while nothing has been drawn into the depth buffer since it was last
+    cleared (a whole `Clear`, or now also a depth fill of the whole buffer done on the GPU). A vertex nearer
+    than k reaches gets depth 0, as at a W buffer's near end, and what is drawn later at
+    that depth comes in front (`LESSEQUAL`).
+  - A game that asks for W buffering, draws only transformed vertices and sets a perspective
+    projection now gets k from the projection's near plane, as Direct3D gave the driver its
+    W range from that matrix: what is nearer than the near plane is the nearest there is.
+    With a near plane at w 1, the HUD is in front of the weapon whatever order the weapon's
+    parts come in. The log names the near plane the first time. The depth buffer's steps
+    are then spread from the near plane out, as the projection's own depth is for a game
+    that also draws untransformed vertices, where the scale started from the nearest vertex:
+    with a near plane far below the nearest geometry, distant surfaces get fewer steps.
+  - `d3d7test` draws both cases: the weapon's parts at w 1.19, 1.67, 0.83 and 1, then the
+    HUD at w 1, without a projection; and with a near plane at 1, the nearest part drawn
+    first. Both failed on 1.7.0.
+
 ## 1.7.0
 Faster stretched blits, Direct3D 3–6 mesh draws and Direct3D 7 vertex buffers, and fixes: a 3-second stall
 when a game DLL releases DirectDraw as it is unloaded, more lights than the GPU takes,

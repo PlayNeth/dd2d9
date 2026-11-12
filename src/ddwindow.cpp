@@ -252,6 +252,14 @@ static bool NeedsCoverRegion(const RECT& w, const RECT& m) {
     return !EqualRect(&w, &m) && GetSystemMetrics(SM_CMONITORS) > 1;
 }
 
+// The frame the window's style gives it, as AdjustWindowRectEx works it out (around an empty
+// rectangle): what CheckCover compares to tell a style change Windows hasn't applied yet.
+static RECT FrameOf(HWND h) {
+    RECT r = {};
+    AdjustWindowRectEx(&r, DWORD(GetWindowLongW(h, GWL_STYLE)), GetMenu(h) != nullptr, DWORD(GetWindowLongW(h, GWL_EXSTYLE)));
+    return r;
+}
+
 void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     MONITORINFO mi = {};
@@ -263,6 +271,7 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     AdjustWindowRectEx(&r, DWORD(style), GetMenu(hwnd_) != nullptr, DWORD(exStyle));
     coverHwnd_ = hwnd_;
     coverSize_ = {r.right - r.left, r.bottom - r.top};  // first: WM_GETMINMAXINFO lets it be this large
+    coverFrame_ = FrameOf(hwnd_);
     struct Covering {
         bool& flag;
         explicit Covering(bool& f) : flag(f) { flag = true; }
@@ -363,11 +372,23 @@ void DDraw::ConfineCursor(bool on) {
 // window to 661x544 now and then in a 640x480 mode, which a real 640x480 display shows as
 // fullscreen) covers the real one again. A game that keeps changing it wins after a few
 // tries rather than the two fighting.
+// A frame changed with SetWindowLong alone (no SWP_FRAMECHANGED) isn't applied by Windows: the
+// client area still covers the screen, inside the old frame. Unreal Tournament takes its caption
+// away like that (and WS_VISIBLE with it, the window staying on the screen) after its first
+// frame: under Wine the window manager then placed the window by its new frame, and the image
+// sat 30 rows lower and a few columns to the right, its bottom off the screen, until a mode
+// change covered the screen again. The window covers it again for the new frame then too
+// (SWP_FRAMECHANGED: Windows applies the frame), a window without WS_VISIBLE included (left so).
 void DDraw::CheckCover(HWND h, bool moved) {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     if (!Exclusive() || !alive || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
-        !WindowChanges() || IsIconic(h) || !IsWindowVisible(h))
+        !WindowChanges() || IsIconic(h))
         return;
+    // (Checked after a move too: a frame changed while minimized, where this returns above,
+    // is seen once the window is restored.)
+    const RECT frame = FrameOf(h);
+    bool newFrame = !EqualRect(&frame, &coverFrame_);
+    if (!IsWindowVisible(h) && !newFrame) return;
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(GameMonitor(h), &mi);
@@ -383,7 +404,18 @@ void DDraw::CheckCover(HWND h, bool moved) {
     const int region = GetWindowRgnBox(h, &box);
     const bool regionOk = NeedsCoverRegion(w, m) ? region == SIMPLEREGION && EqualRect(&box, &want) : region == ERROR;
     const bool covers = EqualRect(&c, &mi.rcMonitor) != FALSE;
-    if (covers && regionOk) return;
+    // The new frame already applied (the game's SWP_FRAMECHANGED) and the window covering
+    // the screen with it: nothing to do but note it (not a try used up).
+    if (covers && newFrame) {
+        RECT applied = m;
+        AdjustWindowRectEx(&applied, DWORD(GetWindowLongW(h, GWL_STYLE)), GetMenu(h) != nullptr,
+                           DWORD(GetWindowLongW(h, GWL_EXSTYLE)));
+        if (EqualRect(&applied, &w)) {
+            coverFrame_ = frame;
+            newFrame = false;
+        }
+    }
+    if (covers && regionOk && !newFrame) return;
     if (moved && !covers) {
         if (!modeSet_ || activeDisplay_ != kDisplayBorderless) return;
         const LONG x = mi.rcMonitor.left, y = mi.rcMonitor.top;
@@ -395,11 +427,12 @@ void DDraw::CheckCover(HWND h, bool moved) {
     recoverStart_ = now;
     if (++recoverCount_ > 5) return;
     DD2D9_LOG("the window no longer covers the screen (client %ld,%ld-%ld,%ld%s): covering it again", c.left, c.top,
-              c.right, c.bottom, covers ? ", its region not the screen's" : "");
+              c.right, c.bottom,
+              !covers ? "" : newFrame ? ", its frame not yet its style's" : ", its region not the screen's");
     // Without the game seeing the move: Unreal answers it by sizing its window back to its
     // own idea of fullscreen (after a style change), leaving the taskbar showing.
     quietMove_ = true;
-    CoverMonitor(nullptr, SWP_NOZORDER | SWP_NOACTIVATE);
+    CoverMonitor(nullptr, SWP_NOZORDER | SWP_NOACTIVATE | (newFrame ? SWP_FRAMECHANGED : 0));
     quietMove_ = false;
 }
 
@@ -437,6 +470,7 @@ bool DDraw::FitCover(HWND h, WINDOWPOS* wp) {
                            DWORD(GetWindowLongW(h, GWL_EXSTYLE)));
         coverPos_ = {r.left, r.top};
         coverSize_ = {r.right - r.left, r.bottom - r.top};  // (WM_GETMINMAXINFO lets it be this large)
+        coverFrame_ = FrameOf(h);
     }
     wp->x = coverPos_.x;
     wp->y = coverPos_.y;

@@ -238,6 +238,7 @@ private:
     bool foregroundLocked_ = false;  // ConfineCursor: LockSetForegroundWindow
     SIZE coverSize_ = {};        // its size, frame included
     POINT coverPos_ = {};        // and where it is (its frame's top left)
+    RECT coverFrame_ = {};       // the frame of the style it was covered with (FrameOf)
     bool covering_ = false;      // CoverMonitor moving it (FitCover leaves dd2d9's own moves alone)
     volatile bool quietMove_ = false;  // inside CheckCover's CoverMonitor
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing

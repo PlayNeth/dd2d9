@@ -793,6 +793,58 @@ static int Run(int w, int h, int bpp) {
                 CHECK((nearPx & 0x00FF00) && !(nearPx & 0xFF0000) && (hugePx & 0x0000FF) && !(hugePx & 0xFFFF00),
                       "W buffering after a vertex with a huge rhw: the near square 0x%06lx (green), the huge one 0x%06lx (blue)",
                       nearPx & 0xFFFFFF, hugePx & 0xFFFFFF);
+                // Unreal Tournament's weapon, drawn after a depth clear, part of it nearer than
+                // w 1, and its HUD after it at w 1 (depth test, no depth written). Parts of the
+                // weapon at w 1.19 (yellow) and 1.67 (red), one nearer than w 1 (green, w 0.83),
+                // then one over the red at w 1 (blue): blue in front of red, and the HUD (white)
+                // over the yellow and the green. The emulation's scale shrank for the green, and
+                // the yellow and red, drawn before it, came out in front of the blue and the HUD.
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                square(100, 100, 140, 140, 0.16f, 0.84f, 0xFFFFFF00);
+                square(200, 100, 240, 140, 0.4f, 0.6f, 0xFFFF0000);
+                square(300, 100, 340, 140, 0.0f, 1.2f, 0xFF00FF00);
+                square(200, 100, 240, 140, 0.0f, 1.0f, 0xFF0000FF);
+                dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
+                square(90, 90, 140, 150, 0.0f, 1.0f, 0xFFFFFFFF);
+                square(300, 90, 350, 150, 0.0f, 1.0f, 0xFFFFFFFF);
+                dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+                dev->EndScene();
+                const DWORD hudFar = pixel(120, 120), nearer = pixel(220, 120), hudNear = pixel(320, 120);
+                CHECK((nearer & 0xFFFFFF) == 0x0000FF && (hudFar & 0xFFFFFF) == 0xFFFFFF && (hudNear & 0xFFFFFF) == 0xFFFFFF,
+                      "W buffering, a weapon nearer than w 1 and a HUD at w 1 after it: a nearer part 0x%06lx (blue), "
+                      "the HUD over a part drawn first 0x%06lx and over the nearest 0x%06lx (white)",
+                      nearer & 0xFFFFFF, hudFar & 0xFFFFFF, hudNear & 0xFFFFFF);
+                // The same with a perspective projection set (near plane 1, far 1000), the
+                // weapon's nearest part (green, w 0.83) drawn first: the projection's near
+                // plane is the W buffer's near end, so the HUD at w 1 is in front of it, and
+                // the far part (red, w 1.67) behind the nearer one drawn after it (blue, w 1).
+                // From the vertices alone the scale would hold the green, and the HUD would
+                // be behind it.
+                {
+                    D3DMATRIX keepP, nearOne = {};
+                    dev->GetTransform(D3DTRANSFORMSTATE_PROJECTION, &keepP);
+                    nearOne._11 = nearOne._22 = 1.0f;
+                    nearOne._33 = 1000.0f / 999.0f;
+                    nearOne._34 = 1.0f;
+                    nearOne._43 = -1000.0f / 999.0f;
+                    dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &nearOne);
+                    dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                    dev->BeginScene();
+                    square(300, 100, 340, 140, 0.0f, 1.2f, 0xFF00FF00);
+                    square(200, 100, 240, 140, 0.4f, 0.6f, 0xFFFF0000);
+                    square(200, 100, 240, 140, 0.0f, 1.0f, 0xFF0000FF);
+                    dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
+                    square(300, 90, 350, 150, 0.0f, 1.0f, 0xFFFFFFFF);
+                    dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+                    dev->EndScene();
+                    dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &keepP);
+                    const DWORD nearer2 = pixel(220, 120), hudNear2 = pixel(320, 120);
+                    CHECK((nearer2 & 0xFFFFFF) == 0x0000FF && (hudNear2 & 0xFFFFFF) == 0xFFFFFF,
+                          "W buffering with a projection (near plane 1), the weapon's nearest part first: a nearer "
+                          "part 0x%06lx (blue), the HUD over the nearest 0x%06lx (white)",
+                          nearer2 & 0xFFFFFF, hudNear2 & 0xFFFFFF);
+                }
                 // Transformed and untransformed vertices in one scene (a game's own
                 // transformed models over a world Direct3D transforms): both are ordered by
                 // w, the range from the projection matrix (near plane 10, far 1000). A wall

@@ -102,6 +102,7 @@ void WriteLevel(const Buffer* b, const D3DLOCKED_RECT& lr, const PALETTEENTRY* e
 // Defined in gpucontext.cpp.
 extern unsigned g_drawSerial;
 extern float g_wScale;
+extern bool g_wWritten;
 extern unsigned g_traceScene;
 inline bool TracingFrame() { return g_config.drawTrace && g_traceScene % 600 == 300; }
 
@@ -380,6 +381,11 @@ struct GpuContext::Impl final : Gpu::Owner {
     // perspective projection; see SetTransform).
     bool wProj = false, wMixed = false;
     float wDepthFar = 1.0f, wDepthPerRhw = 0.0f;
+    // The projection's near plane (wProj), and whether the game asked for W buffering itself
+    // (D3DZB_USEW, not wbuffer=force): the near end of the W buffer for transformed vertices
+    // (Draw).
+    float wNear = 0.0f;
+    bool wAsked = false;
     DWORD rsMirror[256] = {};  // render states as last set through this context (drawtrace)
     bool zWrite = true;     // ZWRITEENABLE as the game set it; zWriteSet: as D3D9 has it
     bool zWriteSet = true;

@@ -1182,6 +1182,29 @@ static int RunFullscreen8(int modeW, int modeH) {
         CHECK(EqualRect(&cr, &mi.rcMonitor), "client area covers the screen after a frame change (%ld,%ld-%ld,%ld)",
               cr.left, cr.top, cr.right, cr.bottom);
     }
+    {
+        // The frame taken away with SetWindowLong alone (Unreal Tournament, WS_VISIBLE with it):
+        // the window covers the screen again for its new frame, which Windows then applies (under
+        // Wine the old one left the image lower and to the right). Still without WS_VISIBLE.
+        SetWindowLongA(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW & ~(WS_CAPTION | WS_THICKFRAME));
+        Pump();
+        using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+        using MonFn = BOOL(WINAPI*)(HMONITOR, MONITORINFO*);
+        HMODULE user32 = GetModuleHandleA("user32.dll");
+        const auto realWindowRect = reinterpret_cast<RectFn>(RealExport(user32, "GetWindowRect"));
+        const auto realMonitorInfo = reinterpret_cast<MonFn>(RealExport(user32, "GetMonitorInfoA"));
+        RECT wr = {};
+        realWindowRect(hwnd, &wr);
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof(mi);
+        realMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+        CHECK(EqualRect(&wr, &mi.rcMonitor) && !IsWindowVisible(hwnd),
+              "frame taken away with SetWindowLong alone: the window is the screen (%ld,%ld-%ld,%ld), still hidden (%d)",
+              wr.left, wr.top, wr.right, wr.bottom, IsWindowVisible(hwnd));
+        SetWindowLongA(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        Pump();
+    }
 
     DDSURFACEDESC2 d = {};
     d.dwSize = sizeof(d);

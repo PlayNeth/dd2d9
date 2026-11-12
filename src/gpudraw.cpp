@@ -59,6 +59,19 @@ static TlScan ScanTl(const uint8_t* src, UINT stride, UINT n) {
 // picture flickered with the warning's blinking.
 constexpr float kWNearest = 65536.0f;
 
+// The scale emulated W buffering takes depth with once a draw whose nearest held rhw is `rhw`
+// comes, from scale `s`: shrunk to hold it (at depth 0.5, room for nearer ones after), but
+// only while nothing has been drawn into the depth buffer with `s` since it was cleared
+// (`written`: a whole Clear or depth fill). Shrunk after, the depths already there would no
+// longer compare with the new ones: a player's Unreal Tournament trace had its weapon, drawn
+// after a depth clear with part of it nearer than w 1, then its HUD at w 1. The scale shrank
+// in the middle of the weapon, whose parts drawn before then came out in front of the nearer
+// ones drawn after, and in front of the HUD and its text. Nearer than the scale holds is the
+// nearest there is (depth 0), as at a W buffer's near end, and what is drawn there later at
+// the same depth comes in front (LESSEQUAL). (With a projection the near end is its near
+// plane instead: wNearEnd in Draw.)
+static float WScaleAfter(float s, float rhw, bool written) { return !written && rhw * s > 1.0f ? 0.5f / rhw : s; }
+
 // The largest rhw of `n` transformed vertices that emulated W buffering's scale has to hold
 // (0: none), given the largest valid one of all (TlScan::maxRhw).
 static float WScaleRhw(const uint8_t* src, UINT stride, UINT n, float maxRhw) {
@@ -78,6 +91,16 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     Impl& p = *p_;
     if (!p.dev || !primCount || !verts || !vertexCount) return;
     if (segCount < 2) segs = nullptr, segCount = 0;
+    // overlaybias: whether this draw is an overlay (below), its depth pulled forward and not
+    // written; and whether it writes depth at all.
+    const auto overlayPass = [&] {
+        const DWORD src = p.rsMirror[D3DRS_SRCBLEND], dst = p.rsMirror[D3DRS_DESTBLEND];
+        const bool combines = p.alphaBlend && (dst == D3DBLEND_ONE || dst == D3DBLEND_SRCCOLOR ||
+                                               dst == D3DBLEND_INVSRCCOLOR || dst == D3DBLEND_DESTCOLOR ||
+                                               src == D3DBLEND_ZERO || src == D3DBLEND_DESTCOLOR);
+        return g_config.overlayBias > 0 && zEnabled && (!p.zWrite || combines);
+    };
+    const auto writesDepth = [&] { return zEnabled && p.z && p.zWrite && !overlayPass(); };
     // Several draws (segs), one by one: as each would have been drawn on its own.
     auto drawEach = [&] {
         std::vector<WORD> own;
@@ -106,10 +129,26 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // Emulated W buffering: untransformed vertices take their depth from the projection
     // matrix, and once the game has drawn some, so do its transformed ones (their w put
     // through the same projection: one order for both, as in a W buffer). A game that only
-    // draws transformed vertices keeps the scale found from them (g_wScale), which spends
-    // the depth buffer's bits better than a projection's near plane does.
+    // draws transformed vertices, asked for W buffering and set a perspective projection gets
+    // depth 1 - near/w (wNearEnd): the projection's near plane is the W buffer's near end, as
+    // Direct3D gave the driver (its W range came from that matrix), and what is nearer is the
+    // nearest there is. Unreal Tournament draws its HUD at w 1 after its weapon, part of which
+    // is nearer than that, and the HUD is in front. Otherwise the scale is found from the
+    // vertices (g_wScale, WScaleAfter).
     if (p.wEmulate && !tl) p.wMixed = true;
     const bool wRange = p.wEmulate && p.wMixed && p.wProj;
+    // (One depth buffer can see more than one of these in a frame: wbuffer=force with Z
+    // buffered draws among W buffered ones, or the game's first untransformed draw. Rare;
+    // the projection changing mid-frame changes the range as Direct3D's did.)
+    const bool wNearEnd = p.wEmulate && !wRange && p.wAsked && p.wProj;
+    const bool wScaled = p.wEmulate && !wRange && !wNearEnd;
+    if (wNearEnd) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            DD2D9_LOG("Direct3D: emulated W buffering from the projection's near plane, w %g", p.wNear);
+        }
+    }
     // Several draws (segs): their vertices only, each scanned once (between their ranges may
     // lie vertices none of them uses).
     static std::vector<std::pair<UINT, UINT>> spans;  // (every caller holds g_lock)
@@ -171,12 +210,15 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // Untextured rhw flattened (below): the whole draw's or none.
         bool apart = (scan.minRhw > 0.0f && scan.maxRhw > scan.minRhw * 10000.0f) && (!p.tex[0] || scan.minRhw == 0.0f);
         // (Vertices nearer than a W buffer reaches among them: each draw's scale on its own.)
-        if (p.wEmulate && !wRange && scan.maxRhw > kWNearest) return drawEach();
-        if (p.wEmulate && !wRange) {  // the W scale each would have been drawn with, the scale as one
-            const float all = scan.maxRhw * g_wScale > 1.0f ? 0.5f / scan.maxRhw : g_wScale;
+        if (wScaled && scan.maxRhw > kWNearest) return drawEach();
+        if (wScaled) {  // the W scale each would have been drawn with, the scale as one
+            const bool writes = writesDepth();
+            const float all = WScaleAfter(g_wScale, scan.maxRhw, g_wWritten);
             float s = g_wScale;
+            bool written = g_wWritten;
             for (UINT k = 0; k < segCount && !apart; k++) {
-                if (segScan[k].maxRhw * s > 1.0f) s = 0.5f / segScan[k].maxRhw;
+                s = WScaleAfter(s, segScan[k].maxRhw, written);
+                written = written || writes;
                 apart = s != all;
             }
         }
@@ -221,11 +263,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // blends everything). Overlays that would write depth don't, meanwhile: the next light
     // laid on the same spot would fight the first's depth as the first fought the road's.
     {
-        const DWORD src = p.rsMirror[D3DRS_SRCBLEND], dst = p.rsMirror[D3DRS_DESTBLEND];
-        const bool combines = p.alphaBlend && (dst == D3DBLEND_ONE || dst == D3DBLEND_SRCCOLOR ||
-                                               dst == D3DBLEND_INVSRCCOLOR || dst == D3DBLEND_DESTCOLOR ||
-                                               src == D3DBLEND_ZERO || src == D3DBLEND_DESTCOLOR);
-        const bool overlay = g_config.overlayBias > 0 && zEnabled && (!p.zWrite || combines);
+        const bool overlay = overlayPass();
         const float bias = p.gameBias - (overlay ? float(g_config.overlayBias) / 65535.0f : 0.0f);
         const float slope = overlay ? -1.0f : 0.0f;  // (slope-scaled: a pixel's depth change)
         const bool write = p.zWrite && !overlay;
@@ -297,8 +335,11 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // after (its depth warped); an infinite rhw (bad, above) made it 0 and every depth
         // after it 1 until the next whole clear. (Not from an rhw above kWNearest.)
         // (Not with the projection's range, wRange: that has no scale.)
-        const float scaleRhw = wz && !wRange ? WScaleRhw(src, stride, vertexCount, maxRhw) : 0.0f;
-        if (scaleRhw * g_wScale > 1.0f) g_wScale = 0.5f / scaleRhw;
+        const float scaleRhw = wScaled ? WScaleRhw(src, stride, vertexCount, maxRhw) : 0.0f;
+        if (wScaled) {
+            g_wScale = WScaleAfter(g_wScale, scaleRhw, g_wWritten);
+            g_wWritten = g_wWritten || writesDepth();
+        }
         if (clampZ || badRhw || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
             for (UINT i = 0; i < vertexCount; i++) {
@@ -308,13 +349,15 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                 // the screen over any flat surface, as the Z buffer interpolates it: front to
                 // back as a W buffer orders, and coplanar polygons agree however they are cut
                 // up (the game's own z may not: NFS III's light maps fought with the road).
-                // The scale keeps the nearest w seen within [0, 1], 24 bits for the rest.
+                // The scale keeps the nearest w seen within [0, 1], 24 bits for the rest
+                // (nearer than it holds: 0, WScaleAfter).
                 if (wz) {
                     const float rhw = v[3] >= FLT_MIN && std::isfinite(v[3]) ? v[3] : 0.0f;  // (bad: as far as can be)
                     // (wRange: nearer than the near plane is the nearest there can be, past
                     // the far plane the farthest, as a W buffer's range ends.)
                     if (wRange) v[2] = std::clamp(p.wDepthFar + p.wDepthPerRhw * rhw, 0.0f, 1.0f);
-                    else v[2] = rhw > kWNearest ? 0.0f : 1.0f - rhw * g_wScale;
+                    else if (wNearEnd) v[2] = std::max(0.0f, 1.0f - rhw * p.wNear);
+                    else v[2] = rhw > kWNearest ? 0.0f : std::max(0.0f, 1.0f - rhw * g_wScale);
                 }
                 if (flatRhw) v[3] = 1.0f;
                 else if (badRhw && (!(v[3] >= FLT_MIN) || !std::isfinite(v[3]))) v[3] = minRhw;
