@@ -94,6 +94,8 @@ public:
     Presenter* GetPresenter() { return presenter_; }
     Gpu& GetGpu() { return *gpu_; }
     void OnActivate(bool active, DWORD thread);  // WM_ACTIVATEAPP while exclusive (thread: its lParam)
+    void OnWindowActivate(bool regained = false);  // WM_ACTIVATE: which of the game's windows is in front (g_displayLock held)
+    int GameWindowInFront(HWND fg) const;  // OnWindowActivate: 1 its window, 0 another of its windows, -1 neither
     void MinimizeGameWindow();  // on focus loss (OnActivate)
     void KeepTopmost();  // the 1.5 s timer while exclusive: topmost again if that was taken away
     bool WindowChanges() const;  // dd2d9 may move, size and restack the window (see ddwindow.cpp)
@@ -171,7 +173,7 @@ private:
     ~DDraw();
     void ApplyWindow();
     void CoverMonitor(HWND insertAfter, UINT flags);  // client area over the monitor, frame outside
-    void ConfineCursor(bool on);  // g_displayLock held
+    void ConfineCursor(bool on, bool keepLock = false);  // g_displayLock held
     void Uncover();
     void RestoreSavedWindow(bool windowChanges);
     void HookWindow();
@@ -236,6 +238,7 @@ private:
     int recoverCount_ = 0;
     bool cursorConfined_ = false;  // ConfineCursor
     bool foregroundLocked_ = false;  // ConfineCursor: LockSetForegroundWindow
+    bool dialogInFront_ = false;     // OnWindowActivate: another of the game's windows in front (as last logged)
     SIZE coverSize_ = {};        // its size, frame included
     POINT coverPos_ = {};        // and where it is (its frame's top left)
     RECT coverFrame_ = {};       // the frame of the style it was covered with (FrameOf)

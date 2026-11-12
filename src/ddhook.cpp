@@ -70,6 +70,7 @@ enum : unsigned {
     kWorkCoverFrame = 2,  // CheckCover: the game changed its window's frame
     kWorkActivate = 4,    // a focus change, taken as it is when it runs (the foreground window)
     kWorkDisplay = 8,     // a display change (WM_DISPLAYCHANGE)
+    kWorkWindowActivate = 16,  // WM_ACTIVATE: which of the game's windows is in front (OnWindowActivate)
 };
 std::atomic<unsigned> g_windowWork{0};
 std::atomic<DWORD> g_workThread{0};   // kWorkActivate: WM_ACTIVATEAPP's lParam (for the log)
@@ -125,6 +126,7 @@ void RunWindowWork(HWND h) {
             const bool active = fg && (GetWindowThreadProcessId(fg, &pid), pid == GetCurrentProcessId());
             owner->OnActivate(active, g_workThread.load());
         }
+        if (work & kWorkWindowActivate) owner->OnWindowActivate();
         if (work & (kWorkCoverMoved | kWorkCoverFrame)) owner->CheckCover(h, !(work & kWorkCoverFrame));
     }
     LeaveDisplayLock();
@@ -222,6 +224,11 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             g_workThread.store(DWORD(lp));
             RequestWindowWork(h, kWorkActivate);
         }
+    } else if (msg == WM_ACTIVATE && h == g_hook.hwnd) {
+        // Another of the game's windows in front, or the game's back (no WM_ACTIVATEAPP):
+        // the cursor let go or confined again (OnWindowActivate). Posted: it runs as things are
+        // once the activation is done.
+        RequestWindowWork(h, kWorkWindowActivate);
     } else if (msg == WM_DISPLAYCHANGE) {
         // The owner only under the display lock: TearDown unhooks under it, then frees it.
         // (Busy: usually dd2d9 changing the mode, but also the topmost timer or

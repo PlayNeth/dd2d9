@@ -70,9 +70,9 @@ void DDraw::KeepTopmost() {
     if (GetWindowLongW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST) return;
     // In front only: a game that took exclusive mode behind another program (its
     // SetForegroundWindow refused) stays behind it, as ApplyWindow left it.
-    DWORD pid = 0;
+    // Nor while another of the game's windows is (a dialog, see OnWindowActivate).
     const HWND fg = GetForegroundWindow();
-    if (fg && fg != hwnd_ && (GetWindowThreadProcessId(fg, &pid), pid != GetCurrentProcessId())) return;
+    if (fg && GameWindowInFront(fg) != 1) return;
     DD2D9_LOG("window %p was no longer topmost: made topmost again", static_cast<void*>(hwnd_));
     SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 }
@@ -200,11 +200,50 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         UpdateDeviceWindow();
         GameImageChanged();
         MarkDirty();
-    } else if (display != kDisplayWindow && WindowChanges()) {
-        // ddraw.dll makes the exclusive window topmost once it is in front.
-        SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        ConfineCursor(true);
+    } else {
+        OnWindowActivate(true);
     }
+}
+
+// Which of the game's windows `fg` (the foreground window) is: 1 the game's own, the one
+// dd2d9 drives or the one the game named as its focus or device window (DDSCL_SETFOCUSWINDOW
+// with DDSCL_SETDEVICEWINDOW), or their owner; 0 another of the game's windows (a dialog);
+// -1 none of the game's (another program's, none, or the desktop).
+int DDraw::GameWindowInFront(HWND fg) const {
+    if (!fg || fg == GetDesktopWindow()) return -1;
+    if (fg == hwnd_ || fg == focusWnd_ || fg == deviceWnd_ || fg == GetAncestor(hwnd_, GA_ROOTOWNER)) return 1;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId() ? 0 : -1;
+}
+
+// The game in front, its own window or another of its windows (WM_ACTIVATE without
+// WM_ACTIVATEAPP, or the focus back: `regained`, OnActivate; with g_displayLock held).
+// ddraw.dll makes the exclusive window topmost once it is in front, and dd2d9 keeps the
+// cursor on its screen. Another of the game's windows in front (a dialog: Claw's custom level
+// menu) gets the mouse: the cursor is let go (the foreground lock kept: the game stays in
+// front of other programs), and the game's window isn't raised, until it is back in front.
+// Kept on the screen, the cursor didn't work in that menu under Wine with Openbox; Wine's
+// own ddraw doesn't confine it.
+void DDraw::OnWindowActivate(bool regained) {
+    if (applying_ || !Exclusive() || !alive || suspended_ || DisplayKind() == kDisplayWindow || !WindowChanges())
+        return;
+    const HWND fg = GetForegroundWindow();
+    int front = GameWindowInFront(fg);
+    // None of the game's in front: WM_ACTIVATEAPP's (OnActivate). Back in front with none
+    // (or the desktop) shown as the foreground, as ApplyWindow takes it: the game's.
+    if (front < 0) {
+        if (!regained || (fg && fg != GetDesktopWindow())) return;
+        front = 1;
+    }
+    if (front && !(GetWindowLongW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST))
+        SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (dialogInFront_ != !front) {
+        dialogInFront_ = !front;
+        DD2D9_LOG("%s", front ? "the game's window in front: the cursor kept on the screen"
+                              : "another of the game's windows in front: the cursor let go");
+    }
+    ConfineCursor(front != 0, true);
 }
 
 // WM_DISPLAYCHANGE on the exclusive window (ours or anyone's mode change). Called with
@@ -338,11 +377,12 @@ void DDraw::Uncover() {
 
 // As ddraw.dll: while the exclusive window covers its monitor and is in front, the
 // mouse stays on that monitor (with two monitors, a click on the other one would send
-// the game to the background). on = false lets it go again, if dd2d9 confined it.
+// the game to the background). on = false lets it go again, if dd2d9 confined it, and
+// with keepLock the foreground lock below stays (a dialog of the game's in front).
 // Meanwhile other programs can't bring their windows to the front on their own (a
 // notification or a background program's window taking the focus, which sends the
 // game to the background as Alt+Tab would): the user still can, with Alt+Tab or a click.
-void DDraw::ConfineCursor(bool on) {
+void DDraw::ConfineCursor(bool on, bool keepLock) {
     if (on && hwnd_) {
         MONITORINFO mi = {};
         mi.cbSize = sizeof(mi);
@@ -356,7 +396,7 @@ void DDraw::ConfineCursor(bool on) {
         ClipCursor(nullptr);
         cursorConfined_ = false;
     }
-    if (foregroundLocked_) {
+    if (foregroundLocked_ && !keepLock) {  // (kept: the cursor only, see OnWindowActivate)
         LockSetForegroundWindow(LSFW_UNLOCK);
         foregroundLocked_ = false;
     }

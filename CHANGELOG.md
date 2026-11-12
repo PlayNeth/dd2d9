@@ -3,6 +3,17 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.7.2
+- **A dialog of the game's own gets the mouse.** In exclusive mode dd2d9 keeps the cursor on
+  the game's screen while the game is in front. It kept it there while another of the game's
+  windows was in front too, and Claw's custom level menu, a dialog over the game, didn't
+  take the mouse under Wine with Openbox (Wine's own ddraw doesn't keep the cursor on the
+  screen). Now the cursor is let go while another of the game's windows is in front, and
+  kept on the screen again once the game's window is back in front. Meanwhile the game's
+  window isn't raised over the dialog (nor by the timer that keeps it topmost), and other
+  programs still can't take the front on their own. The log says which, each time it
+  changes.
+
 ## 1.7.1
 Two fixes for Unreal Tournament: the picture shifted down and to the right when the game
 started, and parts of the weapon drawn over the HUD.
