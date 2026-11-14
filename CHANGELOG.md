@@ -3,6 +3,58 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.7.3
+Mega Man X starts and runs on Windows 10 and 11. Its sound library, Miles Sound System 3
+(`wail32.dll`, 1995), relied on three things Windows no longer does; each is now handled by
+default, with a setting to turn it off. Its first Alt+Tab needed one more fix, in the window
+handling.
+
+- **Multimedia timer callbacks get back the registers they should have kept**
+  (`safetimers=on`). Miles' timer callback leaves an argument on the stack for each of the
+  game's timer handlers it runs (the game's, built with Watcom, doesn't take it off) and pops
+  the wrong values into EBX, ESI and EDI. Up to XP, winmm called callbacks through a helper
+  that put the registers back; Windows 10 and 11 call them directly and go on using ESI: the
+  game crashed in winmm a moment after it started (Wine's timer thread crashes the same way).
+  dd2d9 now calls the game's timer callbacks through a short piece of code that puts back
+  EBX, ESI, EDI, EBP and the stack (a callback written as cdecl leaves its arguments on it)
+  and clears the direction flag. Timers that set or pulse an event are left as they are, and
+  `timeKillEvent` takes the same timer IDs. A game that looks `timeSetEvent` up by name gets
+  the same.
+- **A sound callback that suspends its own thread carries on** (`selfsuspend=off`). Miles'
+  sound callback starts by suspending the game's main thread, as an interrupt would have
+  stopped it, and resumes it at the end. Up to XP that callback came from the sound driver's
+  thread; since Vista winmm calls it on the thread inside `waveOutOpen`, here the main thread
+  itself, which then never woke up: a black screen, with the game's timer still running.
+  Inside a `waveOutOpen` or `midiOutOpen` callback, `SuspendThread` on the calling thread now
+  returns at once, and the callback's `ResumeThread` finds the thread running, as Windows'
+  does. Those callbacks also get back their registers, as the timer callbacks do. A thread
+  suspending itself anywhere else is suspended, as before.
+- **The game's joystick reads are answered from a thread of dd2d9's** (`joypoll=on`).
+  Miles' timer suspends the main thread while it runs the game's timer handler, and Mega Man
+  X reads the joystick from both. A joystick read takes locks (since Windows 8, and under
+  Wine): the main thread suspended while it held one left the handler waiting for good.
+  dd2d9 reads the joysticks the game asks for every few milliseconds, with the game's flags,
+  and `joyGetPosEx` and `joyGetPos` answer from that. The first read of a joystick, and one
+  after 2 s without any, goes to winmm itself when it isn't made inside a timer or sound
+  callback, so the game never waits for that thread. A joystick nobody has read for 2 s is
+  no longer polled, and one that isn't plugged in is polled every 100 ms.
+- **A game that minimizes and maximizes its own window while in front is told it's active
+  again** (`WM_ACTIVATEAPP`). Back from its first Alt+Tab, Mega Man X minimizes and maximizes
+  itself once. Minimized, it marks its surfaces to be restored and draws nothing until
+  `WM_ACTIVATEAPP` has restored them. On Windows 9x the minimized window lost the activation
+  and got it back; Windows 11 (and Wine) leave it in front, so nothing came, and its screen
+  stood still until the next Alt+Tab: black, or the intro's text over the title screen. Only
+  the game's window procedure hears it; for dd2d9 nothing changes.
+- The log names the first timer callback and what it left in the registers it should have
+  kept; `log=2` adds each `timeSetEvent` and `timeKillEvent`, and the callbacks counted every
+  10 s.
+- `ddtest` checks each: a timer callback that keeps none of the registers, sets the
+  direction flag and returns as cdecl (1.7.2 crashed in Wine's timer thread); a Miles-style
+  timer reading the joystick while it suspends the thread that also reads it (stalled for
+  good without `joypoll`); a sound callback suspending its own thread, and a thread outside
+  one suspended for real; and a window minimized and maximized by the game while in front,
+  told it's active once back (1.7.2 told it nothing).
+
 ## 1.7.2
 - **A dialog of the game's own gets the mouse.** In exclusive mode dd2d9 keeps the cursor on
   the game's screen while the game is in front. It kept it there while another of the game's

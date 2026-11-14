@@ -188,6 +188,13 @@ LRESULT CallOrig(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 volatile LONG g_toldSize = -1;
 
 namespace {
+// The game minimized its own window in exclusive mode with it still in front; the last
+// WM_ACTIVATEAPP Windows sent; dd2d9 telling the game it's active (the window thread's: see
+// HookProc).
+bool g_minimizedInFront = false;
+bool g_appActive = true;
+bool g_tellingActive = false;
+
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
     switch (msg) {  // where the game's image is on the screen may have changed (GameImage)
@@ -312,6 +319,41 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_SIZE && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && h == g_hook.hwnd)
         InterlockedExchange(&g_toldSize, LONG(lp));  // (what the game was last told: see ApplyWindow)
+    // The game minimizing its own window in exclusive mode and showing it again, with no
+    // WM_ACTIVATEAPP between: told it's active once it's back. On Windows 9x the minimized
+    // window lost the activation and got it back when shown; Windows 11 and Wine leave it in
+    // front throughout. Mega Man X, back from its first Alt+Tab, minimizes and maximizes
+    // itself once (its SC_RESTORE); minimized, it marks its surfaces to be restored and draws
+    // nothing until WM_ACTIVATEAPP has restored them: its screen stood still, black or the
+    // intro's text, until the next Alt+Tab. Only the game's procedure hears it: for dd2d9
+    // nothing changed. (Not dd2d9's own minimizing: that follows WM_ACTIVATEAPP (FALSE). And
+    // not while the game handles the one dd2d9 sends: a game that minimizes and restores
+    // itself there isn't told again.)
+    if (msg == WM_ACTIVATEAPP) {
+        g_appActive = wp != 0;
+        g_minimizedInFront = false;
+    } else if (msg == WM_NCDESTROY) {
+        g_minimizedInFront = false;
+    } else if (msg == WM_SIZE && h == g_hook.hwnd && !g_tellingActive) {
+        if (wp == SIZE_MINIMIZED) {
+            g_minimizedInFront = view.owned && view.exclusive && g_appActive && GetForegroundWindow() == h;
+        } else if ((wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && g_minimizedInFront) {
+            g_minimizedInFront = false;
+            const LRESULT r = CallOrig(h, msg, wp, lp);
+            if (view.exclusive && GetForegroundWindow() == h && !IsIconic(h)) {
+                static bool logged;
+                if (!logged) {
+                    logged = true;
+                    DD2D9_LOG("the game minimized its window and showed it again while in front: told it's active "
+                              "again (WM_ACTIVATEAPP)");
+                }
+                g_tellingActive = true;
+                CallOrig(h, WM_ACTIVATEAPP, TRUE, 0);
+                g_tellingActive = false;
+            }
+            return r;
+        }
+    }
     if (msg == WM_NCDESTROY && h == g_hook.hwnd) {
         // As ddraw.dll: the window is going, and the hook with it. The game's procedure
         // gets the message first; the window's procedure is put back (a later message

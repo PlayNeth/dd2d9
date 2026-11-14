@@ -80,6 +80,22 @@ heapzero=on
 ; its decoder hardly ever got the section its main thread lets go of once a frame). off: as
 ; Windows has it now.
 fairlocks=on
+; A multimedia timer's callback (timeSetEvent) gets back the registers it should have kept:
+; on (default). Windows up to XP put them back for it; Windows 10 and 11 don't, and their
+; timer thread crashed after a callback that didn't keep them (Mega Man X). off: as Windows
+; has it now.
+safetimers=on
+; The game's joystick reads are answered from what a thread of dd2d9's read a few milliseconds
+; before: on (default). A sound library that suspends the game's main thread while it runs the
+; game's timer (Miles Sound System 3) can otherwise leave it holding a joystick lock that the
+; game's timer handler then waits for, for good. off: straight from winmm.
+joypoll=on
+; A sound callback (waveOutOpen, midiOutOpen) that suspends its own thread: off (default)
+; lets it carry on, and gives the callback back the registers it should have kept. Miles
+; Sound System 3's sound callback suspends the game's main thread, and since Vista Windows
+; runs it on that very thread, which then never wakes up (Mega Man X: a black screen).
+; Anywhere else a thread suspending itself is suspended. on: as Windows has it.
+selfsuspend=off
 ; The desktop's colour depth DirectDraw reports before the game sets its own mode: 32
 ; (default), 24 or 16. Some games refuse to start unless the desktop is 16-bit, even ones
 ; that then switch to their own mode (Moto Racer: "16 bit screen mode required"): set 16 for

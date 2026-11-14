@@ -88,6 +88,9 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         {"drawtrace", &g_config.drawTrace},
         {"heapzero", &g_config.heapZero},
         {"fairlocks", &g_config.fairLocks},
+        {"safetimers", &g_config.safeTimers},
+        {"joypoll", &g_config.joyPoll},
+        {"selfsuspend", &g_config.selfSuspend},
     };
     for (const auto& b : kBools) {
         if (key != b.key) continue;

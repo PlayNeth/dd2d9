@@ -21,6 +21,25 @@
 #include <cstring>
 #include <vector>
 
+// A timer callback that keeps none of the registers it must (ESI, EDI, EBX, EBP), sets the
+// direction flag and returns as cdecl (its arguments left on the stack).
+extern "C" {
+volatile LONG g_badTicks = 0;
+void CALLBACK BadTimeProc(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR);
+}
+asm(R"(
+    .text
+    .globl _BadTimeProc@20
+_BadTimeProc@20:
+    lock incl _g_badTicks
+    movl $0x10, %esi
+    movl $0x11, %edi
+    movl $0x12, %ebx
+    movl $0x14, %ebp
+    std
+    ret
+)");
+
 static FILE* g_out;
 static int g_fail;
 
@@ -51,7 +70,16 @@ static int g_keepW, g_keepH;
 static RECT g_sizeClient = {-1, -1, -1, -1};
 static int g_sizeScreenW = -1;
 
+// WM_ACTIVATEAPP (TRUE) heard, and whether the window was in front and not minimized then, as
+// Mega Man X checks.
+static int g_activateTrue;
+static bool g_activeSeen;
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_ACTIVATEAPP && w) {
+        g_activateTrue++;
+        g_activeSeen = GetForegroundWindow() == h && !IsIconic(h);
+    }
     if (m == WM_SIZE && g_keepW && (LOWORD(l) != g_keepW || HIWORD(l) != g_keepH))
         SetWindowPos(h, nullptr, 0, 0, g_keepW, g_keepH, SWP_NOZORDER | SWP_NOACTIVATE);
     if (m == WM_USER + 1) g_userMsgs++;
@@ -208,6 +236,165 @@ static int RunUnit() {
             CHECK(SUCCEEDED(hr) && other, "DirectDrawCreateEx(a display's GUID) -> 0x%08lx", hr);
             if (other) other->Release();
         }
+    }
+
+    {
+        // A multimedia timer's callback that keeps none of EBX, ESI, EDI and EBP, leaves the
+        // direction flag set and returns as cdecl (Mega Man X's left ESI 0x10, and the timer
+        // thread of Windows 10 and 11, Wine's too, crashed reading 0x20): periodic and
+        // one-shot timers, dd2d9 putting back what it should have kept (safetimers=on).
+        UINT id = timeSetEvent(10, 1, BadTimeProc, 0, TIME_PERIODIC | TIME_KILL_SYNCHRONOUS);
+        Sleep(300);
+        timeKillEvent(id);
+        Sleep(50);
+        const LONG periodic = g_badTicks;
+        timeSetEvent(10, 1, BadTimeProc, 0, TIME_ONESHOT);
+        Sleep(200);
+        // (And timeSetEvent looked up by name, as a game that also ran without winmm would.)
+        using TimeSetEventFn = MMRESULT(WINAPI*)(UINT, UINT, LPTIMECALLBACK, DWORD_PTR, UINT);
+        const auto byName = reinterpret_cast<TimeSetEventFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("winmm.dll"), "timeSetEvent")));
+        if (byName) byName(10, 1, BadTimeProc, 0, TIME_ONESHOT);
+        Sleep(200);
+        CHECK(id && byName && periodic >= 5 && g_badTicks - periodic == 2,
+              "timeSetEvent: a callback that doesn't keep its registers (%ld periodic ticks, %ld one-shot, "
+              "by name too)", periodic, g_badTicks - periodic);
+    }
+
+    {
+        // Miles Sound System 3's timer, as Mega Man X has it: its callback suspends the thread
+        // that started Miles (the game's main thread) while it runs the game's handler, which
+        // reads the joystick, as that thread does too. A read takes locks (Windows 8 on, and
+        // Wine): one held by the suspended thread stopped the callback, and the game, for good.
+        // The game's reads come from dd2d9's own (joypoll=on).
+        struct Miles {
+            HANDLE main;
+            volatile LONG ticks, reads, stop;
+            static void CALLBACK Tick(UINT, UINT, DWORD_PTR user, DWORD_PTR, DWORD_PTR) {
+                Miles& m = *reinterpret_cast<Miles*>(user);
+                if (m.stop || SuspendThread(m.main) == static_cast<DWORD>(-1)) return;
+                JOYINFOEX j = {};
+                j.dwSize = sizeof(j);
+                j.dwFlags = 0x83;
+                joyGetPosEx(0, &j);
+                InterlockedIncrement(&m.ticks);
+                ResumeThread(m.main);
+            }
+            static DWORD WINAPI Game(void* p) {
+                Miles& m = *static_cast<Miles*>(p);
+                DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &m.main, 0, FALSE,
+                                DUPLICATE_SAME_ACCESS);
+                JOYINFOEX first = {};  // (as the game does before its timer starts: the joystick found)
+                first.dwSize = sizeof(first);
+                first.dwFlags = 0x83;
+                joyGetPosEx(0, &first);
+                const UINT id = timeSetEvent(5, 0, Tick, reinterpret_cast<DWORD_PTR>(&m), TIME_PERIODIC | TIME_KILL_SYNCHRONOUS);
+                const DWORD end = GetTickCount() + 1000;
+                while (GetTickCount() < end) {
+                    JOYINFOEX j = {};
+                    j.dwSize = sizeof(j);
+                    j.dwFlags = 0x83;
+                    joyGetPosEx(0, &j);
+                    InterlockedIncrement(&m.reads);
+                }
+                timeKillEvent(id);
+                return 0;
+            }
+        };
+        static Miles m = {};
+        HANDLE game = CreateThread(nullptr, 0, Miles::Game, &m, 0, nullptr);
+        const bool done = game && WaitForSingleObject(game, 5000) == WAIT_OBJECT_0;
+        if (game && !done) {  // (stalled: let it go, for the tests after this one)
+            InterlockedExchange(&m.stop, 1);
+            while (m.main && ResumeThread(m.main) > 1) {}
+            WaitForSingleObject(game, 5000);
+        }
+        CHECK(done && m.ticks > 50,
+              "a Miles-style timer that suspends the game's thread to read the joystick doesn't stall it (%ld ticks, "
+              "%ld reads%s)", m.ticks, m.reads, done ? "" : ", stalled");
+        if (game) CloseHandle(game);
+        if (m.main) CloseHandle(m.main);
+    }
+
+    {
+        // A sound callback that suspends its own thread carries on: Miles Sound System 3's
+        // suspends "the main thread", and since Vista it is called on the thread inside
+        // waveOutOpen, there itself (Mega Man X). A thread suspending itself elsewhere is
+        // suspended, for another to resume it (selfsuspend=off).
+        struct Self {
+            HANDLE me;
+            volatile LONG calls;
+            static void CALLBACK Sound(HWAVEOUT, UINT msg, DWORD_PTR user, DWORD_PTR, DWORD_PTR) {
+                Self& t = *reinterpret_cast<Self*>(user);
+                if (msg != WOM_OPEN) return;
+                SuspendThread(t.me);  // (Miles' first instruction)
+                InterlockedIncrement(&t.calls);
+                ResumeThread(t.me);
+            }
+            static DWORD WINAPI Open(void* p) {
+                Self& t = *static_cast<Self*>(p);
+                DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &t.me, 0, FALSE,
+                                DUPLICATE_SAME_ACCESS);
+                WAVEFORMATEX f = {};
+                f.wFormatTag = WAVE_FORMAT_PCM;
+                f.nChannels = 2;
+                f.nSamplesPerSec = 22050;
+                f.wBitsPerSample = 16;
+                f.nBlockAlign = 4;
+                f.nAvgBytesPerSec = 22050 * 4;
+                HWAVEOUT w = nullptr;
+                const MMRESULT r = waveOutOpen(&w, WAVE_MAPPER, &f, reinterpret_cast<DWORD_PTR>(Sound),
+                                               reinterpret_cast<DWORD_PTR>(&t), CALLBACK_FUNCTION);
+                if (r == MMSYSERR_NOERROR) waveOutClose(w);
+                return r;
+            }
+            struct Waiting {
+                HANDLE ready;  // (set just before the thread suspends itself)
+                DWORD slept;
+            };
+            static DWORD WINAPI Wait(void* p) {
+                Waiting& w = *static_cast<Waiting*>(p);
+                HANDLE me = nullptr;
+                DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &me, 0, FALSE,
+                                DUPLICATE_SAME_ACCESS);
+                const DWORD start = GetTickCount();
+                SetEvent(w.ready);
+                SuspendThread(me);  // (until the test resumes it)
+                w.slept = GetTickCount() - start;
+                CloseHandle(me);
+                return 0;
+            }
+        };
+        static Self t = {};
+        HANDLE open = CreateThread(nullptr, 0, Self::Open, &t, 0, nullptr);
+        const bool done = open && WaitForSingleObject(open, 3000) == WAIT_OBJECT_0;
+        DWORD opened = MMSYSERR_ERROR;
+        if (open && !done) ResumeThread(open);  // (rescued, to go on)
+        else if (open) GetExitCodeThread(open, &opened);
+        if (open) WaitForSingleObject(open, 2000);
+        static Self::Waiting waiting = {};
+        waiting.ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE wait = CreateThread(nullptr, 0, Self::Wait, &waiting, 0, nullptr);
+        if (wait) {
+            WaitForSingleObject(waiting.ready, 2000);
+            Sleep(150);
+            // (Resumed once it's suspended: it may be between the event and SuspendThread.)
+            for (int i = 0; i < 200 && WaitForSingleObject(wait, 0) == WAIT_TIMEOUT; i++) {
+                if (ResumeThread(wait) >= 1) break;
+                Sleep(10);
+            }
+            WaitForSingleObject(wait, 2000);
+        }
+        if (waiting.ready) CloseHandle(waiting.ready);
+        const DWORD slept = waiting.slept;
+        if (opened == MMSYSERR_NOERROR || !done)
+            CHECK(done && t.calls == 1, "waveOutOpen's callback suspending its own thread carries on (%d)", int(done));
+        else
+            fprintf(g_out, "SKIP waveOutOpen: no sound device (0x%lx)\n", opened);
+        CHECK(slept >= 100, "a thread suspending itself outside a sound callback is suspended (%lu ms)", slept);
+        if (open) CloseHandle(open);
+        if (wait) CloseHandle(wait);
+        if (t.me) CloseHandle(t.me);
     }
 
     {
@@ -2839,6 +3026,35 @@ static int RunMouse() {
                   GetDeviceCaps(screen, VERTRES));
             ReleaseDC(nullptr, screen);
         }
+    }
+    {
+        // The game minimizing and maximizing its own window while in front (Mega Man X, once,
+        // back from its first Alt+Tab, with SC_MINIMIZE and SC_MAXIMIZE): back, it's told it's
+        // active, once. Minimized without giving up the activation, as Windows 11 left Mega
+        // Man X (and Wine does with SC_MINIMIZE too). (Minimized, Mega Man X draws nothing
+        // until then.)
+        SetForegroundWindow(hwnd);
+        Pump();
+        const bool front = GetForegroundWindow() == hwnd;
+        g_activateTrue = 0;
+        g_activeSeen = false;
+        ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+        const bool frontMinimized = GetForegroundWindow() == hwnd;
+        SendMessageA(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+        for (int i = 0; i < 5; i++) {
+            Pump();
+            Sleep(20);
+        }
+        if (!front) {
+            fprintf(g_out, "SKIP minimized and maximized in front: the test window isn't in front\n");
+        } else {
+            CHECK(g_activateTrue == 1 && g_activeSeen,
+                  "the game minimizing and maximizing its window: told it's active once back (%d WM_ACTIVATEAPP, in front "
+                  "while minimized: %d)",
+                  g_activateTrue, frontMinimized);
+        }
+        ShowWindow(hwnd, SW_RESTORE);
+        Pump();
     }
     {
         // FlyingSB's Alt+Tab: out of exclusive mode while minimized, back into it (and its

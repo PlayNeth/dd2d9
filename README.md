@@ -106,7 +106,10 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
   - a 16 or 24-bit desktop (`desktopbpp`) for games that refuse a 32-bit one, through DirectDraw, GDI and the display settings alike.
 - **Windows 9x and XP behaviour games relied on,** on by default:
   - memory from the process heap comes zeroed (`heapzero`), for games that read it before writing, such as Daytona USA Deluxe;
-  - a critical section a thread releases goes to the thread waiting for it (`fairlocks`), where Windows since Vista lets the releasing thread take it straight back (KOF 99 Evolution's intro movie).
+  - a critical section a thread releases goes to the thread waiting for it (`fairlocks`), where Windows since Vista lets the releasing thread take it straight back (KOF 99 Evolution's intro movie);
+  - a multimedia timer's callback gets back the registers it should have kept (`safetimers`), as Windows up to XP gave them back; Windows 10 and 11 crash after a callback that doesn't keep them (Mega Man X's sound library). Sound callbacks (`waveOutOpen`, `midiOutOpen`) get them back too, with `selfsuspend=off`;
+  - the game's joystick reads are answered from a thread of dd2d9's (`joypoll`), so a sound library that suspends the game's main thread, as Miles Sound System 3 does, can't leave it holding a joystick lock its own handler then waits for;
+  - a sound callback that suspends its own thread carries on (`selfsuspend=off`): Miles Sound System 3's sound callback suspends the main thread, and since Vista it runs on that very thread (Mega Man X stood still on a black screen). Anywhere else, a thread suspending itself is suspended.
 
 ### Differences from `ddraw.dll` on purpose
 
@@ -170,6 +173,9 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `cpus` | `1`: processors the game runs on and is told about; `0`: all |
 | `heapzero` | `on`: the game's heap memory comes zeroed, as fresh memory often was on Windows 9x (Daytona USA Deluxe needs it); `off`: as Windows gives it |
 | `fairlocks` | `on`: a critical section the game releases goes to the thread waiting for it, as up to Windows XP (KOF 99 Evolution's intro needs it); `off`: as Windows has it now |
+| `safetimers` | `on`: a multimedia timer's callback (`timeSetEvent`) gets back the registers, stack and direction flag it should have kept, as up to Windows XP (Mega Man X needs it on Windows 10 and 11); `off`: as Windows has it now |
+| `joypoll` | `on`: the game's joystick reads (`joyGetPosEx`, `joyGetPos`) are answered from what a thread of dd2d9's read a few milliseconds before (the first read of a joystick, and one after 2 s without any, goes to winmm when it isn't made inside a timer or sound callback); `off`: straight from winmm |
+| `selfsuspend` | `off`: a sound callback (`waveOutOpen`, `midiOutOpen`) that suspends its own thread carries on, and gets back the registers it should have kept (Mega Man X needs it since Vista); `on`: as Windows has it |
 | `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth |
 | `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside what it locked |
 | `zaccess` | `on`: Z buffers can be locked and blitted by DirectDraw where the GPU allows it; `off`: on the GPU only, for a driver that misbehaves with it |

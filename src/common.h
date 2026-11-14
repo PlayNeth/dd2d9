@@ -18,7 +18,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.7.2"
+#define DD2D9_VERSION "1.7.3"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -50,6 +50,9 @@ struct Config {
     bool palTextures = true;       // palettizedtextures=off: no 8-bit palettized texture format offered to Direct3D
     bool heapZero = true;          // heapzero=on: the game's HeapAlloc memory comes zeroed (compat.cpp)
     bool fairLocks = true;         // fairlocks=on: a released critical section goes to the thread waiting for it (compat.cpp)
+    bool selfSuspend = false;      // selfsuspend=off: a sound callback suspending its own thread carries on (compat.cpp)
+    bool joyPoll = true;           // joypoll=on: the game's joystick reads answered from dd2d9's own (compat.cpp)
+    bool safeTimers = true;        // safetimers=on: timeSetEvent callbacks called with their registers kept (compat.cpp)
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s
     int overlayBias = 1;           // passes laid on drawn surfaces pulled forward N 16-bit depth steps (gpudraw.cpp)
     int wbuffer = 1;               // W buffering: 0 off, 1 offered (emulated where the GPU lacks it), 2 forced on Z too
