@@ -31,8 +31,9 @@ handling.
   suspending itself anywhere else is suspended, as before.
 - **The game's joystick reads are answered from a thread of dd2d9's** (`joypoll=on`).
   Miles' timer suspends the main thread while it runs the game's timer handler, and Mega Man
-  X reads the joystick from both. A joystick read takes locks (since Windows 8, and under
-  Wine): the main thread suspended while it held one left the handler waiting for good.
+  X reads the joystick from both. winmm holds a lock through a joystick read (XP's and
+  Windows 11's alike, and Wine's): the main thread suspended while it held it left the
+  handler waiting for good.
   dd2d9 reads the joysticks the game asks for every few milliseconds, with the game's flags,
   and `joyGetPosEx` and `joyGetPos` answer from that. The first read of a joystick, and one
   after 2 s without any, goes to winmm itself when it isn't made inside a timer or sound
