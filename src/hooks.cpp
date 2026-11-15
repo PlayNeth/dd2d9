@@ -5,6 +5,7 @@
 #include <winternl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -55,6 +56,22 @@ std::vector<Table>* g_tables;
 std::vector<std::pair<HMODULE, std::wstring>>* g_modules;
 void* g_notifyCookie;
 HMODULE g_self;
+// d3drm.dll's module while it is loaded (RetainedModeLoaded): written with the loader lock
+// held (a load or unload notification, DllMain's list) or, without the notifications, from
+// PatchGameModules' snapshot; read without a lock.
+std::atomic<HMODULE> g_retainedMode{nullptr};
+
+bool IsRetainedMode(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    return _wcsicmp(path.c_str() + (slash == std::wstring::npos ? 0 : slash + 1), L"d3drm.dll") == 0;
+}
+// Looks for d3drm.dll in a list of all the loaded modules.
+void FindRetainedMode(const std::vector<std::pair<HMODULE, std::wstring>>& modules) {
+    HMODULE found = nullptr;
+    for (const auto& [m, path] : modules)
+        if (IsRetainedMode(path)) found = m;
+    g_retainedMode.store(found, std::memory_order_relaxed);
+}
 
 bool WriteSlot(void** slot, void* value) {
     DWORD old;
@@ -550,6 +567,7 @@ void CALLBACK OnDllNotification(ULONG reason, const DllNotificationData* data, v
     if (reason == kDllLoaded) {
         if (!data->fullDllName || !data->fullDllName->Buffer) return;
         const std::wstring path(data->fullDllName->Buffer, data->fullDllName->Length / sizeof(wchar_t));
+        if (IsRetainedMode(path)) g_retainedMode.store(m, std::memory_order_relaxed);
         std::vector<Table> tables;
         AcquireSRWLockShared(&g_hookLock);
         if (g_tables) tables = *g_tables;
@@ -571,6 +589,8 @@ void CALLBACK OnDllNotification(ULONG reason, const DllNotificationData* data, v
         }
     } else if (reason == kDllUnloaded) {
         const uintptr_t base = reinterpret_cast<uintptr_t>(m), size = data->sizeOfImage;
+        HMODULE retained = m;
+        g_retainedMode.compare_exchange_strong(retained, nullptr, std::memory_order_relaxed);
         AcquireSRWLockExclusive(&g_hookLock);
         if (g_modules) {
             g_modules->erase(std::remove_if(g_modules->begin(), g_modules->end(), [&](const auto& e) { return e.first == m; }),
@@ -625,8 +645,11 @@ unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) 
     if (inLoaderLock) {
         ModulesFromLoader(&modules);
         if (!tracked && !g_notifyCookie) TrackModules(modules);
+        // (Under the loader lock, as the notifications that keep it up to date from here on.)
+        FindRetainedMode(modules);
     } else if (!tracked) {
         ModulesFromSnapshot(&modules);
+        FindRetainedMode(modules);
         // Kept loaded while patched (another thread could unload one meanwhile); pinned before
         // the lock is taken, since pinning takes the loader lock. (In DllMain the loader lock,
         // held, keeps every module loaded; with the loader's notifications an unload waits for
@@ -653,6 +676,10 @@ unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock) 
     ReleaseSRWLockExclusive(&g_hookLock);
     for (HMODULE m : pinned) FreeLibrary(m);  // (outside the lock: it can run a DLL's detach)
     return count;
+}
+
+bool RetainedModeLoaded() {
+    return g_retainedMode.load(std::memory_order_relaxed) != nullptr;
 }
 
 void* InstalledHookFor(const void* real) {

@@ -5,8 +5,8 @@
 // nothing is wrapped; Direct3D devices that change their tables are followed (Repatch).
 //
 // Logged: every call except the frequent ones (draws, states, locks, blits, AddRef/Release),
-// which are logged for the first 20000 such calls, in one whole frame every 300 frames, and
-// whenever they fail.
+// which are logged for the first 20000 such calls, in one whole frame every 300 frames
+// (ddtrace.ini: every=), and whenever they fail.
 #include <windows.h>
 #include <ddraw.h>
 #include <d3d.h>
@@ -33,6 +33,7 @@ FILE* g_log;
 DWORD g_start;
 bool g_tracingFrame = false;
 unsigned g_frame = 0;
+unsigned g_every = 300;  // ddtrace.ini every=: one whole frame logged every N frames (1: all)
 long g_hotLogged = 0;
 bool g_sawEndScene = false;
 __thread int t_depth = 0;
@@ -93,6 +94,8 @@ extern "C" void __cdecl EnsureLoaded() {
         g_log = fopen(path, "w");
         snprintf(path, MAX_PATH, "%sddtrace.ini", exeDir);
         GetPrivateProfileStringA("ddtrace", "target", "", target, MAX_PATH, path);
+        g_every = GetPrivateProfileIntA("ddtrace", "every", 300, path);
+        if (g_every < 1) g_every = 300;
         char real[MAX_PATH];
         if (target[0]) {
             if (strchr(target, ':') || target[0] == '\\') snprintf(real, MAX_PATH, "%s", target);
@@ -106,6 +109,7 @@ extern "C" void __cdecl EnsureLoaded() {
         GetModuleFileNameA(nullptr, exe, MAX_PATH);
         if (g_log) {
             fprintf(g_log, "ddtrace 1.6: %s\nreal ddraw: %s (%s)\n", exe, real, g_real ? "loaded" : "NOT LOADED");
+            if (g_every != 300) fprintf(g_log, "every=%u: one whole frame logged every %u frames\n", g_every, g_every);
             fflush(g_log);
         }
         for (int i = 0; i < kExports; i++) g_fn[i] = g_real ? reinterpret_cast<void*>(GetProcAddress(g_real, kExportNames[i])) : nullptr;
@@ -743,7 +747,7 @@ HRESULT Dispatch(int iface, int slot, void* self, DWORD* a) {
         if (log && !g_tracingFrame && SUCCEEDED(hr)) g_hotLogged++;
         if (FAILED(hr) && !g_tracingFrame && g_hotLogged >= 20000 && ++g_quietCount[iface][slot] > 200) log = false;
     } else {
-        log = ++g_quietCount[iface][slot] <= 5000 || FAILED(hr);
+        log = ++g_quietCount[iface][slot] <= 5000 || FAILED(hr) || g_tracingFrame;
     }
     if (t_depth > 0 && (slot == 1 || slot == 2)) log = false;  // the real ddraw's own reference counting
 
@@ -856,7 +860,7 @@ HRESULT Dispatch(int iface, int slot, void* self, DWORD* a) {
     if (frameEnd && t_depth == 0) {
         g_frame++;
         const bool was = g_tracingFrame;
-        g_tracingFrame = g_frame % 300 == 150;
+        g_tracingFrame = g_every == 1 || g_frame % g_every == g_every / 2;
         if (g_tracingFrame) Log("==== frame %u: every call logged ====", g_frame);
         else if (was) Log("==== end of frame %u ====", g_frame - 1);
     }

@@ -3,8 +3,9 @@
 //   ram=, cpu=, cpus= (compatsys.cpp): the memory, processor clock and processors.
 //   desktopbpp= (compatdisplay.cpp), and the display mode and GDI in a mode of the game's own
 //   (compatdisplay.cpp, compatgdi.cpp), with the game's GDI drawing on a windowed primary.
-//   heapzero=, fairlocks=, safetimers=, joypoll=, selfsuspend= (here): the heap, the critical
-//   sections, the multimedia timers, the joystick and sound callbacks as the games knew them.
+//   heapzero=, fairlocks=, safetimers=, joypoll=, selfsuspend=, nobuffering= (here): the heap,
+//   the critical sections, the multimedia timers, the joystick, sound callbacks and files
+//   opened without buffering as the games knew them.
 // The imports are patched in the game's modules (hooks.cpp): from DllMain, before the game's
 // own code runs, and in each DLL loaded later as it loads.
 #include "compatint.h"
@@ -36,6 +37,44 @@ LPVOID WINAPI HookHeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes) {
 
 ImportHook kHeapHooks[] = {
     {"kernel32", "HeapAlloc", reinterpret_cast<void*>(HookHeapAlloc), reinterpret_cast<void**>(&g_heapAlloc)},
+};
+
+// A file the game opens with FILE_FLAG_NO_BUFFERING is opened without it (nobuffering=off, the
+// default), as Windows 95 and 98 ignored the flag. Since NT, every read and write of such a
+// file must be a whole number of sectors, at a sector-aligned offset, into sector-aligned
+// memory, or it fails. A game tested on 9x may not do that: Biko opens its animation files
+// this way, reads their 60-byte header into a stack buffer, never checks that the read
+// failed, and copies the frames it reads next to an address made from the unread header
+// (the crash in a memcpy, on XP too). Reads and writes that do follow the rules work the
+// same without the flag; the data only goes through the file cache. nobuffering=on: the flag
+// kept, as Windows has it.
+using CreateFileAFn = HANDLE(WINAPI*)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+using CreateFileWFn = HANDLE(WINAPI*)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+CreateFileAFn g_createFileA;
+CreateFileWFn g_createFileW;
+volatile LONG g_bufferedLogged;
+
+HANDLE WINAPI HookCreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disposition,
+                              DWORD flags, HANDLE templ) {
+    const CreateFileAFn next = DD2D9_NEXT(g_createFileA);
+    if ((flags & FILE_FLAG_NO_BUFFERING) && !InterlockedExchange(&g_bufferedLogged, 1))
+        DD2D9_LOG("compat: %s opened without FILE_FLAG_NO_BUFFERING, as are the game's files after it (nobuffering=off)",
+                  name ? name : "(null)");
+    return next(name, access, share, sa, disposition, flags & ~DWORD(FILE_FLAG_NO_BUFFERING), templ);
+}
+
+HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disposition,
+                              DWORD flags, HANDLE templ) {
+    const CreateFileWFn next = DD2D9_NEXT(g_createFileW);
+    if ((flags & FILE_FLAG_NO_BUFFERING) && !InterlockedExchange(&g_bufferedLogged, 1))
+        DD2D9_LOG("compat: %ls opened without FILE_FLAG_NO_BUFFERING, as are the game's files after it (nobuffering=off)",
+                  name ? name : L"(null)");
+    return next(name, access, share, sa, disposition, flags & ~DWORD(FILE_FLAG_NO_BUFFERING), templ);
+}
+
+ImportHook kFileHooks[] = {
+    {"kernel32", "CreateFileA", reinterpret_cast<void*>(HookCreateFileA), reinterpret_cast<void**>(&g_createFileA)},
+    {"kernel32", "CreateFileW", reinterpret_cast<void*>(HookCreateFileW), reinterpret_cast<void**>(&g_createFileW)},
 };
 
 // A critical section a thread releases goes to the thread waiting for it, as on Windows up to
@@ -319,8 +358,8 @@ void CALLBACK SafeTimeProc(UINT id, UINT msg, DWORD_PTR user, DWORD_PTR dw1, DWO
         DD2D9_LOG("winmm: it came back after %lu ms, leaving ESI 0x%lx EDI 0x%lx EBX 0x%lx EBP 0x%lx (put back)",
                   GetTickCount() - start, dd2d9_timerOut[0], dd2d9_timerOut[1], dd2d9_timerOut[2], dd2d9_timerOut[3]);
     // (And how many there were, every 10 s: a timer that stopped shows as no more lines.)
-    static volatile LONG lastLog;
-    const LONG now = static_cast<LONG>(GetTickCount());
+    static volatile DWORD lastLog;
+    const DWORD now = GetTickCount();
     if (now - lastLog >= 10000) {
         lastLog = now;
         DD2D9_TRACE("winmm: %ld timer callbacks so far", call);
@@ -665,7 +704,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[10];
+HookTable g_tables[11];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
@@ -721,6 +760,7 @@ void InstallCompatHooks(bool inLoaderLock) {
     g_tables[9] = {kSuspendHooks, sizeof(kSuspendHooks) / sizeof(kSuspendHooks[0]),
                    !g_config.selfSuspend && g_getThreadId && g_soundTls != TLS_OUT_OF_INDEXES &&
                        dd2d9_timerTls != TLS_OUT_OF_INDEXES};
+    g_tables[10] = {kFileHooks, sizeof(kFileHooks) / sizeof(kFileHooks[0]), !g_config.noBuffering};
     // The tables switched on, and GetProcAddress with them, patched together (the modules
     // listed once): made once, the setting fixed for the process.
     static std::vector<ImportHook> all;

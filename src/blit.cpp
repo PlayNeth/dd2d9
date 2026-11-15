@@ -188,8 +188,8 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
     // What Direct3D drew into either surface is read back first.
     if (sb && src != this) src->CpuAccess(false);
     // A depth fill into a Z buffer DirectDraw can write on the GPU: no read back first (games
-    // fill every frame); the GPU's copy gets the fill (GpuDepthFill), or, with writes of the
-    // CPU's pending upload, the fill joins them.
+    // fill every frame); the GPU's copy gets the fill, or, with writes of the CPU's pending
+    // upload, the fill joins them (GpuDepthFill).
     const bool zfill = (flags & DDBLT_DEPTHFILL) && GpuDepthWritable(buf);
     if (!zfill) CpuAccess(true, dstRect ? dstRect : &bounds);  // (the rectangle before clipping: at most that)
     else if (buf->gpuStale) buf->MarkGpuStale(dstRect ? dstRect : &bounds);
@@ -198,7 +198,7 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
         const DWORD value = (flags & DDBLT_COLORFILL) ? fx->dwFillColor : fx->dwFillDepth;
         for (RECT& c : clips) {
             FillCore(&c, value);
-            if ((flags & DDBLT_DEPTHFILL) && !(zfill && buf->gpuStale)) GpuDepthFill(this, c, value);  // a Z buffer Direct3D uses
+            if (flags & DDBLT_DEPTHFILL) GpuDepthFill(this, c, value);  // a Z buffer Direct3D uses
         }
         MarkClipsDirty(this, clips);
         return DD_OK;

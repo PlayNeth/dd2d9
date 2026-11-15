@@ -3,8 +3,8 @@
 // saved first and put back after, so the game's Direct3D context finds its state as it
 // left it (rather than sending all of it again, some 450 calls, every frame). Only the
 // states those draws set are kept: render target 0 and the depth buffer, the viewport,
-// the shaders and vertex declaration, stages 0-1 (textures, samplers, a few stage states)
-// and the render states in kStates. Include after d3d9.h.
+// the shaders and vertex declaration, stages 0-2's textures and samplers, a few stage states
+// of stages 0-1 and the render states in kStates. Include after d3d9.h.
 #pragma once
 
 #include <d3d9.h>

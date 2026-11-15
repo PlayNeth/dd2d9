@@ -21,6 +21,10 @@ struct ImportHook {
 // own. Hooks whose DLL isn't loaded are skipped. A module is patched for a given `hooks` array
 // once (later calls skip it): `hooks` must stay where it is.
 unsigned PatchGameModules(const ImportHook* hooks, size_t n, bool inLoaderLock = false);
+// Whether Direct3D Retained Mode (d3drm.dll) is loaded in the process: kept up to date as
+// modules load and unload (the loader's notifications; without them, as of the last
+// PatchGameModules), so that asking takes no lock (flipcopy=auto asks at every Flip).
+bool RetainedModeLoaded();
 // Restores every patched import (before dd2d9 is unloaded while the process goes on).
 void UnpatchAll();
 // dd2d9's replacement for `real`, if a hook table given to PatchGameModules so far hooks that

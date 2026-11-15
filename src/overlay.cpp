@@ -25,7 +25,7 @@ constexpr DWORD kMinStretch = 1, kMaxStretch = 100000;
 enum : DWORD {
     kZSendToFront, kZSendToBack, kZMoveForward, kZMoveBackward, kZInsertInFrontOf, kZInsertInBackOf
 };
-constexpr DWORD kEnumBackToFront = 0;  // kEnumBackToFront (1: _FRONTTOBACK)
+constexpr DWORD kEnumBackToFront = 0;  // DDENUMOVERLAYZ_BACKTOFRONT (1: _FRONTTOBACK)
 
 std::vector<Surface*>* g_overlayZ;  // g_lock
 

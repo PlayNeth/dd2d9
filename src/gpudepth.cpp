@@ -139,6 +139,13 @@ bool GpuDepthFill(Surface* s, const RECT& r, DWORD value) {
     GpuSurf* g = s->buf->gpu;
     if (!g || !g->gpu || !g->depth) return false;
     GpuGuard l(*g->gpu);
+    // A fill of the whole buffer starts emulated W buffering's scale again, as a whole Clear
+    // does (here, not only where the fill reaches the GPU: BindTargets, but also a read back
+    // or the CPU's upload).
+    if (r.left <= 0 && r.top <= 0 && r.right >= s->buf->w && r.bottom >= s->buf->h) g_wScale = 1.0f, g_wWritten = false;
+    // A writable Z buffer with writes of the CPU's waiting to go up: the fill, drawn into the
+    // CPU copy too, goes up with them, in order.
+    if (g->ztex && s->buf->gpuStale) return true;
     // A fill covering an earlier one replaces it: a game filling every frame without drawing
     // in between (a paused half of a split screen) keeps one per viewport, in order.
     auto covered = [&r](const GpuSurf::Fill& f) {

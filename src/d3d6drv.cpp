@@ -137,7 +137,8 @@ void Device::PushStageOps9() {
     const DWORD* later[7] = {};
     if (op1 != D3DTOP_DISABLE)
         for (int i = 0; i < 7; i++) later[i] = dtss[i + 1];
-    const KeyedAlpha k = KeyedAlphaState(rs, tss0, tex, Stage0AlphaUsed(later, rt->buf->fmt.a != 0));
+    // (No target: one set to a Z buffer, held without a reference, that has gone since.)
+    const KeyedAlpha k = KeyedAlphaState(rs, tss0, tex, Stage0AlphaUsed(later, rt && rt->buf->fmt.a != 0));
     if (k.alphaArg1 != 0xFFFFFFFF) SetTSS9(0, D3DTSS_ALPHAARG1, k.alphaArg1);
     if (k.alphaArg2 != 0xFFFFFFFF) SetTSS9(0, D3DTSS_ALPHAARG2, k.alphaArg2);
     if (k.alphaOp != 0xFFFFFFFF) SetTSS9(0, D3DTSS_ALPHAOP, k.alphaOp);

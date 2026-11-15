@@ -185,10 +185,8 @@ HDC Buffer::GetDC() {
     LoadKmt();
     const UINT kmt = KmtFormat(fmt);
     if (g_kmtCreate && kmt && pitch > 0) {
-        PALETTEENTRY gray[256];
-        for (int i = 0; i < 256; i++) gray[i] = {BYTE(i), BYTE(i), BYTE(i), 0};
         HDC screen = CreateCompatibleDC(nullptr);
-        KmtCreateDC c = {bits, kmt, UINT(w), UINT(h), UINT(pitch), screen, fmt.pal8 ? gray : nullptr, nullptr, nullptr};
+        KmtCreateDC c = {bits, kmt, UINT(w), UINT(h), UINT(pitch), screen, nullptr, nullptr, nullptr};  // (no colour table: never 8-bit)
         const LONG status = g_kmtCreate(&c);
         if (screen) DeleteDC(screen);
         if (status == 0 && c.hDc) {

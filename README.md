@@ -109,7 +109,9 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
   - a critical section a thread releases goes to the thread waiting for it (`fairlocks`), where Windows since Vista lets the releasing thread take it straight back (KOF 99 Evolution's intro movie);
   - a multimedia timer's callback gets back the registers it should have kept (`safetimers`), as Windows up to XP gave them back; Windows 10 and 11 crash after a callback that doesn't keep them (Mega Man X's sound library). Sound callbacks (`waveOutOpen`, `midiOutOpen`) get them back too, with `selfsuspend=off`;
   - the game's joystick reads are answered from a thread of dd2d9's (`joypoll`), so a sound library that suspends the game's main thread, as Miles Sound System 3 does, can't leave it holding a joystick lock its own handler then waits for;
-  - a sound callback that suspends its own thread carries on (`selfsuspend=off`): Miles Sound System 3's sound callback suspends the main thread, and since Vista it runs on that very thread (Mega Man X stood still on a black screen). Anywhere else, a thread suspending itself is suspended.
+  - a sound callback that suspends its own thread carries on (`selfsuspend=off`): Miles Sound System 3's sound callback suspends the main thread, and since Vista it runs on that very thread (Mega Man X stood still on a black screen). Anywhere else, a thread suspending itself is suspended;
+  - a file the game opens with `FILE_FLAG_NO_BUFFERING` is opened without it (`nobuffering=off`), as Windows 95 and 98 ignored the flag; since NT every read of such a file must be whole, aligned sectors, and Biko crashed reading a 60-byte header that way;
+  - while Direct3D Retained Mode (`d3drm.dll`) is loaded, the back buffer gets a copy of the frame just shown after each `Flip` (`flipcopy=auto`), where a flip leaves it the frame before: Retained Mode clears and draws again only the squares that changed, and the rest of its next frame showed the older one (Biko: a mosaic of two frames).
 
 ### Differences from `ddraw.dll` on purpose
 
@@ -175,6 +177,8 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `fairlocks` | `on`: a critical section the game releases goes to the thread waiting for it, as up to Windows XP (KOF 99 Evolution's intro needs it); `off`: as Windows has it now |
 | `safetimers` | `on`: a multimedia timer's callback (`timeSetEvent`) gets back the registers, stack and direction flag it should have kept, as up to Windows XP (Mega Man X needs it on Windows 10 and 11); `off`: as Windows has it now |
 | `joypoll` | `on`: the game's joystick reads (`joyGetPosEx`, `joyGetPos`) are answered from what a thread of dd2d9's read a few milliseconds before (the first read of a joystick, and one after 2 s without any, goes to winmm when it isn't made inside a timer or sound callback); `off`: straight from winmm |
+| `nobuffering` | `off`: `FILE_FLAG_NO_BUFFERING` is dropped from the game's `CreateFileA`/`CreateFileW`, as Windows 9x ignored it (Biko); `on`: kept, as Windows has it |
+| `flipcopy` | `auto`: after each `Flip` the back buffer gets a copy of the frame just shown while Direct3D Retained Mode (`d3drm.dll`) is loaded (Biko needs it); `on`: always; `off`: never, as `ddraw.dll` has it |
 | `selfsuspend` | `off`: a sound callback (`waveOutOpen`, `midiOutOpen`) that suspends its own thread carries on, and gets back the registers it should have kept (Mega Man X needs it since Vista); `on`: as Windows has it |
 | `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth |
 | `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside what it locked |

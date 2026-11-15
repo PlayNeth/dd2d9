@@ -560,7 +560,7 @@ HRESULT Device7::Load(IDirectDrawSurface7* dstI, POINT* pt, IDirectDrawSurface7*
     if (dst->palette && src->palette) {
         if ((dst->palette->caps & 0x7) != (src->palette->caps & 0x7)) return DDERR_INVALIDPARAMS;
         memcpy(dst->palette->entries, src->palette->entries, sizeof(dst->palette->entries));
-        dst->palette->version++;
+        dst->palette->version = NextCpuSerial();  // (as SetEntries: textures shown with it are made again)
     }
     for (int k : {kCkDestBlt, kCkSrcBlt}) {
         dst->hasCk[k] = src->hasCk[k];

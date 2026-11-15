@@ -249,7 +249,8 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
             dev->SetViewport(&whole);
             for (const GpuSurf::Fill& f : zs->fills) {
                 D3DRECT rect = {f.r.left, f.r.top, f.r.right, f.r.bottom};
-                // (A fill of the whole buffer starts emulated W buffering's scale again, as Clear.)
+                // (A fill of the whole buffer starts emulated W buffering's scale again, as Clear: a new
+                // Z buffer's first one here, the game's in GpuDepthFill too.)
                 if (f.r.left <= 0 && f.r.top <= 0 && f.r.right >= LONG(whole.Width) && f.r.bottom >= LONG(whole.Height))
                     g_wScale = 1.0f, g_wWritten = false;
                 dev->Clear(1, &rect, D3DCLEAR_ZBUFFER | ((zs->fmt == D3DFMT_D24S8 || zs->fmt == kIntz) ? D3DCLEAR_STENCIL : 0), 0, f.z, 0);

@@ -4,3 +4,7 @@
 ; In front of dd2d9: rename dd2d9's ddraw.dll to dd2d9.dll and set target=dd2d9.dll
 ; In front of another wrapper: rename its ddraw.dll (real.dll, say) and set target=real.dll
 target=
+
+; How often a whole frame is logged, every call in it: once every this many frames.
+; 1 logs every frame (a large log: a few minutes of play can reach hundreds of MB).
+every=300

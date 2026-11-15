@@ -343,6 +343,32 @@ HRESULT Device::ExecuteI(ExecBuf* eb, DWORD flags) {
                 idx[3 * i + 1] = t.v2;
                 idx[3 * i + 2] = t.v3;
             }
+            // The extents also grow by the part of a triangle the clip volume cuts that is
+            // drawn (its corners off the viewport don't count, the points where its edges
+            // cross the viewport's do), as XP's clipper grows them by the vertices it makes.
+            // Retained Mode clears and redraws the 32-pixel squares the extents touch: by the
+            // corners inside alone, an object crossing the screen's edge, or a wall with all
+            // its corners off it, came back too small or empty (Biko: black squares and stale
+            // pieces behind the characters).
+            if (count && flags == D3DEXECUTE_CLIPPED && !copied && !rs[30]) {
+                for (DWORD i = 0; i < count; i++) {
+                    const WORD a = idx[3 * i], b = idx[3 * i + 1], c = idx[3 * i + 2];
+                    if (a >= tl.size() || b >= tl.size() || c >= tl.size()) continue;
+                    const WORD ca = tl[a].code & 0x3F, cb = tl[b].code & 0x3F, cc = tl[c].code & 0x3F;
+                    if ((ca & cb & cc) || !(ca | cb | cc)) continue;  // wholly outside, or inside (counted)
+                    PVert poly[kMaxPoly] = {tl[a], tl[b], tl[c]};
+                    const int pn = ClipPoly(poly, 3, ca | cb | cc, 0, true);
+                    for (int j = 0; j < pn; j++) {
+                        Project(map, &poly[j]);
+                        const float x = std::clamp(poly[j].sx, map.X, map.X + map.W);
+                        const float y = std::clamp(poly[j].sy, map.Y, map.Y + map.H);
+                        ext[0] = std::min(ext[0], x);
+                        ext[1] = std::min(ext[1], y);
+                        ext[2] = std::max(ext[2], x);
+                        ext[3] = std::max(ext[3], y);
+                    }
+                }
+            }
             if (count) drawTL(D3DPT_TRIANGLELIST, idx.data(), 3 * count);
             break;
         }

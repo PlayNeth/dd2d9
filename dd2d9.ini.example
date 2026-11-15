@@ -96,6 +96,17 @@ joypoll=on
 ; runs it on that very thread, which then never wakes up (Mega Man X: a black screen).
 ; Anywhere else a thread suspending itself is suspended. on: as Windows has it.
 selfsuspend=off
+; Files the game opens with FILE_FLAG_NO_BUFFERING: off (default) opens them without it, as
+; Windows 95 and 98 ignored the flag. Since NT every read and write of such a file must be
+; whole sectors into sector-aligned memory, or it fails; Biko reads a 60-byte header that
+; way, doesn't notice the failure and crashes. on: the flag kept, as Windows has it.
+nobuffering=off
+; After each Flip, the back buffer gets a copy of the frame just shown: auto (default) does so
+; while Direct3D Retained Mode (d3drm.dll) is loaded, on always, off never. A flip leaves the
+; back buffer the frame before the one shown; Retained Mode clears and draws again only the
+; squares that changed, so the rest of its next frame showed that older frame (Biko: a mosaic
+; of two frames, and pieces left behind the characters).
+flipcopy=auto
 ; The desktop's colour depth DirectDraw reports before the game sets its own mode: 32
 ; (default), 24 or 16. Some games refuse to start unless the desktop is 16-bit, even ones
 ; that then switch to their own mode (Moto Racer: "16 bit screen mode required"): set 16 for

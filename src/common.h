@@ -18,11 +18,12 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.7.3"
+#define DD2D9_VERSION "1.7.4"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
 enum { kD3DAuto, kD3DOn, kD3DOff };
+enum { kFlipCopyAuto, kFlipCopyOn, kFlipCopyOff };
 
 // Defaults behave like the original DirectDraw.
 struct Config {
@@ -51,6 +52,8 @@ struct Config {
     bool heapZero = true;          // heapzero=on: the game's HeapAlloc memory comes zeroed (compat.cpp)
     bool fairLocks = true;         // fairlocks=on: a released critical section goes to the thread waiting for it (compat.cpp)
     bool selfSuspend = false;      // selfsuspend=off: a sound callback suspending its own thread carries on (compat.cpp)
+    int flipCopy = kFlipCopyAuto;  // flipcopy=auto: after a flip the back buffer gets the frame just shown, with Retained Mode loaded (attach.cpp)
+    bool noBuffering = false;      // nobuffering=off: FILE_FLAG_NO_BUFFERING dropped from the game's CreateFile (compat.cpp)
     bool joyPoll = true;           // joypoll=on: the game's joystick reads answered from dd2d9's own (compat.cpp)
     bool safeTimers = true;        // safetimers=on: timeSetEvent callbacks called with their registers kept (compat.cpp)
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s

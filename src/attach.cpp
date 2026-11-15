@@ -1,5 +1,6 @@
 // Attached surfaces and flip chains: AddAttachedSurface and its kin, Flip.
 #include "wrappers.h"
+#include "hooks.h"
 
 #include <algorithm>
 
@@ -361,6 +362,21 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         // As ddraw.dll: only the front and the buffer it swapped with count as changed.
         chain[0]->BumpUniqueness();
         chain[target ? k : 1]->BumpUniqueness();
+        // flipcopy: the buffer the front one swapped with then gets the frame just shown, as a
+        // present that copies leaves the back buffer, where a flip leaves it the frame before.
+        // Direct3D Retained Mode clears and draws again only the squares that changed since
+        // its last frame, into whatever the back buffer holds: with the frame before there,
+        // every square it left alone showed that older frame (Biko: a mosaic of two frames,
+        // and pieces that stayed behind the characters). auto: while d3drm.dll is loaded.
+        if (g_config.flipCopy == kFlipCopyOn || (g_config.flipCopy == kFlipCopyAuto && RetainedModeLoaded())) {
+            static bool logged;
+            if (!logged) {
+                logged = true;
+                DD2D9_LOG("flipcopy: after each flip the back buffer gets the frame just shown%s",
+                          g_config.flipCopy == kFlipCopyAuto ? " (Direct3D Retained Mode is loaded)" : "");
+            }
+            chain[target ? k : 1]->BltLocked(nullptr, chain[0], nullptr, DDBLT_WAIT, nullptr, false, false);
+        }
         if (OverlayShown()) overlayDest->dd->MarkOverlayDirty();
         if (isPrimary) {
             Presenter* p = dd->GetPresenter();

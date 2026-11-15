@@ -91,6 +91,7 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         {"safetimers", &g_config.safeTimers},
         {"joypoll", &g_config.joyPoll},
         {"selfsuspend", &g_config.selfSuspend},
+        {"nobuffering", &g_config.noBuffering},
     };
     for (const auto& b : kBools) {
         if (key != b.key) continue;
@@ -121,6 +122,11 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         int b;
         if (v == "auto") g_config.d3d = kD3DAuto;
         else if (ParseBool(v, &b)) g_config.d3d = b ? kD3DOn : kD3DOff;
+        else ok = false;
+    } else if (key == "flipcopy") {
+        int b;
+        if (v == "auto") g_config.flipCopy = kFlipCopyAuto;
+        else if (ParseBool(v, &b)) g_config.flipCopy = b ? kFlipCopyOn : kFlipCopyOff;
         else ok = false;
     } else if (key == "mouse") {
         // Gone in 1.3.0: the game always sees its mode's coordinates when it is shown scaled or

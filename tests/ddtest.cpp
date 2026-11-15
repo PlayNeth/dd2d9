@@ -398,6 +398,44 @@ static int RunUnit() {
     }
 
     {
+        // A file opened with FILE_FLAG_NO_BUFFERING is opened without it (nobuffering=off), as
+        // Windows 9x ignored the flag: Biko reads a 60-byte header into a stack buffer from a
+        // file it opens so, which fails since NT. The file's mode, where ntdll tells it, has no
+        // FILE_NO_INTERMEDIATE_BUFFERING; and the unaligned read works (Wine never enforced the
+        // flag: there only the mode tells).
+        char path[MAX_PATH], dir[MAX_PATH];
+        GetTempPathA(sizeof(dir), dir);
+        GetTempFileNameA(dir, "dd2", 0, path);
+        if (HANDLE w = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr); w != INVALID_HANDLE_VALUE) {
+            static BYTE data[4096];
+            for (size_t i = 0; i < sizeof(data); i++) data[i] = BYTE(i * 7);
+            DWORD wrote = 0;
+            WriteFile(w, data, sizeof(data), &wrote, nullptr);
+            CloseHandle(w);
+        }
+        HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                               FILE_FLAG_NO_BUFFERING | FILE_FLAG_RANDOM_ACCESS, nullptr);
+        BYTE header[64 + 3];
+        DWORD got = 0;
+        const BOOL read = f != INVALID_HANDLE_VALUE && ReadFile(f, header + 3, 60, &got, nullptr);
+        bool same = read && got == 60;
+        for (DWORD i = 0; same && i < 60; i++) same = header[3 + i] == BYTE(i * 7);
+        // (FileModeInformation: 16; FILE_NO_INTERMEDIATE_BUFFERING: 8.)
+        using QueryFn = LONG(WINAPI*)(HANDLE, void*, void*, ULONG, int);
+        const auto query = reinterpret_cast<QueryFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationFile")));
+        ULONG_PTR iosb[2] = {};
+        ULONG mode = 0;
+        const bool told = f != INVALID_HANDLE_VALUE && query && query(f, iosb, &mode, sizeof(mode), 16) >= 0;
+        CHECK(same && (!told || !(mode & 8)),
+              "a file opened with FILE_FLAG_NO_BUFFERING reads 60 bytes into an unaligned buffer (read %d, %lu bytes, "
+              "mode 0x%lx%s)",
+              int(read), got, mode, told ? "" : ", not told");
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        DeleteFileA(path);
+    }
+
+    {
         // Process heap memory comes zeroed, as fresh memory did on Windows 9x (Daytona USA
         // Deluxe released "textures" from a table it hadn't cleared yet): a block freed full of
         // data, allocated again without HEAP_ZERO_MEMORY.
@@ -1582,6 +1620,49 @@ static int RunFullscreen8(int modeW, int modeH) {
     }
     CHECK(flipErrors == 0, "flipping after focus returns (%d errors)", flipErrors);
 
+    // flipcopy=auto: a flip leaves the back buffer the frame before, as ddraw.dll's; with
+    // Direct3D Retained Mode loaded it gets the frame just shown (Retained Mode redraws only
+    // the squares that changed, into whatever the back buffer holds: Biko's mosaic of two
+    // frames). Without d3drm.dll again (unloaded), a flip is a flip again.
+    {
+        auto fill = [&](BYTE c) {
+            DDBLTFX fx = {};
+            fx.dwSize = sizeof(fx);
+            fx.dwFillColor = c;
+            back->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+        };
+        auto backPixel = [&] {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            int c = -1;
+            if (SUCCEEDED(back->Lock(nullptr, &d, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                c = static_cast<const BYTE*>(d.lpSurface)[(modeH / 2) * d.lPitch + modeW / 2];
+                back->Unlock(nullptr);
+            }
+            return c;
+        };
+        fill(21);
+        front->Flip(nullptr, DDFLIP_WAIT);
+        fill(22);
+        front->Flip(nullptr, DDFLIP_WAIT);
+        const int plain = backPixel();  // the frame before the one shown: 21
+        const HMODULE rm = LoadLibraryA("d3drm.dll");
+        int copied = -1, after = -1;
+        if (rm) {
+            fill(23);
+            front->Flip(nullptr, DDFLIP_WAIT);
+            copied = backPixel();  // the frame just shown: 23
+            FreeLibrary(rm);
+            fill(24);
+            front->Flip(nullptr, DDFLIP_WAIT);
+            after = backPixel();  // 23 again, as the frame before
+        }
+        CHECK(plain == 21 && (!rm || (copied == 23 && after == 23)),
+              "after a flip the back buffer holds the frame before (%d: 21); with d3drm.dll loaded the one just shown "
+              "(%d: 23), and the one before again once it is unloaded (%d: 23)%s",
+              plain, copied, after, rm ? "" : " [no d3drm.dll here: not tried]");
+    }
+
     // Hold the last frame so it can be captured.
     for (int i = 0; i < 300; i++) {
         Pump();
@@ -1935,6 +2016,73 @@ static int RunExecute() {
     CHECK(tri == 0xFFFFFF && clippedSpan == 0x00FF00 && unclippedSpan == 0x00FF00,
           "D3DOP_SPAN after a COPY: clipped 0x%06lx, unclipped 0x%06lx (both drawn), triangle 0x%06lx", clippedSpan,
           unclippedSpan, tri);
+
+    // The extents of a clipped execute grow by the part of a triangle that is drawn, where
+    // the clip volume cuts it: a quad over the whole viewport whose corners are all off it
+    // reports the whole viewport. Retained Mode clears and redraws the squares the extents
+    // touch (Biko's black squares). A quad wholly off to the left still reports nothing.
+    {
+        IDirect3DExecuteBuffer* eb3 = nullptr;
+        D3DEXECUTEBUFFERDESC ed3 = {};
+        ed3.dwSize = sizeof(ed3);
+        ed3.dwFlags = D3DDEB_BUFSIZE;
+        ed3.dwBufferSize = 512;
+        D3DRECT whole = {}, left = {};
+        bool ran = false;
+        for (int pass = 0; pass < 2; pass++) {
+            if (eb3) eb3->Release();
+            eb3 = nullptr;
+            if (FAILED(dev->CreateExecuteBuffer(&ed3, &eb3, nullptr)) || FAILED(eb3->Lock(&ed3))) break;
+            BYTE* b3 = static_cast<BYTE*>(ed3.lpData);
+            // Pass 0: corners at -3..3 (the viewport is -1..1). Pass 1: x from -9 to -3.
+            const float x0 = pass ? -9.0f : -3.0f, x1 = pass ? -3.0f : 3.0f;
+            const D3DLVERTEX qv[4] = {{{x0}, {3.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}},
+                                      {{x1}, {3.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}},
+                                      {{x0}, {-3.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}},
+                                      {{x1}, {-3.0f}, {0.5f}, 0, {0xFFFFFFFF}, {0}, {0}, {0}}};
+            memcpy(b3, qv, sizeof(qv));
+            p = b3 + sizeof(qv);
+            const DWORD start3 = DWORD(p - b3);
+            ins(D3DOP_SETSTATUS, sizeof(D3DSTATUS), 1);
+            D3DSTATUS st = {};
+            st.dwFlags = D3DSETSTATUS_ALL;
+            st.dwStatus = 0x01FFF000;
+            st.drExtent = {2048, 2048, 0, 0};  // (empty, as Retained Mode resets it)
+            memcpy(p, &st, sizeof(st));
+            p += sizeof(st);
+            ins(D3DOP_PROCESSVERTICES, sizeof(D3DPROCESSVERTICES), 1);
+            D3DPROCESSVERTICES pv3 = {D3DPROCESSVERTICES_TRANSFORM | D3DPROCESSVERTICES_UPDATEEXTENTS, 0, 0, 4};
+            memcpy(p, &pv3, sizeof(pv3));
+            p += sizeof(pv3);
+            ins(D3DOP_TRIANGLE, sizeof(D3DTRIANGLE), 2);
+            D3DTRIANGLE q[2] = {};
+            q[0].v1 = 0, q[0].v2 = 1, q[0].v3 = 2, q[0].wFlags = D3DTRIFLAG_EDGEENABLETRIANGLE;
+            q[1].v1 = 2, q[1].v2 = 1, q[1].v3 = 3, q[1].wFlags = D3DTRIFLAG_EDGEENABLETRIANGLE;
+            memcpy(p, q, sizeof(q));
+            p += sizeof(q);
+            ins(D3DOP_EXIT, 0, 0);
+            eb3->Unlock();
+            D3DEXECUTEDATA xd3 = {};
+            xd3.dwSize = sizeof(xd3);
+            xd3.dwVertexCount = 4;
+            xd3.dwInstructionOffset = start3;
+            xd3.dwInstructionLength = DWORD(p - b3) - start3;
+            eb3->SetExecuteData(&xd3);
+            dev->BeginScene();
+            const HRESULT xr = dev->Execute(eb3, vp, D3DEXECUTE_CLIPPED);
+            dev->EndScene();
+            D3DEXECUTEDATA got = {};
+            got.dwSize = sizeof(got);
+            eb3->GetExecuteData(&got);
+            (pass ? left : whole) = got.dsStatus.drExtent;
+            ran = SUCCEEDED(xr);
+        }
+        if (eb3) eb3->Release();
+        CHECK(ran && whole.x1 == 0 && whole.y1 == 0 && whole.x2 == 64 && whole.y2 == 64 && left.x2 - left.x1 <= 1,
+              "a clipped execute's extents count the drawn part of a triangle the viewport cuts: the quad over the "
+              "viewport %ld,%ld-%ld,%ld (0,0-64,64), the one off it %ld,%ld-%ld,%ld (none)",
+              whole.x1, whole.y1, whole.x2, whole.y2, left.x1, left.y1, left.x2, left.y2);
+    }
 
     eb->Release();
     vp->Release();

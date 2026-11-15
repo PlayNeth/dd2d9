@@ -34,7 +34,9 @@ are marked `(inside)` and indented.
 Frequent calls (draws, render and texture states, locks, blits, flips, `AddRef` and
 `Release`) are logged for the first 20000 of them, then for one whole frame every 300
 frames (between `==== frame N ====` lines), and whenever they fail. Every other call is
-logged up to 5000 times per method, and always when it fails.
+logged up to 5000 times per method, always within those whole frames, and always when it
+fails. `every=` in `ddtrace.ini` changes how often a whole frame is logged; `every=1` logs
+every frame.
 
 ## How it works
 

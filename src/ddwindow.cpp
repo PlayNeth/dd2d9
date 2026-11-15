@@ -273,12 +273,6 @@ HMONITOR DDraw::GameMonitor(HWND h) const {
     return MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY);
 }
 
-// The window covers its monitor in exclusive mode. ddraw.dll leaves the window's style
-// alone and draws over the whole screen, frame and all; dd2d9 presents into the client
-// area, so the window keeps its style (as games read it) and grows until its client
-// area is the monitor, the frame just outside it. With more than one monitor a window region
-// shows only that part, so the frame can't appear on a monitor next to this one
-// (NeedsCoverRegion). g_displayLock held.
 // Whether the covering window (rectangle w) gets a region showing only the monitor (m): where
 // its frame lies outside the monitor and there is another monitor for it to show on. With one
 // monitor the frame is off the screen and nothing more is needed. And a region is not free
@@ -291,6 +285,13 @@ static bool NeedsCoverRegion(const RECT& w, const RECT& m) {
     return !EqualRect(&w, &m) && GetSystemMetrics(SM_CMONITORS) > 1;
 }
 
+// Takes the window's region away, if it has one (a window without one is left alone: setting
+// none again still has the frame worked out anew).
+static void ClearRegion(HWND h) {
+    RECT box;
+    if (GetWindowRgnBox(h, &box) != ERROR) SetWindowRgn(h, nullptr, TRUE);
+}
+
 // The frame the window's style gives it, as AdjustWindowRectEx works it out (around an empty
 // rectangle): what CheckCover compares to tell a style change Windows hasn't applied yet.
 static RECT FrameOf(HWND h) {
@@ -299,6 +300,12 @@ static RECT FrameOf(HWND h) {
     return r;
 }
 
+// The window covers its monitor in exclusive mode. ddraw.dll leaves the window's style
+// alone and draws over the whole screen, frame and all; dd2d9 presents into the client
+// area, so the window keeps its style (as games read it) and grows until its client
+// area is the monitor, the frame just outside it. With more than one monitor a window region
+// shows only that part, so the frame can't appear on a monitor next to this one
+// (NeedsCoverRegion). g_displayLock held.
 void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     const ImageChangedAtExit imageChanged;  // (the window may move from another thread)
     MONITORINFO mi = {};
@@ -322,7 +329,7 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     // them: one worked out at -32000,-32000 hid the whole restored window (FlyingSB after
     // Alt+Tab: nothing shown). CheckCover covers it again once it is restored.
     if (IsIconic(hwnd_)) {
-        SetWindowRgn(hwnd_, nullptr, TRUE);
+        ClearRegion(hwnd_);
         return;
     }
     // A frame other than AdjustWindowRectEx's (a game handling WM_NCCALCSIZE, a menu bar
@@ -344,8 +351,7 @@ void DDraw::CoverMonitor(HWND insertAfter, UINT flags) {
     RECT w = {};
     GetWindowRect(hwnd_, &w);
     if (!NeedsCoverRegion(w, m)) {  // (one it got with another frame or monitor count goes)
-        RECT box;
-        if (GetWindowRgnBox(hwnd_, &box) != ERROR) SetWindowRgn(hwnd_, nullptr, TRUE);
+        ClearRegion(hwnd_);
         return;
     }
     if (HRGN rgn = CreateRectRgn(m.left - w.left, m.top - w.top, m.right - w.left, m.bottom - w.top)) {
@@ -369,7 +375,7 @@ void DDraw::Uncover() {
         if (!IsIconic(coverHwnd_) && w.left <= m.left && w.top <= m.top && w.right >= m.right && w.bottom >= m.bottom)
             SetWindowPos(coverHwnd_, nullptr, m.left, m.top, m.right - m.left, m.bottom - m.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowRgn(coverHwnd_, nullptr, TRUE);
+        ClearRegion(coverHwnd_);
     }
     coverHwnd_ = nullptr;
     coverSize_ = {};

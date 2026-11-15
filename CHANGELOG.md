@@ -3,6 +3,53 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.7.4
+- **A file the game opens with `FILE_FLAG_NO_BUFFERING` is opened without it**
+  (`nobuffering=off`, the default), as Windows 95 and 98 ignored the flag. Since NT, every
+  read and write of such a file must be a whole number of sectors, at an aligned offset,
+  into sector-aligned memory, or it fails. Biko opens its animation files this way and reads
+  their 60-byte header into a stack buffer: the read failed, the game didn't check, and it
+  copied the next frames to an address made from the unread header, which crashed it in a
+  `memcpy` (with Windows' own ddraw too). `CreateFileA` and `CreateFileW` in the game's
+  modules drop the flag; reads that follow the rules work the same, only through the file
+  cache. The log names the first file opened this way. `nobuffering=on` keeps the flag.
+- **Direct3D execute buffers report extents that count the drawn part of a triangle the
+  viewport cuts.** In a clipped Execute, only the vertices inside the viewport grew the
+  extents. Now a triangle that is partly outside is clipped to the viewport for them too, and
+  the points where its edges cross the viewport's count, as XP's clipper counted the vertices
+  it made. Direct3D Retained Mode reads these extents after every Execute to know which
+  32-pixel squares to clear and draw again in the next frames. An object crossing the edge of
+  the screen, or a wall whose corners are all off it, came back with too small an area or
+  none. In Biko its squares were never cleared or redrawn: black squares and stale pieces of
+  earlier frames behind the characters.
+- **With Direct3D Retained Mode loaded, the back buffer gets the frame just shown after each
+  `Flip`** (`flipcopy=auto`, the default; `on`: always; `off`: never). A flip leaves the back
+  buffer the frame before the one shown. Retained Mode clears and draws again only the
+  squares that changed since its last frame, into whatever the back buffer holds, so every
+  square it left alone showed the older frame: in Biko a mosaic of two frames, a black square
+  around the character and pieces that stayed behind (with Windows' own ddraw too). The copy
+  is made on the GPU for a buffer Direct3D draws into. The log says so at the first such
+  flip.
+- Direct3D 2-6: a device whose render target was set to a Z buffer no longer crashes at the
+  next render state once that Z buffer is released. `SetRenderTarget` refuses a Z buffer but
+  has switched to it by then, without a reference (as XP); when the surface went, the state
+  that feeds the colour key's alpha test read the missing target.
+- Emulated W buffering: a `DDBLT_DEPTHFILL` of the whole Z buffer starts the depth scale
+  again whenever it is made, as a whole `Clear` does. It did only when the next draw applied
+  the fill, not when a lock of the Z buffer or an upload of the game's own depth writes took
+  it first: the scale of the frame before then stayed for the frame.
+- A texture `Load` that copies the source's palette marks the destination's palette changed
+  with a value no later change of it can repeat (the counter `SetEntries` uses), so a texture
+  shown with it is always made again after the next change.
+- ddtrace: `every=` in `ddtrace.ini` sets how often a whole frame is logged (300 by default;
+  1 logs every frame). In those frames every call is logged, the ones otherwise capped at
+  5000 per method too.
+- `ddtest` checks each: a file opened with the flag reads 60 bytes into an unaligned buffer;
+  a clipped execute's quad over the whole viewport, its corners all off it, reports the whole
+  viewport (while one off to the side reports nothing); and after a flip the back buffer
+  holds the frame before, the one just shown while `d3drm.dll` is loaded, and the frame
+  before again once it is unloaded.
+
 ## 1.7.3
 Mega Man X starts and runs on Windows 10 and 11. Its sound library, Miles Sound System 3
 (`wail32.dll`, 1995), relied on three things Windows no longer does; each is now handled by

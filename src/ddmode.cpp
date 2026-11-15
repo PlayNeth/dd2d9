@@ -497,6 +497,8 @@ void DDraw::TakeOverExclusive(DDraw* prev, HWND hwnd) {
     if (prev->coverHwnd_ == hwnd) {  // the window it grew past the screen: this one's to undo now
         coverHwnd_ = prev->coverHwnd_;
         coverSize_ = prev->coverSize_;
+        coverPos_ = prev->coverPos_;
+        coverFrame_ = prev->coverFrame_;
         prev->coverHwnd_ = nullptr;
         prev->coverSize_ = {};
     }
