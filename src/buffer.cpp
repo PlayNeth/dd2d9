@@ -9,7 +9,8 @@ namespace dd2d9 {
 static bool DibFormat(const Format& f) {
     // Red in the low byte (A8B8G8R8, X8B8G8R8): ddraw.dll on Vista and later has no DC for it.
     if (f.bpp == 32 && f.r == 0xFF && f.b == 0xFF0000) return false;
-    return !f.zbuf && !f.fourcc && !f.bump && (f.bpp == 8 || f.bpp == 16 || f.bpp == 24 || f.bpp == 32);
+    if (f.palLow) return f.bpp != 2;  // 1 and 4 bits (GDI has no 2-bit bitmap)
+    return !f.zbuf && !f.fourcc && !f.CopyOnly() && (f.bpp == 8 || f.bpp == 16 || f.bpp == 24 || f.bpp == 32);
 }
 
 // A top-down DIB section for format f (DibFormat(f)). As ddraw.dll's: 8-bit with a
@@ -24,10 +25,11 @@ static HBITMAP MakeDib(int w, int h, const Format& f, uint8_t** bits) {
     bi.h.biHeight = -h;  // top-down
     bi.h.biPlanes = 1;
     bi.h.biBitCount = WORD(f.bpp);
-    if (f.pal8) {
+    if (f.Palettized()) {
+        const DWORD n = 1u << f.bpp;
         bi.h.biCompression = BI_RGB;
-        bi.h.biClrUsed = 256;
-        for (int i = 0; i < 256; i++) bi.colors[i] = DWORD(i) * 0x010101u;
+        bi.h.biClrUsed = n;
+        for (DWORD i = 0; i < n; i++) bi.colors[i] = (i * 255 / (n - 1)) * 0x010101u;
     } else if (f.bpp == 24 || f.bpp == 32) {
         bi.h.biCompression = BI_RGB;
     } else {
@@ -52,7 +54,7 @@ LONG Buffer::PitchFor(int w, const Format& f) {
     // The luma rows (pitch 256-byte aligned, as overlay hardware had it: Wine's
     // test_yv12_overlay), then the two chroma planes at half the pitch.
     if (f.Planar()) return (w + 255) & ~255;
-    return ((w * LONG(f.Bytes())) + 7) & ~7;
+    return LONG((f.RowBytes(DWORD(w)) + 7) & ~7u);
 }
 
 Buffer* Buffer::Create(int w, int h, const Format& f) {
@@ -142,14 +144,14 @@ void LoadKmt() {
 
 // The D3DDDIFORMAT for f, or 0 if GDI can't take it.
 UINT KmtFormat(const Format& f) {
-    if (f.zbuf || f.fourcc || f.bump) return 0;
+    if (f.zbuf || f.fourcc || f.CopyOnly()) return 0;
     // 8-bit surfaces get a DIB copy instead (Buffer::GetDC): their DC's colour table has to
     // follow the palette (GetDC, Palette::SetEntries), and on Windows SetDIBColorTable leaves
     // a DC from D3DKMTCreateDCFromMemory with the table it was made with (Wine's follows).
     // Pal95's text strip kept the grey ramp it was made with: its white text became index
     // 255, its transparent colour, and only the shadow showed. (paltext on Windows 11: white
     // drawn as 255 whatever the palette; Wine: as the palette's white.)
-    if (f.pal8) return 0;
+    if (f.Palettized()) return 0;
     if (f.bpp == 32 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return f.a == 0xFF000000u ? 21 : 22;
     if (f.bpp == 32 && f.r == 0x3FF00000 && f.g == 0xFFC00 && f.b == 0x3FF) return 35;  // A2R10G10B10
     if (f.bpp == 24 && f.r == 0xFF0000 && f.g == 0xFF00 && f.b == 0xFF) return 20;
@@ -210,7 +212,7 @@ HDC Buffer::GetDC() {
 }
 
 void Buffer::CopyToShadow() {
-    const LONG sp = DibPitch(w, fmt), row = LONG(w * fmt.Bytes());
+    const LONG sp = DibPitch(w, fmt), row = LONG(fmt.RowBytes(DWORD(w)));
     for (int y = 0; y < h; y++) memcpy(shadowBits + y * sp, Row(y), size_t(row));
     shadowWas.assign(shadowBits, shadowBits + size_t(sp) * size_t(h));
 }
@@ -220,7 +222,7 @@ void Buffer::CopyToShadow() {
 // is out stay (copied back whole, the shadow's older copy of them overwrote them).
 void Buffer::EndDC() {  // (GdiFlush done by the caller)
     if (!shadow) return;
-    const LONG sp = DibPitch(w, fmt), row = LONG(w * fmt.Bytes());
+    const LONG sp = DibPitch(w, fmt), row = LONG(fmt.RowBytes(DWORD(w)));
     const bool snapshot = shadowWas.size() >= size_t(sp) * size_t(h);
     for (int y = 0; y < h; y++) {
         const uint8_t* now = shadowBits + y * sp;

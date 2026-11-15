@@ -636,8 +636,8 @@ presentation does this), or the game's DX7 state is silently changed.
 - D3DLIGHT7/D3DLIGHT9, D3DMATERIAL7/D3DMATERIAL9 and D3DVIEWPORT7/D3DVIEWPORT9 have identical layouts. Validate
   lights with XP's rules before calling D3D9 (the D3D9 runtime's own checks differ; DXVK checks little).
 - D3D9 drivers (DXVK: 8) limit simultaneously enabled lights (D3DCAPS9.MaxActiveLights); d3dim700 imposes no limit
-  for software-T&L devices. If a game enables more, pick the first N in DX7's active-list order (newest enabled
-  first, `LightEnableI_73928456.c:155-163`) and log it.
+  for software-T&L devices. With more enabled, dd2d9 lights those draws on the CPU with every light, as d3dim700's
+  front end does (`Device7::LightOnCpu`, the lighting ProcessVertices uses), and D3D9 draws the lit vertices.
 - Viewport: apply the MinZ/MaxZ nudge before passing it on. **D3D9 SetRenderTarget resets the viewport to the full
   target**; re-apply dd2d9's stored DX7 viewport after every D3D9 render-target change (DX7 keeps it).
 - Clip planes are world-space in both with the fixed-function pipeline; D3D9 accepts only `< MaxUserClipPlanes`

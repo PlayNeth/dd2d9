@@ -41,6 +41,23 @@ void AddBumpFormats(std::vector<DDPIXELFORMAT>* list) {
     bump(c.bumpX8L8V8U8, 24, 0xFF, 0xFF00, 0xFF0000);
 }
 
+void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list) {
+    const GpuCaps c = GpuGetCaps();
+    auto add = [&](bool have, DWORD flags, DWORD bits, DWORD lum, DWORD alpha) {
+        if (!have) return;
+        DDPIXELFORMAT f = {};
+        f.dwSize = sizeof(f);
+        f.dwFlags = flags;
+        f.dwLuminanceBitCount = bits;  // (the alpha depth of an alpha-only format, in the same place)
+        f.dwLuminanceBitMask = lum;
+        f.dwLuminanceAlphaBitMask = alpha;
+        list->push_back(f);
+    };
+    add(c.lumL8, DDPF_LUMINANCE, 8, 0xFF, 0);
+    add(c.lumA8L8, DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 16, 0xFF, 0xFF00);
+    add(c.alphaA8, DDPF_ALPHA, 8, 0, 0xFF);
+}
+
 float ZBiasToDepthBias(DWORD zbias) { return -0.000005f * float(LONG(zbias)); }
 
 bool Stage0AlphaUsed(const DWORD* const later[7], bool targetAlpha) {

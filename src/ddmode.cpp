@@ -583,7 +583,12 @@ HRESULT DDraw::TestCooperativeLevel() {
 // first, up to the first that can't be restored, whose error is the result.
 HRESULT DDraw::RestoreAllSurfaces() {
     Guard l;
-    const std::vector<Surface*> list = surfaces;  // Restore doesn't create or destroy any
+    std::vector<Surface*> list;
+    try {
+        list = surfaces;  // Restore doesn't create or destroy any
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     for (Surface* s : list) {
         if (s->root) continue;
         const HRESULT hr = s->Restore();

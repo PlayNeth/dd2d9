@@ -142,7 +142,7 @@ bool GpuDepthFill(Surface* s, const RECT& r, DWORD value) {
     // A fill of the whole buffer starts emulated W buffering's scale again, as a whole Clear
     // does (here, not only where the fill reaches the GPU: BindTargets, but also a read back
     // or the CPU's upload).
-    if (r.left <= 0 && r.top <= 0 && r.right >= s->buf->w && r.bottom >= s->buf->h) g_wScale = 1.0f, g_wWritten = false;
+    if (r.left <= 0 && r.top <= 0 && r.right >= s->buf->w && r.bottom >= s->buf->h) g->WStart();
     // A writable Z buffer with writes of the CPU's waiting to go up: the fill, drawn into the
     // CPU copy too, goes up with them, in order.
     if (g->ztex && s->buf->gpuStale) return true;

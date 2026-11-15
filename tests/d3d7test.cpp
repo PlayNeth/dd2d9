@@ -680,9 +680,168 @@ static int Run(int w, int h, int bpp) {
             dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
             dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
             dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
-            CHECK(((lit >> 16) & 0xFF) >= 200 && ((lit >> 8) & 0xFF) >= 20,
-                  "nine lights enabled, the brightest one last: the quad is 0x%06lx (red from the ninth, green from the others)",
+            CHECK(abs(int((lit >> 16) & 0xFF) - 230) <= 6 && abs(int((lit >> 8) & 0xFF) - 41) <= 4,
+                  "nine lights enabled: the quad is 0x%06lx (0xe62900: red 0.9 from the ninth, green 8 x 0.02 from the others)",
                   lit & 0xFFFFFF);
+        }
+
+        {
+            // The same scene lit by three lights (the GPU's own lighting) and with seven black
+            // lights more (past the GPU's eight: dd2d9's lighting): a point light with
+            // attenuation, a spotlight and a directional one, with ambient and specular, look
+            // the same either way.
+            struct LitVertex {
+                float x, y, z, nx, ny, nz;
+            };
+            // (Indexed, the first two vertices reached by no index: only the others are lit.)
+            const LitVertex quad[6] = {{9, 9, 9, 9, 9, 9}, {-9, -9, -9, -9, -9, -9},
+                                       {-0.5f, 0.5f, 0.5f, 0.3f, 0.1f, -0.948f}, {0.5f, 0.5f, 0.5f, -0.2f, 0.2f, -0.959f},
+                                       {-0.5f, -0.5f, 0.5f, 0.1f, -0.3f, -0.948f}, {0.5f, -0.5f, 0.5f, 0, 0, -1}};
+            WORD corners[6] = {2, 3, 4, 4, 3, 5};
+            D3DMATRIX id = {};
+            id._11 = id._22 = id._33 = id._44 = 1;
+            D3DMATRIX world = id, oldW, oldV, oldP;
+            world._11 = 1.2f, world._41 = 0.05f, world._42 = -0.03f;  // (a scale: normals renormalized or not, as the state says)
+            dev->GetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
+            dev->GetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
+            dev->GetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &world);
+            dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &id);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &id);
+            const D3DRENDERSTATETYPE states[] = {D3DRENDERSTATE_LIGHTING, D3DRENDERSTATE_AMBIENT, D3DRENDERSTATE_CULLMODE,
+                                                 D3DRENDERSTATE_ZENABLE, D3DRENDERSTATE_SPECULARENABLE,
+                                                 D3DRENDERSTATE_ALPHABLENDENABLE, D3DRENDERSTATE_NORMALIZENORMALS};
+            const DWORD values[] = {TRUE, 0x00101820, D3DCULL_NONE, D3DZB_FALSE, TRUE, FALSE, TRUE};
+            DWORD old[7] = {}, oldOp = 0;
+            for (int k = 0; k < 7; k++) {
+                dev->GetRenderState(states[k], &old[k]);
+                dev->SetRenderState(states[k], values[k]);
+            }
+            dev->GetTextureStageState(0, D3DTSS_COLOROP, &oldOp);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+            D3DMATERIAL7 mat = {}, oldMat = {};
+            mat.diffuse = {{0.9f}, {0.8f}, {1.0f}, {1.0f}};
+            mat.ambient = {{1.0f}, {0.5f}, {0.25f}, {1.0f}};
+            mat.specular = {{0.5f}, {0.6f}, {0.4f}, {1.0f}};
+            mat.emissive = {{0.02f}, {0.0f}, {0.04f}, {0.0f}};
+            mat.power = 6.0f;
+            dev->GetMaterial(&oldMat);
+            dev->SetMaterial(&mat);
+            D3DLIGHT7 lt[3] = {};
+            lt[0].dltType = D3DLIGHT_POINT;
+            lt[0].dcvDiffuse = {{0.8f}, {0.3f}, {0.1f}, {1.0f}};
+            lt[0].dcvSpecular = {{0.6f}, {0.6f}, {0.6f}, {1.0f}};
+            lt[0].dvPosition = {{0.4f}, {0.3f}, {-0.6f}};
+            lt[0].dvRange = 10.0f;
+            lt[0].dvAttenuation0 = 0.4f, lt[0].dvAttenuation1 = 0.5f, lt[0].dvAttenuation2 = 0.2f;
+            lt[1].dltType = D3DLIGHT_SPOT;
+            lt[1].dcvDiffuse = {{0.1f}, {0.4f}, {0.9f}, {1.0f}};
+            lt[1].dcvAmbient = {{0.1f}, {0.1f}, {0.0f}, {1.0f}};
+            lt[1].dvPosition = {{-0.3f}, {0.0f}, {-1.0f}};
+            lt[1].dvDirection = {{0.196f}, {0.0f}, {0.981f}};
+            lt[1].dvRange = 10.0f;
+            lt[1].dvAttenuation0 = 1.0f;
+            lt[1].dvFalloff = 1.0f, lt[1].dvTheta = 0.3f, lt[1].dvPhi = 0.9f;
+            lt[2].dltType = D3DLIGHT_DIRECTIONAL;
+            lt[2].dcvDiffuse = {{0.15f}, {0.2f}, {0.1f}, {1.0f}};
+            lt[2].dcvSpecular = {{0.3f}, {0.2f}, {0.5f}, {1.0f}};
+            lt[2].dvDirection = {{0.3f}, {-0.2f}, {0.933f}};
+            for (DWORD i = 0; i < 10; i++) {
+                D3DLIGHT7 black = {};
+                black.dltType = D3DLIGHT_DIRECTIONAL;
+                black.dvDirection.z = 1.0f;
+                dev->SetLight(i, i < 3 ? &lt[i] : &black);
+                dev->LightEnable(i, i < 3);
+            }
+            // The same quad three ways: as it is; with its own colours as the material's
+            // (COLORVERTEX: the diffuse and ambient from the vertex's diffuse, the specular from
+            // its specular); and blended between two world matrices by a weight per vertex.
+            struct ColourVertex {
+                float x, y, z, nx, ny, nz;
+                DWORD diffuse, specular;
+            };
+            struct BlendVertex {
+                float x, y, z, weight, nx, ny, nz;
+            };
+            static const DWORD kDiffuse[4] = {0xFFFF8040, 0xFF40FF80, 0xFF8040FF, 0xFFFFFFFF};
+            static const DWORD kSpecular[4] = {0xFF808080, 0xFFFF4040, 0xFF40FF40, 0xFF4040FF};
+            static const float kWeight[4] = {1.0f, 0.7f, 0.4f, 0.0f};
+            ColourVertex colour[6] = {};
+            BlendVertex blend[6] = {};
+            for (int k = 0; k < 6; k++) {
+                const LitVertex& q = quad[k];
+                colour[k] = {q.x, q.y, q.z, q.nx, q.ny, q.nz, k >= 2 ? kDiffuse[k - 2] : 0, k >= 2 ? kSpecular[k - 2] : 0};
+                blend[k] = {q.x, q.y, q.z, k >= 2 ? kWeight[k - 2] : 0.0f, q.nx, q.ny, q.nz};
+            }
+            D3DMATRIX world1 = id, oldW1;
+            world1._11 = 0.8f, world1._22 = 1.1f, world1._41 = -0.1f, world1._42 = 0.08f, world1._43 = 0.2f;
+            dev->GetTransform(D3DTRANSFORMSTATE_WORLD1, &oldW1);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD1, &world1);
+            D3DDEVICEDESC7 lc = {};
+            dev->GetCaps(&lc);
+            struct Variant {
+                const char* name;
+                DWORD fvf;
+                void* verts;
+                bool usable;
+            };
+            const Variant variants[3] = {
+                {"", D3DFVF_XYZ | D3DFVF_NORMAL, const_cast<LitVertex*>(quad), true},
+                {", the vertices' colours as the material's", D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_SPECULAR, colour, true},
+                {", blended between two world matrices", D3DFVF_XYZB1 | D3DFVF_NORMAL, blend, lc.wMaxVertexBlendMatrices >= 2},
+            };
+            static const D3DRENDERSTATETYPE kSources[5] = {D3DRENDERSTATE_COLORVERTEX, D3DRENDERSTATE_DIFFUSEMATERIALSOURCE,
+                                                           D3DRENDERSTATE_AMBIENTMATERIALSOURCE, D3DRENDERSTATE_SPECULARMATERIALSOURCE,
+                                                           D3DRENDERSTATE_VERTEXBLEND};
+            DWORD oldSources[5] = {};
+            for (int k = 0; k < 5; k++) dev->GetRenderState(kSources[k], &oldSources[k]);
+            static const int kAt[4][2] = {{0, 0}, {-90, -70}, {100, 60}, {-60, 90}};
+            DWORD seen[3][2][4] = {};
+            for (int v = 0; v < 3; v++) {
+                if (!variants[v].usable) continue;
+                dev->SetRenderState(D3DRENDERSTATE_COLORVERTEX, v == 1);
+                dev->SetRenderState(D3DRENDERSTATE_DIFFUSEMATERIALSOURCE, v == 1 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL);
+                dev->SetRenderState(D3DRENDERSTATE_AMBIENTMATERIALSOURCE, v == 1 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL);
+                dev->SetRenderState(D3DRENDERSTATE_SPECULARMATERIALSOURCE, v == 1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL);
+                dev->SetRenderState(D3DRENDERSTATE_VERTEXBLEND, v == 2 ? D3DVBLEND_1WEIGHT : D3DVBLEND_DISABLE);
+                for (int pass = 0; pass < 2; pass++) {
+                    for (DWORD i = 3; i < 10; i++) dev->LightEnable(i, pass == 1);
+                    dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                    dev->BeginScene();
+                    dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, variants[v].fvf, variants[v].verts, 6, corners, 6, 0);
+                    dev->EndScene();
+                    for (int k = 0; k < 4; k++) seen[v][pass][k] = pixel(w / 2 + kAt[k][0], h / 2 + kAt[k][1]) & 0xFFFFFF;
+                }
+            }
+            for (int k = 0; k < 5; k++) dev->SetRenderState(kSources[k], oldSources[k]);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD1, &oldW1);
+            for (DWORD i = 0; i < 10; i++) dev->LightEnable(i, FALSE);
+            dev->SetMaterial(&oldMat);
+            dev->SetTextureStageState(0, D3DTSS_COLOROP, oldOp);
+            for (int k = 0; k < 7; k++) dev->SetRenderState(states[k], old[k]);
+            dev->SetTransform(D3DTRANSFORMSTATE_WORLD, &oldW);
+            dev->SetTransform(D3DTRANSFORMSTATE_VIEW, &oldV);
+            dev->SetTransform(D3DTRANSFORMSTATE_PROJECTION, &oldP);
+            for (int v = 0; v < 3; v++) {
+                const DWORD (*sv)[4] = seen[v];
+                int worst = 0;
+                bool drawn = true;
+                for (int k = 0; k < 4; k++) {
+                    drawn = drawn && sv[0][k] != 0;
+                    for (int sh = 0; sh < 24; sh += 8)
+                        worst = std::max(worst, abs(int((sv[0][k] >> sh) & 0xFF) - int((sv[1][k] >> sh) & 0xFF)));
+                }
+                // (Each variant draws something else than the plain one: it is what it says.)
+                const bool own = v == 0 || memcmp(sv[0], seen[0][0], sizeof(seen[0][0])) != 0;
+                // (Blended: a little more room. dd2d9 weighs each matrix's normal as Windows'
+                // own lighting does, which Direct3D 9 implementations need not do to the bit.)
+                const int room = (bpp == 16 ? 9 : 3) + (v == 2 ? 5 : 0);
+                CHECK(!variants[v].usable || (drawn && own && worst <= room),
+                      "ten lights (seven of them black) light as the same three do alone%s%s: 0x%06lx 0x%06lx 0x%06lx 0x%06lx "
+                      "against 0x%06lx 0x%06lx 0x%06lx 0x%06lx (largest difference %d)",
+                      variants[v].name, variants[v].usable ? "" : " (not on this GPU)", sv[1][0], sv[1][1], sv[1][2], sv[1][3],
+                      sv[0][0], sv[0][1], sv[0][2], sv[0][3], worst);
+            }
         }
 
         {
@@ -793,6 +952,77 @@ static int Run(int w, int h, int bpp) {
                 CHECK((nearPx & 0x00FF00) && !(nearPx & 0xFF0000) && (hugePx & 0x0000FF) && !(hugePx & 0xFFFF00),
                       "W buffering after a vertex with a huge rhw: the near square 0x%06lx (green), the huge one 0x%06lx (blue)",
                       nearPx & 0xFFFFFF, hugePx & 0xFFFFFF);
+                // A depth fill of the Z buffer (DDBLT_DEPTHFILL) starts the depths over as a
+                // Clear does: a square at w 0.125 (green) drawn after it, though one at w 2 was
+                // drawn before it, stays in front of one at w 0.25 (red) drawn over it. Also
+                // with the Z buffer locked after the fill (the fill reaches the GPU another way).
+                for (int locked = 0; locked < 2; locked++) {
+                    dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                    dev->BeginScene();
+                    square(300, 150, 340, 190, 0.5f, 0.5f, 0xFF808080);
+                    dev->EndScene();
+                    DDBLTFX zfx = {};
+                    zfx.dwSize = sizeof(zfx);
+                    zfx.dwFillDepth = 0xFFFF;
+                    const HRESULT fr = zbuf->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL | DDBLT_WAIT, &zfx);
+                    if (locked) {
+                        DDSURFACEDESC2 zl = {};
+                        zl.dwSize = sizeof(zl);
+                        if (SUCCEEDED(zbuf->Lock(nullptr, &zl, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) zbuf->Unlock(nullptr);
+                    }
+                    dev->BeginScene();
+                    square(360, 150, 400, 190, 0.5f, 8.0f, 0xFF00FF00);
+                    square(360, 150, 400, 190, 0.5f, 4.0f, 0xFFFF0000);
+                    dev->EndScene();
+                    const DWORD px = pixel(380, 170);
+                    CHECK(SUCCEEDED(fr) && (px & 0x00FF00) && !(px & 0xFF0000),
+                          "W buffering after a depth fill%s (0x%08lx): the nearer square stays in front, 0x%06lx (green)",
+                          locked ? " and a lock of the Z buffer" : "", fr, px & 0xFFFFFF);
+                }
+                // Each Z buffer keeps its own depths: a square at w 0.125 (green) on the back
+                // buffer, a scene on another target with its own Z buffer, then a square at
+                // w 0.25 (red) over the first: behind it.
+                {
+                    DDSURFACEDESC2 td = {};
+                    td.dwSize = sizeof(td);
+                    td.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+                    td.dwWidth = td.dwHeight = 64;
+                    td.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+                    DDSURFACEDESC2 zd2 = zd;
+                    zd2.dwWidth = zd2.dwHeight = 64;
+                    IDirectDrawSurface7 *rt2 = nullptr, *z2 = nullptr;
+                    dd->CreateSurface(&td, &rt2, nullptr);
+                    dd->CreateSurface(&zd2, &z2, nullptr);
+                    DWORD px = 0xBAD;
+                    HRESULT sr = E_FAIL;
+                    if (rt2 && z2 && SUCCEEDED(rt2->AddAttachedSurface(z2))) {
+                        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                        dev->BeginScene();
+                        square(300, 150, 340, 190, 0.5f, 8.0f, 0xFF00FF00);
+                        dev->EndScene();
+                        sr = dev->SetRenderTarget(rt2, 0);
+                        if (SUCCEEDED(sr)) {
+                            D3DVIEWPORT7 small = {0, 0, 64, 64, 0.0f, 1.0f};
+                            dev->SetViewport(&small);
+                            dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0);
+                            dev->BeginScene();
+                            square(0, 0, 64, 64, 0.5f, 0.5f, 0xFF0000FF);
+                            dev->EndScene();
+                            dev->SetRenderTarget(back, 0);
+                            dev->SetViewport(&vp);
+                            dev->BeginScene();
+                            square(300, 150, 340, 190, 0.5f, 4.0f, 0xFFFF0000);
+                            dev->EndScene();
+                            px = pixel(320, 170);
+                        }
+                        rt2->DeleteAttachedSurface(0, z2);
+                    }
+                    if (z2) z2->Release();
+                    if (rt2) rt2->Release();
+                    CHECK(SUCCEEDED(sr) && (px & 0x00FF00) && !(px & 0xFF0000),
+                          "W buffering, a scene on another target and Z buffer in between (0x%08lx): the nearer square stays in "
+                          "front, 0x%06lx (green)", sr, px & 0xFFFFFF);
+                }
                 // Unreal Tournament's weapon, drawn after a depth clear, part of it nearer than
                 // w 1, and its HUD after it at w 1 (depth test, no depth written). Parts of the
                 // weapon at w 1.19 (yellow) and 1.67 (red), one nearer than w 1 (green, w 0.83),
@@ -948,7 +1178,12 @@ static int Run(int w, int h, int bpp) {
                 };
                 RECT inQuad = {316, 116, 324, 124}, corner = {500, 300, 508, 308};
                 const int zq = zat(&inQuad, 320, 120, DDLOCK_READONLY), zc = zat(&corner, 504, 304, DDLOCK_READONLY);
-                const bool readable = zc == 0xFFFF;
+                // (By the settings, not by what the lock reads: the CPU copy holds what the
+                // depth fills above wrote.)
+                char za[16] = "";
+                GetPrivateProfileStringA("dd2d9", "zaccess", "on", za, sizeof(za), ".\\dd2d9.ini");
+                const bool readable = GetPrivateProfileIntA("dd2d9", "antialiasing", 0, ".\\dd2d9.ini") < 2 &&
+                                      !(!_stricmp(za, "off") || !strcmp(za, "0") || !_stricmp(za, "false") || !_stricmp(za, "no"));
                 DDSURFACEDESC2 l = {};
                 l.dwSize = sizeof(l);
                 if (SUCCEEDED(zbuf->Lock(&corner, &l, DDLOCK_WAIT, nullptr))) {
@@ -963,7 +1198,7 @@ static int Run(int w, int h, int bpp) {
                 const DWORD blocked = pixel(504, 304), passed = pixel(520, 320);
                 const int wq = zat(nullptr, 320, 120, DDLOCK_READONLY), wf = zat(nullptr, 520, 320, DDLOCK_READONLY),
                           wz = zat(nullptr, 504, 304, DDLOCK_READONLY);
-                const bool ok = std::abs(zq - 16384) <= 2 && readable && blocked == 0 && passed == 0xFF0000 &&
+                const bool ok = std::abs(zq - 16384) <= 2 && zc == 0xFFFF && blocked == 0 && passed == 0xFF0000 &&
                                 std::abs(wq - 16384) <= 2 && std::abs(wf - 32768) <= 2 && wz == 0;
                 CHECK(ok || !readable, "Z buffer through DirectDraw%s: 8x8 locks read %d and %d, written 0 blocks 0x%06lx (beside 0x%06lx), whole lock reads %d, %d, %d",
                       readable ? "" : " (not readable here: antialiasing or zaccess=off)", zq, zc, blocked, passed, wq, wf, wz);
@@ -1125,6 +1360,229 @@ static int Run(int w, int h, int bpp) {
             }
             CHECK(found.u8v8 == ops && (!found.u8v8 || made), "bump maps: listed %d (bump-mapping caps %d), made %d", found.u8v8,
                   ops, made);
+        }
+
+        // Luminance and alpha-only textures (where the device lists them) and 1- and 4-bit
+        // palettized ones: made, filled through Lock and drawn. A texture Load between two
+        // palettized textures copies the pixels and the palette, also onto a texture drawn before.
+        {
+            struct Listed { bool l8 = false, a8l8 = false, a8 = false; } listed;
+            struct Cb {
+                static HRESULT WINAPI Fn(DDPIXELFORMAT* f, void* c) {
+                    auto* l = static_cast<Listed*>(c);
+                    if (f->dwFlags == DDPF_LUMINANCE && f->dwLuminanceBitCount == 8) l->l8 = true;
+                    if (f->dwFlags == (DDPF_LUMINANCE | DDPF_ALPHAPIXELS) && f->dwLuminanceBitCount == 16) l->a8l8 = true;
+                    if (f->dwFlags == DDPF_ALPHA && f->dwAlphaBitDepth == 8) l->a8 = true;
+                    return D3DENUMRET_OK;
+                }
+            };
+            dev->EnumTextureFormats(Cb::Fn, &listed);
+            auto makeTex = [&](const DDPIXELFORMAT& pf, DWORD caps, DWORD caps2) {
+                DDSURFACEDESC2 t = {};
+                t.dwSize = sizeof(t);
+                t.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+                t.dwWidth = t.dwHeight = 8;
+                t.ddsCaps.dwCaps = DDSCAPS_TEXTURE | caps;
+                t.ddsCaps.dwCaps2 = caps2;
+                t.ddpfPixelFormat = pf;
+                t.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+                IDirectDrawSurface7* tex = nullptr;
+                dd->CreateSurface(&t, &tex, nullptr);
+                return tex;
+            };
+            auto fill = [](IDirectDrawSurface7* tex, int rowBytes, BYTE even, BYTE odd) {
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (!tex || FAILED(tex->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) return false;
+                for (int y = 0; y < 8; y++)
+                    for (int x = 0; x < rowBytes; x++) (static_cast<BYTE*>(l.lpSurface) + y * l.lPitch)[x] = (x & 1) ? odd : even;
+                tex->Unlock(nullptr);
+                return true;
+            };
+            DWORD oldStates[8] = {};
+            const D3DRENDERSTATETYPE rsN[3] = {D3DRENDERSTATE_ALPHABLENDENABLE, D3DRENDERSTATE_SRCBLEND, D3DRENDERSTATE_DESTBLEND};
+            const D3DTEXTURESTAGESTATETYPE tsN[5] = {D3DTSS_COLOROP, D3DTSS_ALPHAOP, D3DTSS_COLORARG1, D3DTSS_COLORARG2,
+                                                     D3DTSS_ALPHAARG1};
+            for (int k = 0; k < 3; k++) dev->GetRenderState(rsN[k], &oldStates[k]);
+            for (int k = 0; k < 5; k++) dev->GetTextureStageState(0, tsN[k], &oldStates[3 + k]);
+            dev->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
+            dev->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
+            dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+            dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            // The texture over black: its colour (or, colourOp SELECTARG2, white) through its alpha.
+            auto shown = [&](IDirectDrawSurface7* tex, bool blend, DWORD colourOp) {
+                struct V { float x, y, z, rhw; DWORD c; float u, v; };
+                const V q[4] = {{200, 200, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {232, 200, 0.5f, 1, 0xFFFFFFFF, 1, 0},
+                                {200, 232, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {232, 232, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+                dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, blend);
+                dev->SetTextureStageState(0, D3DTSS_COLOROP, colourOp);
+                dev->SetTexture(0, tex);
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+                dev->BeginScene();
+                dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, const_cast<V*>(q), 4, 0);
+                dev->EndScene();
+                dev->SetTexture(0, nullptr);
+                return pixel(216, 216);
+            };
+            auto about = [](DWORD c, DWORD want) {
+                for (int sh = 0; sh < 24; sh += 8)
+                    if (abs(int((c >> sh) & 0xFF) - int((want >> sh) & 0xFF)) > 10) return false;
+                return true;
+            };
+            if (listed.l8) {
+                DDPIXELFORMAT pf = {};
+                pf.dwFlags = DDPF_LUMINANCE;
+                pf.dwLuminanceBitCount = 8;
+                pf.dwLuminanceBitMask = 0xFF;
+                IDirectDrawSurface7* tex = makeTex(pf, 0, DDSCAPS2_TEXTUREMANAGE);
+                const DWORD c = fill(tex, 8, 0x80, 0x80) ? shown(tex, false, D3DTOP_SELECTARG1) : 0xBAD;
+                CHECK(about(c, 0x808080), "an 8-bit luminance texture of 0x80 shows 0x%06lx (grey 0x80)", c);
+                // Colour keyed on a luminance: those texels are left out, the others drawn.
+                DDCOLORKEY ck = {0x80, 0x80};
+                DWORD keyedPx = 0xBAD, otherPx = 0xBAD;
+                if (tex && SUCCEEDED(tex->SetColorKey(DDCKEY_SRCBLT, &ck))) {
+                    dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, TRUE);
+                    keyedPx = shown(tex, false, D3DTOP_SELECTARG1);
+                    fill(tex, 8, 0x40, 0x40);
+                    otherPx = shown(tex, false, D3DTOP_SELECTARG1);
+                    dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+                }
+                CHECK(about(keyedPx, 0) && about(otherPx, 0x404040),
+                      "colour keyed on luminance 0x80: its texels show 0x%06lx (nothing drawn), texels of 0x40 0x%06lx (grey 0x40)",
+                      keyedPx, otherPx);
+                if (tex) tex->Release();
+                // As a render target, as d3dim700 takes it: a new device refuses an 8-bit one
+                // for having no palette (the rule for every target below 16 bits), an existing
+                // hardware device because it renders to no 8-bit surface.
+                IDirectDrawSurface7* target = makeTex(pf, DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY, 0);
+                IDirect3DDevice7* onIt = nullptr;
+                const HRESULT dr = target ? d3d->CreateDevice(IID_IDirect3DHALDevice, target, &onIt) : E_FAIL;
+                const HRESULT sr = target ? dev->SetRenderTarget(target, 0) : E_FAIL;
+                if (SUCCEEDED(sr)) dev->SetRenderTarget(back, 0);
+                CHECK(dr == DDERR_NOPALETTEATTACHED && !onIt && sr == DDERR_INVALIDPARAMS,
+                      "an 8-bit luminance surface as a render target: CreateDevice 0x%08lx (DDERR_NOPALETTEATTACHED), "
+                      "SetRenderTarget 0x%08lx (DDERR_INVALIDPARAMS)", dr, sr);
+                if (onIt) onIt->Release();
+                if (target) target->Release();
+            }
+            if (listed.a8l8) {
+                DDPIXELFORMAT pf = {};
+                pf.dwFlags = DDPF_LUMINANCE | DDPF_ALPHAPIXELS;
+                pf.dwLuminanceBitCount = 16;
+                pf.dwLuminanceBitMask = 0xFF;
+                pf.dwLuminanceAlphaBitMask = 0xFF00;
+                IDirectDrawSurface7* tex = makeTex(pf, 0, DDSCAPS2_TEXTUREMANAGE);
+                const DWORD c = fill(tex, 16, 0xFF, 0x80) ? shown(tex, true, D3DTOP_SELECTARG1) : 0xBAD;
+                CHECK(about(c, 0x808080), "a luminance texture with alpha (white, half opaque) shows 0x%06lx over black (grey 0x80)", c);
+                // With a colour key no texel has (the texture goes to the GPU converted): the same.
+                DDCOLORKEY ck = {0x1234, 0x1234};
+                DWORD keyedPx = 0xBAD;
+                if (tex && SUCCEEDED(tex->SetColorKey(DDCKEY_SRCBLT, &ck))) {
+                    dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, TRUE);
+                    keyedPx = shown(tex, true, D3DTOP_SELECTARG1);
+                    dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+                }
+                CHECK(about(keyedPx, 0x808080), "the same texture colour keyed on another value shows 0x%06lx (grey 0x80)", keyedPx);
+                // As a render target (d3dim700 checks the format of RGB targets only): what is
+                // drawn is kept as its red and its alpha.
+                IDirectDrawSurface7* target = makeTex(pf, DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY, 0);
+                const HRESULT sr = target ? dev->SetRenderTarget(target, 0) : E_FAIL;
+                DWORD drawn = 0xBAD;
+                if (SUCCEEDED(sr)) {
+                    D3DVIEWPORT7 small = {0, 0, 8, 8, 0.0f, 1.0f};
+                    dev->SetViewport(&small);
+                    dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0x40C02010, 1.0f, 0);
+                    dev->SetRenderTarget(back, 0);
+                    dev->SetViewport(&vp);
+                    DDSURFACEDESC2 tl = {};
+                    tl.dwSize = sizeof(tl);
+                    if (SUCCEEDED(target->Lock(nullptr, &tl, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                        drawn = *static_cast<const WORD*>(tl.lpSurface);
+                        target->Unlock(nullptr);
+                    }
+                }
+                CHECK(SUCCEEDED(sr) && drawn == 0x40C0,
+                      "a 16-bit luminance surface with alpha as a render target (0x%08lx): cleared to 0x40c02010 it holds 0x%04lx "
+                      "(0x40c0: the alpha, the red)", sr, drawn);
+                if (target) target->Release();
+                if (tex) tex->Release();
+            }
+            {  // (listed by no device, made for a game that asks: Direct3D 9's own format or converted)
+                DDPIXELFORMAT pf = {};
+                pf.dwFlags = DDPF_LUMINANCE | DDPF_ALPHAPIXELS;
+                pf.dwLuminanceBitCount = 8;
+                pf.dwLuminanceBitMask = 0x0F;
+                pf.dwLuminanceAlphaBitMask = 0xF0;
+                IDirectDrawSurface7* tex = makeTex(pf, 0, DDSCAPS2_TEXTUREMANAGE);
+                const DWORD c = fill(tex, 8, 0x8F, 0x8F) ? shown(tex, true, D3DTOP_SELECTARG1) : 0xBAD;
+                CHECK(about(c, 0x888888), "an 8-bit luminance texture with alpha (white, 8/15 opaque) shows 0x%06lx over black (grey 0x88)", c);
+                if (tex) tex->Release();
+            }
+            if (listed.a8) {
+                DDPIXELFORMAT pf = {};
+                pf.dwFlags = DDPF_ALPHA;
+                pf.dwAlphaBitDepth = 8;
+                IDirectDrawSurface7* tex = makeTex(pf, 0, DDSCAPS2_TEXTUREMANAGE);
+                const bool filled = fill(tex, 8, 0x40, 0x40);
+                const DWORD own = filled ? shown(tex, false, D3DTOP_SELECTARG1) : 0xBAD;
+                const DWORD c = filled ? shown(tex, true, D3DTOP_SELECTARG2) : 0xBAD;
+                CHECK(about(c, 0x404040) && about(own, 0),
+                      "an alpha-only texture of 0x40: white through it shows 0x%06lx over black (grey 0x40), its own colour 0x%06lx (black)",
+                      c, own);
+                if (tex) tex->Release();
+            }
+            // Palettized, 4 and 1 bits: index 3 of sixteen, index 1 of two.
+            for (int bits : {4, 1}) {
+                DDPIXELFORMAT pf = {};
+                pf.dwFlags = DDPF_RGB | (bits == 4 ? DDPF_PALETTEINDEXED4 : DDPF_PALETTEINDEXED1);
+                pf.dwRGBBitCount = DWORD(bits);
+                PALETTEENTRY pe[16] = {};
+                pe[bits == 4 ? 3 : 1] = {200, 40, 90, 0};
+                IDirectDrawPalette* pal = nullptr;
+                dd->CreatePalette(bits == 4 ? DDPCAPS_4BIT : DDPCAPS_1BIT, pe, &pal, nullptr);
+                IDirectDrawSurface7* tex = makeTex(pf, 0, DDSCAPS2_TEXTUREMANAGE);
+                const HRESULT sp = tex && pal ? tex->SetPalette(pal) : E_FAIL;
+                const BYTE v = bits == 4 ? 0x33 : 0xFF;
+                const DWORD c = SUCCEEDED(sp) && fill(tex, bits == 4 ? 4 : 1, v, v) ? shown(tex, false, D3DTOP_SELECTARG1) : 0xBAD;
+                CHECK(about(c, 0xC8285A), "a %d-bit palettized texture shows 0x%06lx (its palette's 0xc8285a; SetPalette 0x%08lx)", bits, c, sp);
+                if (tex) tex->Release();
+                if (pal) pal->Release();
+            }
+            // Load: pixels and palette, 8-bit (a blit) and 4-bit (rows copied, as ddraw.dll's
+            // blitter takes no 4-bit surface), onto a texture already drawn with its own palette.
+            for (int bits : {8, 4}) {
+                DDPIXELFORMAT pf = {};
+                pf.dwFlags = DDPF_RGB | (bits == 8 ? DDPF_PALETTEINDEXED8 : DDPF_PALETTEINDEXED4);
+                pf.dwRGBBitCount = DWORD(bits);
+                PALETTEENTRY blue[256] = {}, red[256] = {};
+                for (PALETTEENTRY& e : blue) e = {0, 0, 255, 0};
+                red[2] = {255, 0, 0, 0};
+                const DWORD pc = bits == 8 ? DDPCAPS_8BIT | DDPCAPS_ALLOW256 : DDPCAPS_4BIT;
+                IDirectDrawPalette *dp = nullptr, *sp = nullptr;
+                dd->CreatePalette(pc, blue, &dp, nullptr);
+                dd->CreatePalette(pc, red, &sp, nullptr);
+                IDirectDrawSurface7* dst = makeTex(pf, 0, 0);
+                IDirectDrawSurface7* src = makeTex(pf, DDSCAPS_SYSTEMMEMORY, 0);
+                DWORD before = 0xBAD, after = 0xBAD;
+                HRESULT lr = E_FAIL;
+                if (dst && src && dp && sp && SUCCEEDED(dst->SetPalette(dp)) && SUCCEEDED(src->SetPalette(sp)) &&
+                    fill(dst, bits == 8 ? 8 : 4, 0x11, 0x11) && fill(src, bits == 8 ? 8 : 4, bits == 8 ? 2 : 0x22, bits == 8 ? 2 : 0x22)) {
+                    before = shown(dst, false, D3DTOP_SELECTARG1);
+                    lr = dev->Load(dst, nullptr, src, nullptr, 0);
+                    after = shown(dst, false, D3DTOP_SELECTARG1);
+                }
+                CHECK(about(before, 0x0000FF) && SUCCEEDED(lr) && about(after, 0xFF0000),
+                      "Load between %d-bit palettized textures (0x%08lx): 0x%06lx before (blue), 0x%06lx after (the source's red)",
+                      bits, lr, before, after);
+                if (src) src->Release();
+                if (dst) dst->Release();
+                if (sp) sp->Release();
+                if (dp) dp->Release();
+            }
+            for (int k = 0; k < 3; k++) dev->SetRenderState(rsN[k], oldStates[k]);
+            for (int k = 0; k < 5; k++) dev->SetTextureStageState(0, tsN[k], oldStates[3 + k]);
         }
 
         // A cube map: six faces in six colours, sampled with 3-component coordinates pointing

@@ -29,7 +29,7 @@ struct GpuTex;
 // The CPU copy is about to be read (and written, with `write`): read the GPU copy back if
 // it is newer. Surfaces without a GPU copy cost nothing. g_lock held; takes the Gpu lock.
 // area: the part a write covers (null: all), uploaded alone later.
-void GpuCpuAccess(Surface* s, bool write, const RECT* area = nullptr);
+void GpuCpuAccess(Surface* s, bool write, const RECT* area = nullptr);  // (never throws)
 // A Blt DDBLT_DEPTHFILL into a Z buffer with a GPU copy: done there, or left to the CPU
 // copy's pending upload (true); no GPU copy (false).
 bool GpuDepthFill(Surface* s, const RECT& r, DWORD value);
@@ -68,6 +68,7 @@ struct GpuCaps {
     bool depth16 = false, depth24x8 = false, depth24s8 = false, depth32 = false;
     bool dxt[5] = {};  // DXT1-5 textures
     bool bumpV8U8 = false, bumpL6V5U5 = false, bumpX8L8V8U8 = false;  // bump map textures (U8V8, U5V5L6, U8V8L8)
+    bool lumL8 = false, lumA8L8 = false, alphaA8 = false;  // luminance and alpha-only textures
 };
 GpuCaps GpuGetCaps();  // cached after the first call; any thread
 

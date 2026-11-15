@@ -268,6 +268,206 @@ static float VertexFog(const DWORD* rs, Vec3 P) {
     return f;
 }
 
+// Direct3D 7's lighting of a vertex on the CPU, as XP's front end does it for a HAL or software
+// device (V §8.5, §9): for ProcessVertices, and for the draws of a device with more lights
+// enabled than the GPU lights at once (Device7::LightOnCpu).
+struct Lighter {
+    struct L {
+        const D3DLIGHT7* l;
+        Vec3 pos, dir;           // camera space
+        float cosTheta, cosPhi;  // a spot light's cones' half angles
+    };
+    std::vector<L> lights;
+    const Device7* dev = nullptr;
+    Color ambient = {};
+    bool draw = false, colorVertex = false, normalize = false, local = false, specular = false;
+    float power = 0.0f;
+
+    // The enabled lights in camera space, the material and the states. draw: for a draw
+    // (specular only with SPECULARENABLE, the material's power as it is); else ProcessVertices
+    // (specular always, a power of 0 the last one above 0). May throw std::bad_alloc.
+    void Setup(const Device7* d, bool forDraw) {
+        dev = d;
+        draw = forDraw;
+        lights.clear();
+        for (const Device7::Light& s : d->lights_)
+            if (s.set && s.enabled)
+                lights.push_back({&s.l, XformPoint({s.l.dvPosition.x, s.l.dvPosition.y, s.l.dvPosition.z}, d->view_),
+                                  Norm(XformDir({s.l.dvDirection.x, s.l.dvDirection.y, s.l.dvDirection.z}, d->view_)),
+                                  cosf(s.l.dvTheta * 0.5f), cosf(s.l.dvPhi * 0.5f)});
+        ambient = FromArgb(d->rs_[D3DRENDERSTATE_AMBIENT]);
+        colorVertex = d->rs_[D3DRENDERSTATE_COLORVERTEX] == TRUE;
+        // Normalized only with NORMALIZENORMALS: a world or view that shrinks makes the normal
+        // longer and the light stronger, saturating (Wine's test_fog_process_vertices on
+        // Windows: z scaled by 0.375 gives full specular where a unit normal gives 57%).
+        normalize = d->rs_[D3DRENDERSTATE_NORMALIZENORMALS] == TRUE;
+        local = d->rs_[D3DRENDERSTATE_LOCALVIEWER] == TRUE;
+        // Power 0: ProcessVertices keeps the last power above 0 (Wine's test_specular_lighting on
+        // Windows); drawing takes 0 as it is (anything to the power 0: 1).
+        power = draw || d->mat_.dvPower > 0 ? d->mat_.dvPower : d->pvPower_;
+        specular = draw ? d->rs_[D3DRENDERSTATE_SPECULARENABLE] == TRUE : power > 0;
+    }
+
+    // The lit colours of a vertex at P (camera space) with normal n (the model's; null: none),
+    // through the normal matrices nms (one per world matrix with vertex blending: `blend`
+    // weights, the last matrix weighted 1 - their sum). vd, vs: the vertex's own colours
+    // (null: none). *spec: the specular colour, its alpha the material's.
+    void Light(Vec3 P, const float* n, const D3DMATRIX* nms, const float* weights, DWORD blend, const DWORD* vd,
+               const DWORD* vs, DWORD* diffuse, Color* spec) const {
+        const D3DMATERIAL7& m = dev->mat_;
+        auto source = [&](DWORD state, const D3DCOLORVALUE& mc) {
+            const DWORD s = dev->rs_[state];
+            if (colorVertex && s == D3DMCS_COLOR1 && vd) return FromArgb(*vd);
+            if (colorVertex && s == D3DMCS_COLOR2 && vs) return FromArgb(*vs);
+            return FromCv(mc);
+        };
+        const Color md = source(D3DRENDERSTATE_DIFFUSEMATERIALSOURCE, m.dcvDiffuse);
+        const Color ma = source(D3DRENDERSTATE_AMBIENTMATERIALSOURCE, m.dcvAmbient);
+        const Color ms = source(D3DRENDERSTATE_SPECULARMATERIALSOURCE, m.dcvSpecular);
+        const Color me = source(D3DRENDERSTATE_EMISSIVEMATERIALSOURCE, m.dcvEmissive);
+        // Blended: the matrices' normals weighted, the sum as it comes (test_lighting: weights
+        // 0.2 and 0.8 of normals at right angles light 0.8).
+        auto xn = [&](const D3DMATRIX& nm) {
+            const Vec3 t = XformDir({n[0], n[1], n[2]}, nm);
+            return normalize ? Norm(t) : t;
+        };
+        Vec3 N = {0, 0, 0};
+        if (n && !blend) {
+            N = xn(nms[0]);
+        } else if (n) {
+            float sum = 0;
+            for (DWORD k = 0; k <= blend; k++) {
+                const float w = k < blend ? weights[k] : 1.0f - sum;
+                sum += k < blend ? w : 0;
+                const Vec3 t = xn(nms[k]);
+                N = {N.x + t.x * w, N.y + t.y * w, N.z + t.z * w};
+            }
+        }
+        Color d = {ambient.r * ma.r + me.r, ambient.g * ma.g + me.g, ambient.b * ma.b + me.b, md.a};
+        Color s = {0, 0, 0, 0};
+        for (const L& l : lights) {
+            Vec3 Ld;
+            float att = 1.0f;
+            if (l.l->dltType == D3DLIGHT_DIRECTIONAL) {
+                Ld = {-l.dir.x, -l.dir.y, -l.dir.z};
+            } else {
+                const Vec3 toL = Sub(l.pos, P);
+                const float dist = sqrtf(Dot(toL, toL));
+                if (dist > l.l->dvRange) continue;
+                Ld = dist > 0 ? Vec3{toL.x / dist, toL.y / dist, toL.z / dist} : Vec3{0, 0, 1};
+                const float a = l.l->dvAttenuation0 + l.l->dvAttenuation1 * dist + l.l->dvAttenuation2 * dist * dist;
+                att = a > 0 ? 1.0f / a : 1.0f;
+                if (l.l->dltType == D3DLIGHT_SPOT) {
+                    const float rho = -Dot(Ld, l.dir);
+                    const float ct = l.cosTheta, cp = l.cosPhi;
+                    if (rho <= cp) continue;
+                    if (rho < ct && ct > cp) att *= powf((rho - cp) / (ct - cp), l.l->dvFalloff);
+                }
+            }
+            const Color la = FromCv(l.l->dcvAmbient), ld = FromCv(l.l->dcvDiffuse), ls = FromCv(l.l->dcvSpecular);
+            d.r += la.r * ma.r * att;
+            d.g += la.g * ma.g * att;
+            d.b += la.b * ma.b * att;
+            const float nl = Dot(N, Ld);
+            if (nl <= 0) continue;
+            d.r += ld.r * md.r * nl * att;
+            d.g += ld.g * md.g * nl * att;
+            d.b += ld.b * md.b * nl * att;
+            if (specular) {
+                const Vec3 eye = local ? Norm(Vec3{-P.x, -P.y, -P.z}) : Vec3{0, 0, -1};  // toward the viewer
+                const Vec3 H = Norm({Ld.x + eye.x, Ld.y + eye.y, Ld.z + eye.z});
+                const float nh = Dot(N, H);
+                if (nh > 0) {
+                    const float k = powf(nh, power) * att;
+                    s.r += ls.r * ms.r * k;
+                    s.g += ls.g * ms.g * k;
+                    s.b += ls.b * ms.b * k;
+                }
+            }
+        }
+        *diffuse = ToArgb(d);
+        s.a = ms.a;  // (Wine's test on Windows)
+        *spec = s;
+    }
+};
+
+// The vertices of a draw lit here (Lighter), for a device with more lights enabled than the
+// GPU lights at once: copied into lit_ with the lit diffuse and specular colours in place of
+// (or added to) their own, the rest as it is. D3D9 then draws them with its lighting off: it
+// takes the colours from the vertices, transforms, fogs and textures as before. Only the
+// vertices the indices reach are lit (a vertex buffer's draw often names the whole buffer for
+// a few triangles): *n becomes the highest one's index + 1, the ones below the lowest stay
+// zero, never read. *fvf, *v and *stride become the lit vertices'. False without the memory
+// for them.
+bool Device7::LightOnCpu(DWORD* fvf, const void** v, UINT* stride, DWORD* n, const WORD* idx, DWORD ni) {
+    const DWORD inFvf = *fvf, outFvf = inFvf | D3DFVF_DIFFUSE | D3DFVF_SPECULAR;
+    const Layout in(inFvf);
+    // Where the colours go: after the position, the normal and the reserved DWORD.
+    UINT colours = FvfSize(inFvf & 0x0E);
+    if (inFvf & D3DFVF_NORMAL) colours += 12;
+    if (inFvf & D3DFVF_RESERVED1) colours += 4;
+    const UINT inRest = colours + (in.diffuse >= 0 ? 4 : 0) + (in.specular >= 0 ? 4 : 0);  // the texture coordinates
+    const UINT inStride = *stride, outStride = inStride - inRest + colours + 8;
+    DWORD lo = 0;
+    if (idx) {
+        WORD l, h;
+        IndexRange16(idx, ni, &l, &h);
+        if (l <= h) lo = l, *n = DWORD(h) + 1;  // (all below n: SafeIndices)
+    }
+    const DWORD count = *n;
+    static Lighter lighter;  // (its list of lights kept from draw to draw: g_lock held)
+    try {
+        lighter.Setup(this, true);
+        lit_.resize(size_t(outStride) * count);
+    } catch (const std::exception&) {
+        return false;
+    }
+    memset(lit_.data(), 0, size_t(outStride) * lo);
+    // Vertex blending as the draw does it: min(the FVF's weights, VERTEXBLEND, 3) weights after
+    // the position, a normal matrix per world matrix (see Process).
+    const DWORD posType = inFvf & 0x0E, betas = posType >= 0x06 ? (posType - 0x04) / 2 : 0;
+    const DWORD blend = std::min<DWORD>(std::min<DWORD>(rs_[D3DRENDERSTATE_VERTEXBLEND], betas), 3);
+    const D3DMATRIX* worlds[4] = {&world_, &world1_, &world2_, &world3_};
+    D3DMATRIX wv, nms[4];
+    MatMul(&wv, world_, view_);
+    for (DWORD k = 0; k <= blend; k++) {
+        D3DMATRIX m;
+        if (blend) MatMul(&m, *worlds[k], view_);
+        else m = wv;
+        nms[k] = NormalMatrix(m);
+    }
+    const uint8_t* src = static_cast<const uint8_t*>(*v);
+    for (DWORD i = lo; i < count; i++) {
+        const uint8_t* s = src + size_t(i) * inStride;
+        uint8_t* o = lit_.data() + size_t(i) * outStride;
+        const float* p = reinterpret_cast<const float*>(s);
+        Vec3 P;
+        if (blend) {  // the blended world-space point, through the view
+            float acc[4];
+            BlendPoint(p, p + 3, blend, worlds, acc);
+            const float aw = acc[3] != 0.0f ? 1.0f / acc[3] : 1.0f;
+            P = XformPoint({acc[0] * aw, acc[1] * aw, acc[2] * aw}, view_);
+        } else {
+            P = XformPoint({p[0], p[1], p[2]}, wv);
+        }
+        DWORD vd = 0, vs = 0, diffuse;
+        if (in.diffuse >= 0) memcpy(&vd, s + in.diffuse, 4);
+        if (in.specular >= 0) memcpy(&vs, s + in.specular, 4);
+        Color spec;
+        lighter.Light(P, in.normal >= 0 ? reinterpret_cast<const float*>(s + in.normal) : nullptr, nms, p + 3, blend,
+                      in.diffuse >= 0 ? &vd : nullptr, in.specular >= 0 ? &vs : nullptr, &diffuse, &spec);
+        const DWORD specular = ToArgb(spec);
+        memcpy(o, s, colours);
+        memcpy(o + colours, &diffuse, 4);
+        memcpy(o + colours + 4, &specular, 4);
+        memcpy(o + colours + 8, s + inRest, inStride - inRest);
+    }
+    *fvf = outFvf;
+    *v = lit_.data();
+    *stride = outStride;
+    return true;
+}
+
 // Does the processing of V §8.5 on the CPU: transform (always), clip codes (D3DVOP_CLIP),
 // lighting (D3DVOP_LIGHT, whatever D3DRENDERSTATE_LIGHTING says), extents (D3DVOP_EXTENTS).
 static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD count, const uint8_t* src, UINT srcStride,
@@ -310,26 +510,14 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
     const D3DVIEWPORT7& vp = dev->vp_;
     const bool clip = (op & D3DVOP_CLIP) != 0, light = (op & D3DVOP_LIGHT) != 0;
     const bool extents = (op & D3DVOP_EXTENTS) != 0, noCopy = (flags & D3DPV_DONOTCOPYDATA) != 0;
-    // Lights in camera space.
-    struct L {
-        const D3DLIGHT7* l;
-        Vec3 pos, dir;
-        float cosTheta, cosPhi;  // a spot light's cones' half angles
-    };
-    std::vector<L> lights;
+    Lighter lighter;
     try {
-        if (light)
-            for (const Device7::Light& d : dev->lights_)
-                if (d.set && d.enabled)
-                    lights.push_back({&d.l, XformPoint({d.l.dvPosition.x, d.l.dvPosition.y, d.l.dvPosition.z}, dev->view_),
-                                      Norm(XformDir({d.l.dvDirection.x, d.l.dvDirection.y, d.l.dvDirection.z}, dev->view_)),
-                                      cosf(d.l.dvTheta * 0.5f), cosf(d.l.dvPhi * 0.5f)});
+        if (light) lighter.Setup(dev, false);
     } catch (const std::exception&) {
         return DDERR_OUTOFMEMORY;
     }
     // The user clip planes give clip codes too (GEN0-5, from the world-space point).
     const DWORD planesOn = clip ? dev->rs_[D3DRENDERSTATE_CLIPPLANEENABLE] & 0x3F : 0;
-    const Color ambient = FromArgb(dev->rs_[D3DRENDERSTATE_AMBIENT]);
     const bool fog = VertexFogOn(dev->rs_);
     DWORD orCodes = 0, andCodes = 0xFFFF;
     for (DWORD i = 0; i < count; i++) {
@@ -402,93 +590,13 @@ static HRESULT Process(VertexBuffer7* dstVb, DWORD op, DWORD dstIndex, DWORD cou
         const DWORD srcSpecular = in.specular >= 0 ? *reinterpret_cast<const DWORD*>(v + in.specular) : 0;
         DWORD diffuse = srcDiffuse, specular = srcSpecular;
         if (light) {
-            const D3DMATERIAL7& m = dev->mat_;
-            const bool cv = dev->rs_[D3DRENDERSTATE_COLORVERTEX] == TRUE;
-            auto source = [&](DWORD state, const D3DCOLORVALUE& mc) {
-                const DWORD s = dev->rs_[state];
-                if (cv && s == D3DMCS_COLOR1 && in.diffuse >= 0) return FromArgb(srcDiffuse);
-                if (cv && s == D3DMCS_COLOR2 && in.specular >= 0) return FromArgb(srcSpecular);
-                return FromCv(mc);
-            };
-            const Color md = source(D3DRENDERSTATE_DIFFUSEMATERIALSOURCE, m.dcvDiffuse);
-            const Color ma = source(D3DRENDERSTATE_AMBIENTMATERIALSOURCE, m.dcvAmbient);
-            const Color ms = source(D3DRENDERSTATE_SPECULARMATERIALSOURCE, m.dcvSpecular);
-            const Color me = source(D3DRENDERSTATE_EMISSIVEMATERIALSOURCE, m.dcvEmissive);
             const Vec3 P = XformPoint(pos, blend ? dev->view_ : wv);
             // No normal: lit with a zero one (ambient and emissive only), as XP does.
             const float* n = in.normal >= 0 ? reinterpret_cast<const float*>(v + in.normal) : nullptr;
-            // Normalized only with NORMALIZENORMALS: a world or view that shrinks makes the
-            // normal longer and the light stronger, saturating (Wine's
-            // test_fog_process_vertices on Windows: z scaled by 0.375 gives full specular
-            // where a unit normal gives 57%). Blended: the matrices' normals weighted, the sum
-            // as it comes (test_lighting: weights 0.2 and 0.8 of normals at right angles
-            // light 0.8).
-            const bool normalize = dev->rs_[D3DRENDERSTATE_NORMALIZENORMALS] == TRUE;
-            auto xn = [&](const D3DMATRIX& nm) {
-                const Vec3 t = XformDir({n[0], n[1], n[2]}, nm);
-                return normalize ? Norm(t) : t;
-            };
-            Vec3 N = {0, 0, 0};
-            if (n && !blend) {
-                N = xn(nms[0]);
-            } else if (n) {
-                float sum = 0;
-                for (DWORD k = 0; k <= blend; k++) {
-                    const float w = k < blend ? weights[k] : 1.0f - sum;
-                    sum += k < blend ? w : 0;
-                    const Vec3 t = xn(nms[k]);
-                    N = {N.x + t.x * w, N.y + t.y * w, N.z + t.z * w};
-                }
-            }
-            Color d = {ambient.r * ma.r + me.r, ambient.g * ma.g + me.g, ambient.b * ma.b + me.b, md.a};
-            Color s = {0, 0, 0, 0};
-            const bool local = dev->rs_[D3DRENDERSTATE_LOCALVIEWER] == TRUE;
-            for (const L& l : lights) {
-                Vec3 Ld;
-                float att = 1.0f;
-                if (l.l->dltType == D3DLIGHT_DIRECTIONAL) {
-                    Ld = {-l.dir.x, -l.dir.y, -l.dir.z};
-                } else {
-                    const Vec3 toL = Sub(l.pos, P);
-                    const float dist = sqrtf(Dot(toL, toL));
-                    if (dist > l.l->dvRange) continue;
-                    Ld = dist > 0 ? Vec3{toL.x / dist, toL.y / dist, toL.z / dist} : Vec3{0, 0, 1};
-                    const float a = l.l->dvAttenuation0 + l.l->dvAttenuation1 * dist + l.l->dvAttenuation2 * dist * dist;
-                    att = a > 0 ? 1.0f / a : 1.0f;
-                    if (l.l->dltType == D3DLIGHT_SPOT) {
-                        const float rho = -Dot(Ld, l.dir);
-                        const float ct = l.cosTheta, cp = l.cosPhi;
-                        if (rho <= cp) continue;
-                        if (rho < ct && ct > cp) att *= powf((rho - cp) / (ct - cp), l.l->dvFalloff);
-                    }
-                }
-                const Color la = FromCv(l.l->dcvAmbient), ld = FromCv(l.l->dcvDiffuse), ls = FromCv(l.l->dcvSpecular);
-                d.r += la.r * ma.r * att;
-                d.g += la.g * ma.g * att;
-                d.b += la.b * ma.b * att;
-                const float nl = Dot(N, Ld);
-                if (nl <= 0) continue;
-                d.r += ld.r * md.r * nl * att;
-                d.g += ld.g * md.g * nl * att;
-                d.b += ld.b * md.b * nl * att;
-                // Power 0: ProcessVertices keeps the last power above 0 (Wine's
-                // test_specular_lighting on Windows; drawing takes 0 as it is).
-                const float power = m.dvPower > 0 ? m.dvPower : dev->pvPower_;
-                if (power > 0) {
-                    const Vec3 eye = local ? Norm(Vec3{-P.x, -P.y, -P.z}) : Vec3{0, 0, -1};  // toward the viewer
-                    const Vec3 H = Norm({Ld.x + eye.x, Ld.y + eye.y, Ld.z + eye.z});
-                    const float nh = Dot(N, H);
-                    if (nh > 0) {
-                        const float k = powf(nh, power) * att;
-                        s.r += ls.r * ms.r * k;
-                        s.g += ls.g * ms.g * k;
-                        s.b += ls.b * ms.b * k;
-                    }
-                }
-            }
-            diffuse = ToArgb(d);
-            s.a = ms.a;  // the specular alpha: the material's (Wine's test on Windows), or the fog factor
-            if (fog) s.a = VertexFog(dev->rs_, P);
+            Color s;
+            lighter.Light(P, n, nms, weights, blend, in.diffuse >= 0 ? &srcDiffuse : nullptr,
+                          in.specular >= 0 ? &srcSpecular : nullptr, &diffuse, &s);
+            if (fog) s.a = VertexFog(dev->rs_, P);  // the specular alpha: the material's, or the fog factor
             specular = ToArgb(s);
         }
         // Vertex fog without lighting too (V §8.5 step 8): the factor in specular alpha.

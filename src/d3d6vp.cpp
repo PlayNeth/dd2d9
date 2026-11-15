@@ -318,7 +318,7 @@ void Viewport::ProcessRects(DWORD n, const D3DRECT* rects, std::vector<RECT>* ou
     }
 }
 
-HRESULT Viewport::Clear(DWORD n, D3DRECT* rects, DWORD flags) {
+HRESULT Viewport::Clear(DWORD n, D3DRECT* rects, DWORD flags) try {
     Guard l;
     if (!dev) return D3DERR_VIEWPORTHASNODEVICE;
     if ((flags & D3DCLEAR_ZBUFFER) && !dev->z) {
@@ -351,9 +351,11 @@ HRESULT Viewport::Clear(DWORD n, D3DRECT* rects, DWORD flags) {
     }
     ClearRects(dev, list, flags & 7, color, 1.0f, 0);
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the rectangles' list, the fill's vertices)
+    return DDERR_OUTOFMEMORY;
 }
 
-HRESULT Viewport::Clear2(DWORD n, D3DRECT* rects, DWORD flags, D3DCOLOR color, D3DVALUE z, DWORD stencil) {
+HRESULT Viewport::Clear2(DWORD n, D3DRECT* rects, DWORD flags, D3DCOLOR color, D3DVALUE z, DWORD stencil) try {
     Guard l;
     if (!dev) return D3DERR_VIEWPORTHASNODEVICE;
     if ((flags & (D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL)) && !dev->z) return D3DERR_ZBUFFER_NOTPRESENT;
@@ -368,6 +370,8 @@ HRESULT Viewport::Clear2(DWORD n, D3DRECT* rects, DWORD flags, D3DCOLOR color, D
     ProcessRects(n, rects, &list);
     if (!list.empty()) ClearRects(dev, list, flags & 7, color, z, stencil);
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the rectangles' list)
+    return DDERR_OUTOFMEMORY;
 }
 
 // ---- lights (C §1.14)
@@ -379,6 +383,7 @@ HRESULT Viewport::AddLight(IDirect3DLight* p) {
     Guard l;
     Light* light = LightFrom(p);
     if (light->vp) return D3DERR_LIGHTHASVIEWPORT;
+    if (!Room(lights)) return DDERR_OUTOFMEMORY;
     lights.push_back(light);
     light->vp = this;
     g_lightGen++;

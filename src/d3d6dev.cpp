@@ -425,8 +425,13 @@ void Device::MatrixChanged(DWORD h) {
 HRESULT Device::F1::CreateMatrix(D3DMATRIXHANDLE* h) {
     if (!h) return DDERR_INVALIDPARAMS;
     Guard l;
+    if (!Room(o->ownMatrices)) return DDERR_OUTOFMEMORY;
     const DWORD id = NewMatrixHandle();
-    o->matrices[id] = kIdentity;
+    try {
+        o->matrices[id] = kIdentity;
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     o->ownMatrices.push_back(id);
     *h = id;
     return D3D_OK;
@@ -511,6 +516,7 @@ HRESULT Device::AddViewportI(Viewport* vp) {
     if (!vp) return DDERR_INVALIDPARAMS;  // XP faults
     Guard l;
     if (vp->dev) return DDERR_INVALIDPARAMS;
+    if (!Room(viewports)) return DDERR_OUTOFMEMORY;
     viewports.push_back(vp);
     vp->dev = this;
     vp->AddRef();
@@ -734,7 +740,7 @@ HRESULT Device::GetCapsI(D3DDEVICEDESC* h, D3DDEVICEDESC* s) {
 }
 
 // B §7.4: XP's inclusion list (and FOURCC formats) among what dd2d9 textures can be.
-HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) {
+HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) try {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(cb))) return DDERR_INVALIDPARAMS;
     Guard l;
     std::vector<DDPIXELFORMAT> list;
@@ -794,6 +800,8 @@ HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) {
         if (r != D3DENUMRET_OK) break;
     }
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the list)
+    return E_OUTOFMEMORY;
 }
 
 HRESULT Device::GetStatsI(D3DSTATS* s) {

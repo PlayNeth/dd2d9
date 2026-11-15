@@ -14,7 +14,12 @@ namespace {
 // guid: DDCREATE_HARDWAREONLY / DDCREATE_EMULATIONONLY limit the caps reported to one side.
 HRESULT CreateDDraw(REFIID riid, void** out, bool initialized, const GUID* guid = nullptr) {
     InstallCompatHooks(false);
-    auto* dd = new DDraw();
+    DDraw* dd;
+    try {
+        dd = new DDraw();
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     dd->initialized = initialized;
     // Direct3D 7 (not 1-6) belongs to DirectDrawCreateEx's objects; the class factory's are
     // decided by the interface Initialize is called on (DDraw::Initialize).
@@ -54,7 +59,12 @@ public:
         *out = nullptr;
         if (outer) return CLASS_E_NOAGGREGATION;
         if (IsEqualGUID(clsid_, CLSID_DirectDrawClipper)) {
-            auto* c = new Clipper(nullptr);
+            Clipper* c;
+            try {
+                c = new Clipper(nullptr);
+            } catch (const std::bad_alloc&) {
+                return E_OUTOFMEMORY;
+            }
             c->initialized = false;  // as ddraw.dll: Initialize first
             HRESULT hr = c->QueryInterface(r, out);
             c->Release();
@@ -113,7 +123,11 @@ HRESULT WINAPI DD2D9_DirectDrawCreateClipper(DWORD flags, LPDIRECTDRAWCLIPPER* o
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
     if (flags) return DDERR_INVALIDPARAMS;
-    *out = new Clipper(nullptr);
+    try {
+        *out = new Clipper(nullptr);
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     return DD_OK;
 }
 
@@ -224,7 +238,8 @@ HRESULT WINAPI DD2D9_DllGetClassObject(REFCLSID clsid, REFIID riid, void** out) 
     if (!IsEqualGUID(clsid, CLSID_DirectDraw) && !IsEqualGUID(clsid, CLSID_DirectDraw7) &&
         !IsEqualGUID(clsid, CLSID_DirectDrawClipper))
         return E_FAIL;
-    auto* f = new ClassFactory(clsid);
+    auto* f = new (std::nothrow) ClassFactory(clsid);
+    if (!f) return E_OUTOFMEMORY;
     HRESULT hr = f->QueryInterface(riid, out);
     f->Release();
     return hr;

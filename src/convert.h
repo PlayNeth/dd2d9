@@ -14,10 +14,11 @@ public:
     // whose colour bits equal the key's become 0. palAlpha: the palette has DDPCAPS_ALPHA, each
     // entry's peFlags is its alpha (textures only).
     RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed = false, DWORD key = 0, bool palAlpha = false);
+    // n pixels from `src` on (a 1-, 2- or 4-bit format: from the first pixel of the byte there).
     void Run(const uint8_t* src, uint32_t* dst, int n) const;
 
 private:
-    enum Kind { kGeneric, kPal8, k16, k24, k32 };
+    enum Kind { kGeneric, kPal8, kPalLow, k16, k24, k32 };
     struct Channel {
         int shift = 0, bits = 0;  // bits 0: absent (alpha: 0xFF)
     };

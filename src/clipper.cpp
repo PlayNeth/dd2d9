@@ -12,8 +12,8 @@ bool LiveClipper(const Clipper* c) { return g_clippers.Has(c); }
 
 Clipper::Clipper(DDraw* dd) : dd_(dd) {
     WritableVtbl(this);
+    g_clippers.Add(this);  // (may throw: before anything there is to undo)
     if (dd_) dd_->IntAddRef();
-    g_clippers.Add(this);
 }
 
 Clipper::~Clipper() {
@@ -84,7 +84,7 @@ static std::vector<RECT> ClipRects(const RECT* in, size_t n, const RECT& clip) {
 // As ddraw.dll (spec: re/spec/palette-clipper-exports.md): with a window, the part of
 // its client area that is visible on the screen, in screen coordinates; otherwise the
 // list SetClipList gave. Either clipped to `rect`.
-HRESULT Clipper::GetClipList(LPRECT rect, LPRGNDATA data, LPDWORD size) {
+HRESULT Clipper::GetClipList(LPRECT rect, LPRGNDATA data, LPDWORD size) try {
     if (HRESULT hr = ClipperReady(this); FAILED(hr)) return hr;
     if (data) data->rdh.nCount = 0;  // ddraw.dll's first step, whatever follows
     Guard l;
@@ -146,6 +146,8 @@ HRESULT Clipper::GetClipList(LPRECT rect, LPRGNDATA data, LPDWORD size) {
     }
     memcpy(data, list.data(), list.size());
     return DD_OK;
+} catch (const std::bad_alloc&) {  // (the region's rectangles; the DC and region are let go by then)
+    return DDERR_OUTOFMEMORY;
 }
 
 HRESULT Clipper::Usable() const {
@@ -226,7 +228,11 @@ HRESULT Clipper::SetClipList(LPRGNDATA data, DWORD flags) {
     // dd2d9's own limit, which also keeps the size below from overflowing.
     if (data->rdh.nCount > 65536) return DDERR_INVALIDCLIPLIST;
     size_t size = sizeof(RGNDATAHEADER) + size_t(data->rdh.nCount) * sizeof(RECT);
-    clipList_.assign(reinterpret_cast<uint8_t*>(data), reinterpret_cast<uint8_t*>(data) + size);
+    try {
+        clipList_.assign(reinterpret_cast<uint8_t*>(data), reinterpret_cast<uint8_t*>(data) + size);
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     return DD_OK;
 }
 

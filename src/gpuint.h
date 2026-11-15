@@ -101,10 +101,20 @@ void WriteLevel(const Buffer* b, const D3DLOCKED_RECT& lr, const PALETTEENTRY* e
 
 // Defined in gpucontext.cpp.
 extern unsigned g_drawSerial;
-extern float g_wScale;
-extern bool g_wWritten;
 extern unsigned g_traceScene;
 inline bool TracingFrame() { return g_config.drawTrace && g_traceScene % 600 == 300; }
+
+// A new owner of GPU resources, registered with its Gpu: both or (std::bad_alloc) neither.
+template <class T, class... A> T* NewOwner(Gpu& gpu, A&&... a) {
+    T* o = new T(&gpu, static_cast<A&&>(a)...);
+    try {
+        gpu.AddOwner(o);
+    } catch (...) {
+        delete o;
+        throw;
+    }
+    return o;
+}
 
 struct GpuSurf final : Gpu::Owner {
     Gpu* gpu;
@@ -152,6 +162,13 @@ struct GpuSurf final : Gpu::Owner {
         float z;
     };
     std::vector<Fill> fills;
+    // Emulated W buffering's scale for this Z buffer (the depths in it were taken with it):
+    // 1/w times it is at most 1 for every vertex drawn so far. It only shrinks, when a nearer
+    // vertex comes, and only while no depth has been written with it (wWritten); a whole
+    // clear or depth fill starts it again (WStart).
+    float wScale = 1.0f;
+    bool wWritten = false;
+    void WStart() { wScale = 1.0f, wWritten = false; }
     unsigned failedGen = 0;  // creation failed on the device of generation failedGen - 1
     // A palettized render target's palette (its surface's when last bound or read back).
     PaletteMap* pal = nullptr;

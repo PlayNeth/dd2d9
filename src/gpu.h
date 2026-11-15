@@ -134,7 +134,7 @@ public:
     // Something drew (opened a scene) since the last PresentTarget. Lock held.
     bool DrewSincePresent() const { return drew_; }
 
-    void AddOwner(Owner* o);     // Lock held
+    void AddOwner(Owner* o);     // Lock held (may throw std::bad_alloc: nothing is added)
     void RemoveOwner(Owner* o);  // Lock held
     bool Unused() const { return owners_.empty(); }  // Lock held
     void Release();              // Lock held: everything goes (the DirectDraw object is going)

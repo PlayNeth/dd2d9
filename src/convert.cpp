@@ -45,11 +45,11 @@ inline __m128i Field(__m128i v, int shift, int bits) {
 }  // namespace
 
 RowConverter::RowConverter(const Format& f, const PALETTEENTRY* pal, bool keyed, DWORD key, bool palAlpha)
-    : f_(f), pal_(pal), keyed_(keyed), palAlpha_(palAlpha && f.pal8 && pal), key_(key), keyMask_(f.KeyMask()) {
+    : f_(f), pal_(pal), keyed_(keyed), palAlpha_(palAlpha && f.Palettized() && pal), key_(key), keyMask_(f.KeyMask()) {
     if (f.fourcc || f.zbuf) return;
-    if (f.pal8) {
-        kind_ = kPal8;
-        for (uint32_t i = 0; i < 256; i++) lut_[i] = One(i);
+    if (f.Palettized()) {
+        kind_ = f.pal8 ? kPal8 : kPalLow;
+        for (uint32_t i = 0; i <= f.ValueMask(); i++) lut_[i] = One(i);
         return;
     }
     if (f.bpp == 16) {
@@ -74,6 +74,11 @@ void RowConverter::Run(const uint8_t* src, uint32_t* dst, int n) const {
     case kPal8:
         for (int i = 0; i < n; i++) dst[i] = lut_[src[i]];
         return;
+    case kPalLow: {  // the pixels of each byte from its high bits down
+        const int bits = int(f_.bpp), top = 8 - bits, mask = (1 << bits) - 1;
+        for (int i = 0, bit = 0; i < n; i++, bit += bits) dst[i] = lut_[(src[bit >> 3] >> (top - (bit & 7))) & mask];
+        return;
+    }
     case k16: Run16(reinterpret_cast<const uint16_t*>(src), dst, n); return;
     case k24: Run24(src, dst, n); return;
     case k32: Run32(reinterpret_cast<const uint32_t*>(src), dst, n); return;

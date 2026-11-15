@@ -53,7 +53,7 @@ static TlScan ScanTl(const uint8_t* src, UINT stride, UINT n) {
 
 // Emulated W buffering: an rhw above this (a w below 1/65536) is nearer than a W buffer's
 // range reaches. Such a vertex is the nearest there can be (depth 0) and doesn't set the
-// scale the others' depths are taken with (g_wScale). KOF 99 Evolution draws its low-life
+// scale the others' depths are taken with (GpuSurf::wScale). KOF 99 Evolution draws its low-life
 // warning lines first in the frame with an rhw of 13131952 (an integer made a float, by the
 // look of it): the scale it set left every depth after it in that frame the same, and the
 // picture flickered with the warning's blinking.
@@ -134,7 +134,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     // Direct3D gave the driver (its W range came from that matrix), and what is nearer is the
     // nearest there is. Unreal Tournament draws its HUD at w 1 after its weapon, part of which
     // is nearer than that, and the HUD is in front. Otherwise the scale is found from the
-    // vertices (g_wScale, WScaleAfter).
+    // vertices (GpuSurf::wScale, WScaleAfter).
     if (p.wEmulate && !tl) p.wMixed = true;
     const bool wRange = p.wEmulate && p.wMixed && p.wProj;
     // (One depth buffer can see more than one of these in a frame: wbuffer=force with Z
@@ -205,6 +205,14 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     const bool flat2d = p.flat2d;
     p.flat2d = false;
     if (!bound || p.vpEmpty) return;
+    // Emulated W buffering's scale is the Z buffer's (GpuSurf::wScale): two Z buffers (a
+    // second view, a render to a texture) each keep the one their depths were taken with.
+    // Without a Z buffer nothing compares the depths: a scale for this draw alone.
+    float ownScale = 1.0f;
+    bool ownWritten = false;
+    GpuSurf* const zs = p.z ? p.z->buf->gpu : nullptr;
+    float& wScale = zs ? zs->wScale : ownScale;
+    bool& wWritten = zs ? zs->wWritten : ownWritten;
     p.BindTextures();
     if (segs) {
         // Untextured rhw flattened (below): the whole draw's or none.
@@ -213,9 +221,9 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         if (wScaled && scan.maxRhw > kWNearest) return drawEach();
         if (wScaled) {  // the W scale each would have been drawn with, the scale as one
             const bool writes = writesDepth();
-            const float all = WScaleAfter(g_wScale, scan.maxRhw, g_wWritten);
-            float s = g_wScale;
-            bool written = g_wWritten;
+            const float all = WScaleAfter(wScale, scan.maxRhw, wWritten);
+            float s = wScale;
+            bool written = wWritten;
             for (UINT k = 0; k < segCount && !apart; k++) {
                 s = WScaleAfter(s, segScan[k].maxRhw, written);
                 written = written || writes;
@@ -337,8 +345,8 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         // (Not with the projection's range, wRange: that has no scale.)
         const float scaleRhw = wScaled ? WScaleRhw(src, stride, vertexCount, maxRhw) : 0.0f;
         if (wScaled) {
-            g_wScale = WScaleAfter(g_wScale, scaleRhw, g_wWritten);
-            g_wWritten = g_wWritten || writesDepth();
+            wScale = WScaleAfter(wScale, scaleRhw, wWritten);
+            wWritten = wWritten || writesDepth();
         }
         if (clampZ || badRhw || shift || wz) {
             p.scratch.assign(src, src + size_t(vertexCount) * stride);
@@ -357,7 +365,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
                     // the far plane the farthest, as a W buffer's range ends.)
                     if (wRange) v[2] = std::clamp(p.wDepthFar + p.wDepthPerRhw * rhw, 0.0f, 1.0f);
                     else if (wNearEnd) v[2] = std::max(0.0f, 1.0f - rhw * p.wNear);
-                    else v[2] = rhw > kWNearest ? 0.0f : std::max(0.0f, 1.0f - rhw * g_wScale);
+                    else v[2] = rhw > kWNearest ? 0.0f : std::max(0.0f, 1.0f - rhw * wScale);
                 }
                 if (flatRhw) v[3] = 1.0f;
                 else if (badRhw && (!(v[3] >= FLT_MIN) || !std::isfinite(v[3]))) v[3] = minRhw;

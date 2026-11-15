@@ -202,6 +202,7 @@ public:
                       bool destKeyFromSource);
     HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
                       bool destKeyFromSource = false);
+    HRESULT CopyRowsFrom(Surface* src);  // g_lock held
     HRESULT Flip(Surface* target, DWORD flags);
     HRESULT GetCaps(DDSCAPS2* caps);
     HRESULT GetClipper(IDirectDrawClipper** out);
@@ -366,6 +367,7 @@ private:
     LONG refs_[kRefSlots] = {};
     LONG total_ = 0;  // sum of refs_
     void* wraps_[5] = {};
+    void FreeWraps();
     std::vector<PrivateData> priv_;
 };
 

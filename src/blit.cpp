@@ -160,6 +160,9 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
                          bool destKeyFromSource) {
     // GDI may still be drawing on a surface whose DC is out (ReleaseDC flushes).
     if (dcOut || (src && src->dcOut)) GdiFlush();
+    // 1-, 2- and 4-bit surfaces: ddraw.dll's emulation layer takes none of them, as source or
+    // destination, for a copy or a fill (re/spec/surface-blt.md, section 0).
+    if (buf->fmt.palLow || (src && src->buf->fmt.palLow)) return DDERR_UNSUPPORTED;
     // FourCC surfaces (DXT, YUY2, UYVY): copies (stretched, keyed, mirrored as any) through
     // an A8R8G8B8 decoding of either side, the destination's part encoded again after
     // (BltFourCC). A colour fill of a YUV surface writes the value as it is, as the drivers
@@ -182,8 +185,9 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
         MarkClipsDirty(this, clips);
         return DD_OK;
     }
-    // Bump maps (du/dv, not colours) only copy as they are, as the emulation layer's blits.
-    if (sb && !SameLayout(sb->fmt, buf->fmt) && (sb->fmt.bump || buf->fmt.bump)) return DDERR_UNSUPPORTED;
+    // Bump maps (du/dv, not colours), luminance and alpha-only surfaces only copy as they are,
+    // as the emulation layer's blits.
+    if (sb && !SameLayout(sb->fmt, buf->fmt) && (sb->fmt.CopyOnly() || buf->fmt.CopyOnly())) return DDERR_UNSUPPORTED;
 
     // What Direct3D drew into either surface is read back first.
     if (sb && src != this) src->CpuAccess(false);
@@ -218,6 +222,18 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
     p.dpal = buf->fmt.pal8 ? EffectivePalette() : nullptr;
     DrawBlit(buf, d, sb, s, p, clips);
     MarkClipsDirty(this, clips);
+    return DD_OK;
+}
+
+// The whole of `src` copied row by row: what Direct3D's texture loads do for the 1-, 2- and
+// 4-bit surfaces Blt doesn't take (re/spec/d3d7-device-state.md, Load; d3d6-objects.md §6.6).
+// The same size and format only.
+HRESULT Surface::CopyRowsFrom(Surface* src) {
+    if (!(src->buf->fmt == buf->fmt) || src->W() != W() || src->H() != H()) return DDERR_UNSUPPORTED;
+    src->CpuAccess(false);
+    CpuAccess(true);
+    const size_t row = buf->fmt.RowBytes(DWORD(W()));
+    for (int y = 0; y < H(); y++) memcpy(buf->Row(y), src->buf->Row(y), row);
     return DD_OK;
 }
 

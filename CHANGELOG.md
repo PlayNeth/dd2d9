@@ -3,6 +3,65 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.0
+- **1-, 2- and 4-bit palettized surfaces** (`DDPF_PALETTEINDEXED1`, `2` and `4`), which
+  `CreateSurface` refused. As in `ddraw.dll`: the pixels are packed from each byte's high bits
+  down, `Lock` gives the memory, `SetPalette` takes a palette of the surface's own size (2, 4
+  or 16 entries), `GetDC` works at 1 and 4 bits (GDI has no 2-bit bitmap), and `Blt` and
+  `BltFast` return `DDERR_UNSUPPORTED` for them, fills included, as XP's emulation layer
+  takes none of them. As textures they are drawn through their palette, and a texture load
+  (`IDirect3DTexture::Load`, `IDirect3DDevice7::Load`, `D3DOP_TEXTURELOAD`) copies their
+  rows, as Direct3D did where `Blt` could not. No texture format list names them.
+- **Luminance and alpha-only textures**: 8-bit luminance, luminance with alpha (8 and 16
+  bits) and 8-bit alpha (`DDPF_LUMINANCE`, `DDPF_ALPHA`), which `CreateSurface` refused.
+  Direct3D 9 has these formats, so they go to the GPU as they are (converted where it lacks
+  one, and when colour keyed). A Direct3D 7 hardware device lists the 8-bit luminance, 16-bit
+  luminance with alpha and alpha-only formats, after every colour format; Direct3D 3-6
+  devices list none, as XP's `d3dim.dll` showed only the formats on its own list, but a game
+  that asks for one gets it. Between two surfaces of the same such format `Blt` copies; it
+  converts none of them (`DDERR_UNSUPPORTED`), and they have no DC. As a render target a
+  device takes one as `d3dim700.dll` did, which checks the format of RGB targets only: an
+  8-bit one is refused for having no palette, a 16-bit one keeps the red and the alpha of
+  what is drawn.
+- **Direct3D 7: more lights enabled than the GPU lights at once are all used.** Direct3D 9
+  lights with 8 lights as a rule and refuses to enable more, while XP lit a hardware device's
+  vertices itself, with any number. dd2d9 picked the 8 that lit each object most, which is
+  not what the game asked for. Now it lights such draws itself, with the code
+  `ProcessVertices` already used (every light, the material sources, vertex blending,
+  specular with the local viewer or without), and Direct3D 9 draws the lit vertices. Draws
+  with at most as many lights as the GPU takes are lit by the GPU as before. The log says so
+  the first time.
+- Emulated W buffering keeps its depth scale for each Z buffer. There was one for all: a
+  scene drawn on another render target with its own Z buffer in the middle of a frame (a
+  mirror, a render to a texture) cleared the scale the frame's depths had been taken with,
+  and what was drawn after it compared wrongly with what was drawn before.
+- Running out of memory while creating an object returns `DDERR_OUTOFMEMORY` (or
+  `E_OUTOFMEMORY`) with nothing left half made, where a C++ exception left the call:
+  `DirectDrawCreate` and the class factory, `CreateSurface` (the surface and each back
+  buffer, mip level and cube face), `DuplicateSurface`, `CreatePalette`, `CreateClipper`,
+  Direct3D 3-6's lights, materials, matrices and material and texture handles, and the
+  lists that `AddAttachedSurface`, `SetClipper`, `SetPrivateData`, `SetClipList`, `Lock`
+  with a rectangle, `Flip`, `RestoreAllSurfaces` and the enumerations build. The same for
+  Direct3D 7's draws and `Clear` when the GPU copy of a render target or texture can't be
+  made (Direct3D 3-6's already did); a render target that can't be read back for a `Lock`
+  leaves the surface's memory as it was.
+- `IDirect3DDevice7::SetRenderTarget` refuses a target below 16 bits without a palette
+  whether it is palettized or not (`DDERR_NOPALETTEATTACHED`), as `d3dim700.dll` and as
+  `CreateDevice` did already. Only 8-bit palettized targets were checked.
+- The log's line for each surface created names a luminance, alpha-only or 1-, 2- or 4-bit
+  palettized format, so a log shows whether a game took one of the newly listed texture
+  formats.
+- `fmtprobe.exe` (built with the tests) writes what a `ddraw.dll` and its driver list as
+  texture formats for each Direct3D 7 device and a Direct3D 2 one, and whether the formats
+  that aren't colours can be textures and render targets: to compare Windows' own
+  `ddraw.dll` on a card of the time, or on today's Windows, with dd2d9.
+- Tests: the new formats (surfaces, textures drawn, texture loads, as render targets),
+  lighting with ten lights against the same scene lit by the GPU (also with the vertices'
+  colours as the material's, and blended between two world matrices), W buffering with a depth fill and with a
+  second Z buffer in between, a Direct3D 2 device whose Z-buffer render target is released,
+  and an execute buffer as Direct3D Retained Mode builds one (matrices by handle, a material
+  and a light, a matrix multiplied behind its handle, branches on the status).
+
 ## 1.7.4
 - **A file the game opens with `FILE_FLAG_NO_BUFFERING` is opened without it**
   (`nobuffering=off`, the default), as Windows 95 and 98 ignored the flag. Since NT, every

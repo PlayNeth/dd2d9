@@ -76,7 +76,7 @@ HRESULT Direct3D7::EnumDevices(LPD3DENUMDEVICESCALLBACK7 cb, void* ctx) {
     return D3D_OK;
 }
 
-HRESULT Direct3D7::EnumZBufferFormats(REFCLSID iid, LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) {
+HRESULT Direct3D7::EnumZBufferFormats(REFCLSID iid, LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) try {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(reinterpret_cast<void*>(cb)))) return DDERR_INVALIDPARAMS;
     std::vector<DDPIXELFORMAT> list;
     auto add = [&](DWORD depth, DWORD zmask, DWORD stencilBits, DWORD smask) {
@@ -108,6 +108,8 @@ HRESULT Direct3D7::EnumZBufferFormats(REFCLSID iid, LPD3DENUMPIXELFORMATSCALLBAC
     for (DDPIXELFORMAT& f : list)
         if (cb(&f, ctx) != D3DENUMRET_OK) break;
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the list)
+    return E_OUTOFMEMORY;
 }
 
 HRESULT Direct3D7::CreateVertexBuffer(D3DVERTEXBUFFERDESC* desc, IDirect3DVertexBuffer7** out, DWORD) {

@@ -206,6 +206,7 @@ private:
     RECT dirtyRect_ = {0, 0, 0, 0};  // guarded by g_lock
     LONG intRef_ = 1;  // released when the last external reference goes away
     void* wraps_[4] = {};
+    void FreeParts();
     HWND hwnd_ = nullptr;
     // ddraw.dll's own two windows, as its rules about them see them (hwnd_ above is the one
     // dd2d9 drives: the focus window, also when there is a device window): the object's window

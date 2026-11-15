@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.7.4',
+  version : '1.8.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -74,6 +74,12 @@ executable('focustest', 'tests/focustest.cpp',
 executable('d3d7test', 'tests/d3d7test.cpp',
   dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
                   cpp.find_library('user32')],
+  link_args : static_link + ['-mwindows'],
+  install : false)
+
+# What a ddraw.dll and its driver list as texture formats (see the file's comment).
+executable('fmtprobe', 'tests/fmtprobe.cpp',
+  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid')],
   link_args : static_link + ['-mwindows'],
   install : false)
 

@@ -89,9 +89,11 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **Z buffers can be locked and blitted** by DirectDraw like any surface, where the GPU samples `INTZ` depth textures (nearly all do, DXVK too), antialiasing is off and `zaccess` isn't `off`. Each lock waits for the GPU and copies the buffer back; a lock of at most 64×64 pixels (a lens flare's occlusion test) copies only its rectangle.
 - **Cube maps** become Direct3D 9 cube textures, their faces drawn into read back as other render targets are.
 - **Bump maps** (`DDPF_BUMPDUDV`: U8V8, U5V5L6, U8V8L8) are listed and drawn where the GPU has environment-mapped bump mapping.
+- **Luminance and alpha-only textures** (8-bit luminance, luminance with alpha, 8-bit alpha) are drawn as Direct3D 9's own formats; Direct3D 7 hardware devices list them.
+- **Any number of lights** on a Direct3D 7 device: with more enabled than the GPU lights at once (8 as a rule), dd2d9 lights those draws itself, as XP lit a hardware device's vertices, and Direct3D 9 draws them.
 - **Textures Direct3D drew into** are copied on the GPU when used, mipmapped or colour-keyed ones too (the key made transparent by a pixel shader); palettized ones go through the CPU.
 - **Clip status and picking:** Direct3D 7's `GetClipStatus` follows what's drawn (the clip codes of untransformed vertices, with vertex blending and the user clip planes, and their extents with `D3DRENDERSTATE_EXTENTS`). Direct3D 3–6's `Pick` finds the triangles under the point with their depth (the visible part of one the clip volume cuts), `D3DOP_SPAN` is drawn (as points, as XP's driver path did), and Ramp devices light in shades of the material's colour, as the monochromatic Ramp model did.
-- **What Direct3D 9 lacks is emulated:** 8-bit palettized textures, and the software devices rendering to 8-bit surfaces as XP's RGB and Ramp rasterizers did.
+- **What Direct3D 9 lacks is emulated:** palettized textures (8-bit, and the 1-, 2- and 4-bit ones a game may create), and the software devices rendering to 8-bit surfaces as XP's RGB and Ramp rasterizers did.
 - **The gamma ramp** applies to 3D frames too.
 
 ### Options beyond the original
@@ -260,6 +262,8 @@ All checks pass under Wine 11 (wined3d, Xvfb).
 `build/ddbench.exe` measures performance and writes `ddbench.txt`: `ddbench blit` (blitter throughput), `ddbench flip <w> <h> <bpp>` (a sprite game loop), `ddbench window` (small updates to a windowed primary), `ddbench zlock [w h]` (Direct3D frames with small and whole locks of the Z buffer). With `log=1`, the presenter logs every 10 seconds how much of the frame it converted and how long the game waited for it.
 
 `build/d3dimbench.exe [seconds]` checks and times Direct3D 3-6's CPU vertex pipeline: ProcessVertices with lights, fog and clipping (and odd vertices: NaN, infinities, zero normals), a lit sphere drawn with DrawIndexedPrimitive (whole, and a row at a time through IDirect3DDevice2, which transforms only the vertices each draw uses), 2048 small DrawPrimitive calls of transformed vertices a frame (the cost of a draw), one texture drawn with colour keying on and off in turn (and the key checked transparent only with it), and execute buffers (a TRIANGLE instruction per row, per triangle, and cut by the near plane), and checks that consecutive TRIANGLE instructions draw the same pixels as drawn one by one. It writes `d3dimbench.txt` with a hash of each part's output, the time spent in the drawing calls, the transformed vertices (`d3dimbench-tl-*.bin`) and images (`d3dimbench-*.raw`, 256x256 32-bit): two builds meant to give the same output are compared by those.
+
+`build/fmtprobe.exe` writes `fmtprobe.txt`: the texture formats each Direct3D 7 device and a Direct3D 2 hardware device list, and whether luminance, alpha-only, bump-map and 1- and 4-bit palettized surfaces can be made as textures and used as render targets. It asks whatever `ddraw.dll` it loads, so run beside dd2d9's it shows dd2d9's answers, and without it Windows' own (on XP with a card of the time, or on today's Windows).
 
 `build/reloadtest.exe [dll]` frees and reloads dd2d9 (by default `ddraw_.dll`) while the game window stays subclassed, as a wrapper loading dd2d9 under another name may do.
 

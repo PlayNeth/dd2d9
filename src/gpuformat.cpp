@@ -22,7 +22,12 @@ D3DFORMAT NativeFormat(const Format& f) {
         if (f.bpp == 24) return D3DFMT_X8L8V8U8;  // (widened: see WriteLevel)
         return f.b ? D3DFMT_L6V5U5 : D3DFMT_V8U8;
     }
-    if (f.pal8 || f.zbuf) return D3DFMT_UNKNOWN;
+    if (f.lum) {
+        if (f.bpp == 16) return D3DFMT_A8L8;
+        return f.a ? D3DFMT_A4L4 : D3DFMT_L8;
+    }
+    if (f.alphaOnly) return D3DFMT_A8;
+    if (f.Palettized() || f.zbuf) return D3DFMT_UNKNOWN;
     if (f.bpp == 16) {
         if (f.r == 0xF800 && f.g == 0x07E0 && f.b == 0x001F && !f.a) return D3DFMT_R5G6B5;
         if (f.r == 0x7C00 && f.g == 0x03E0 && f.b == 0x001F) return f.a == 0x8000 ? D3DFMT_A1R5G5B5 : f.a ? D3DFMT_UNKNOWN : D3DFMT_X1R5G5B5;

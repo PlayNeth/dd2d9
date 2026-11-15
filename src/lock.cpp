@@ -17,7 +17,7 @@ HRESULT Surface::GetDC(HDC* out) {
     CpuAccess(true);  // what Direct3D drew is read back first
     HDC dc = buf->GetDC();
     if (!dc) return DDERR_CANTCREATEDC;
-    if (buf->fmt.pal8) {
+    if (buf->fmt.Palettized()) {
         const Palette* p = palette ? palette : (dd->primary ? dd->primary->ShownPalette() : nullptr);
         if (p != buf->dcPal || (p && p->version != buf->dcPalVersion) || !p) LoadDcColorTable(dc, p);
     }
@@ -47,9 +47,10 @@ HRESULT Surface::ReleaseDC(HDC dc, int version) {
 
 void Surface::LoadDcColorTable(HDC dc, const Palette* p) {
     const PALETTEENTRY* e = EffectivePalette();
+    const UINT n = 1u << std::min<DWORD>(buf->fmt.bpp, 8);  // (2 or 16 for a 1- or 4-bit surface)
     RGBQUAD q[256];
-    for (int i = 0; i < 256; i++) q[i] = {e[i].peBlue, e[i].peGreen, e[i].peRed, 0};
-    SetDIBColorTable(dc, 0, 256, q);
+    for (UINT i = 0; i < n; i++) q[i] = {e[i].peBlue, e[i].peGreen, e[i].peRed, 0};
+    SetDIBColorTable(dc, 0, n, q);
     buf->dcPal = p;
     buf->dcPalVersion = p ? p->version : 0;
 }
@@ -163,11 +164,12 @@ HRESULT Surface::Lock(RECT* r, void* outDesc, DWORD flags) {
             return DDERR_SURFACEBUSY;
         }
     }
+    if (r && !fast && !Room(rectLocks)) return DDERR_OUTOFMEMORY;
     GdiFlush();
     // What Direct3D drew is read back first. lockwhole=on: the write may be anywhere (a game
     // writing past the rectangle it locked, which XP's memory let it).
     CpuAccess(!(flags & DDLOCK_READONLY), g_config.lockWhole ? nullptr : &area);
-    uint8_t* p = buf->bits + area.top * buf->pitch + area.left * LONG(buf->fmt.Bytes());
+    uint8_t* p = buf->bits + area.top * buf->pitch + LONG(buf->fmt.Offset(DWORD(area.left)));
     if (fast) {
     } else if (r) {
         rectLocks.push_back({*r, p, (flags & DDLOCK_READONLY) != 0});

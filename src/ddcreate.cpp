@@ -18,8 +18,13 @@ HRESULT DDraw::DuplicateSurface(void* src, void** out, int ddVersion) {
     int version = 1;
     for (int v : {2, 3, 4, 7})
         if (src == s->Iface(v)) version = v;
+    Surface* n;
+    try {
+        n = new Surface(this, s->desc, s->buf, version);
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     s->buf->AddRef();
-    auto* n = new Surface(this, s->desc, s->buf, version);
     n->sysmemRequested = s->sysmemRequested;
     n->ownFormat = s->ownFormat;
     n->uniqueness = s->uniqueness;  // ddraw.dll keeps one for the memory both share
@@ -257,7 +262,7 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
         if (!overlays || (C & DDSCAPS_SYSTEMMEMORY)) return DDERR_NOOVERLAYHW;
         if (F & DDSD_PIXELFORMAT) {
             Format f;
-            if (Format::FromDDPF(pf, &f) && (f.BlockCompressed() || f.bump)) return DDERR_INVALIDPIXELFORMAT;
+            if (Format::FromDDPF(pf, &f) && (f.BlockCompressed() || f.palLow || f.CopyOnly())) return DDERR_INVALIDPIXELFORMAT;
         }
     }
     // What this implementation doesn't have.
@@ -390,10 +395,11 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     // mip levels. ddraw.dll lists the faces on the root from the last one back.
     static const DWORD kFaces[6] = {DDSCAPS2_CUBEMAP_POSITIVEX, DDSCAPS2_CUBEMAP_NEGATIVEX, DDSCAPS2_CUBEMAP_POSITIVEY,
                                     DDSCAPS2_CUBEMAP_NEGATIVEY, DDSCAPS2_CUBEMAP_POSITIVEZ, DDSCAPS2_CUBEMAP_NEGATIVEZ};
-    std::vector<DWORD> faces;
+    DWORD faces[6];
+    size_t faceCount = 0;
     if (cube)
         for (DWORD f : kFaces)
-            if (caps2 & f) faces.push_back(f);
+            if (caps2 & f) faces[faceCount++] = f;
     auto faceDesc = [&](DWORD face) {
         DDSURFACEDESC2 d = base;
         if (face) d.ddsCaps.dwCaps2 = (caps2 & ~DDSCAPS2_CUBEMAP_ALLFACES) | face;
@@ -403,7 +409,13 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     DDSURFACEDESC2 frontDesc = faceDesc(cube ? faces[0] : 0);
     if (flip) frontDesc.ddsCaps.dwCaps |= DDSCAPS_FRONTBUFFER;
     FinishCaps(&frontDesc);
-    auto* front = new Surface(this, frontDesc, b, version);
+    Surface* front;
+    try {
+        front = new Surface(this, frontDesc, b, version);
+    } catch (const std::bad_alloc&) {
+        b->Release();
+        return DDERR_OUTOFMEMORY;
+    }
     front->sysmemRequested = (asked & DDSCAPS_SYSTEMMEMORY) != 0;
     front->ownFormat = !(caps & DDSCAPS_PRIMARYSURFACE) && (in.dwFlags & (DDSD_PIXELFORMAT | DDSD_ZBUFFERBITDEPTH));
     if (caps & DDSCAPS_OWNDC) front->uniqueness = 0;
@@ -426,7 +438,15 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         md.dwWidth = DWORD(mw);
         md.dwHeight = DWORD(mh);
         FinishCaps(&md);
-        auto* m = new Surface(this, md, mb, version);
+        Surface* m = nullptr;
+        try {
+            if (Room(front->children)) m = new Surface(this, md, mb, version);
+        } catch (const std::bad_alloc&) {
+        }
+        if (!m) {
+            mb->Release();
+            return nullptr;
+        }
         m->sysmemRequested = front->sysmemRequested;
         m->ownFormat = front->ownFormat;
         m->uniqueness = front->uniqueness;
@@ -446,14 +466,23 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
             md.dwMipMapCount = levels - i;
             md.ddsCaps.dwCaps2 |= DDSCAPS2_MIPMAPSUBLEVEL;
             Surface* level = addMember(md, mw, mh);
-            if (!level) return false;
+            if (!level || !Room(prev->attached)) return false;
             prev->attached.push_back(level);
             prev = level;
         }
         return true;
     };
 
+    const auto fail = [&] {  // the root takes the members made so far with it
+        front->Release(frontSlot);
+        return DDERR_OUTOFMEMORY;
+    };
     if (flip) {
+        try {
+            front->flipChain.reserve(size_t(backs) + 1);
+        } catch (const std::bad_alloc&) {
+            return fail();
+        }
         front->flipChain.push_back(front);
         Surface* prev = front;
         for (DWORD i = 0; i < backs; i++) {
@@ -463,31 +492,28 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
             bd.ddsCaps.dwCaps = (caps & ~(DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_VISIBLE)) |
                                 (i == 0 ? DDSCAPS_BACKBUFFER : 0);
             Surface* back = addMember(bd, w, h);
-            if (!back) {
-                front->Release(frontSlot);
-                return DDERR_OUTOFMEMORY;
-            }
+            if (!back) return fail();
             front->flipChain.push_back(back);
             prev->chainNext = back;
             prev = back;
         }
         prev->chainNext = front;
     } else {
-        std::vector<Surface*> others;  // the other cube faces, in order
-        for (size_t i = 1; i < faces.size(); i++) {
+        Surface* others[5];  // the other cube faces, in order
+        size_t otherCount = 0;
+        for (size_t i = 1; i < faceCount; i++) {
             const DDSURFACEDESC2 fd = faceDesc(faces[i]);
             Surface* face = addMember(fd, w, h);
-            if (!face || !addLevels(face, fd)) {
-                front->Release(frontSlot);
-                return DDERR_OUTOFMEMORY;
-            }
-            others.push_back(face);
+            if (!face || !addLevels(face, fd)) return fail();
+            others[otherCount++] = face;
         }
-        for (size_t i = others.size(); i-- > 0;) front->attached.push_back(others[i]);
-        if (!addLevels(front, frontDesc)) {
-            front->Release(frontSlot);
-            return DDERR_OUTOFMEMORY;
+        try {
+            front->attached.reserve(otherCount + 1);  // (and the first mip level)
+        } catch (const std::bad_alloc&) {
+            return fail();
         }
+        for (size_t i = otherCount; i-- > 0;) front->attached.push_back(others[i]);
+        if (!addLevels(front, frontDesc)) return fail();
     }
 
     front->ddVersion = ddVersion;
@@ -513,7 +539,11 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         presenter_->Start();
         MarkDirty();
     }
-    DD2D9_LOG("  -> %p %dx%d %lubpp%s", static_cast<void*>(front), w, h, fmt.bpp, front->isPrimary ? " (primary)" : "");
+    // (The kind of format named: a log shows whether a game took a luminance or alpha-only
+    // texture format from the list, or made a 1-, 2- or 4-bit surface.)
+    DD2D9_LOG("  -> %p %dx%d %lubpp%s%s", static_cast<void*>(front), w, h, fmt.bpp,
+              fmt.lum ? (fmt.a ? " luminance with alpha" : " luminance") : fmt.alphaOnly ? " alpha-only" : fmt.palLow ? " palettized" : "",
+              front->isPrimary ? " (primary)" : "");
     for (size_t i = 1; i < front->flipChain.size(); i++)
         DD2D9_LOG("  -> back buffer %p", static_cast<void*>(front->flipChain[i]));
     *out = front->Iface(version);

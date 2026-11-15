@@ -60,11 +60,29 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         const bool u5v5l6 = f.bpp == 16 && f.r == 0x1F && f.g == 0x3E0 && f.b == 0xFC00;
         const bool u8v8l8 = f.bpp == 24 && f.r == 0xFF && f.g == 0xFF00 && f.b == 0xFF0000;
         if (!u8v8 && !u5v5l6 && !u8v8l8) return false;
+    } else if (pf.dwFlags & DDPF_LUMINANCE) {
+        // With alpha at most, as ddraw.dll takes it; the layouts Direct3D 9 has.
+        if (pf.dwFlags & ~DWORD(DDPF_LUMINANCE | DDPF_ALPHAPIXELS)) return false;
+        f.lum = true;
+        f.bpp = pf.dwLuminanceBitCount;
+        f.r = pf.dwLuminanceBitMask;
+        f.a = (pf.dwFlags & DDPF_ALPHAPIXELS) ? pf.dwLuminanceAlphaBitMask : 0;
+        const bool l8 = f.bpp == 8 && f.r == 0xFF && !f.a, a8l8 = f.bpp == 16 && f.r == 0xFF && f.a == 0xFF00;
+        const bool a4l4 = f.bpp == 8 && f.r == 0x0F && f.a == 0xF0;
+        if (!l8 && !a8l8 && !a4l4) return false;
+    } else if (pf.dwFlags & DDPF_ALPHA) {
+        if (pf.dwFlags != DDPF_ALPHA || pf.dwAlphaBitDepth != 8) return false;  // alone, as ddraw.dll takes it
+        f.alphaOnly = true;
+        f.bpp = 8;
+        f.a = 0xFF;
     } else if (pf.dwFlags & DDPF_PALETTEINDEXED8) {
         f.pal8 = true;
         f.bpp = 8;
     } else if (pf.dwFlags & (DDPF_PALETTEINDEXED1 | DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4)) {
-        return false;
+        const DWORD which = pf.dwFlags & (DDPF_PALETTEINDEXED1 | DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4);
+        f.bpp = which == DDPF_PALETTEINDEXED1 ? 1 : which == DDPF_PALETTEINDEXED2 ? 2 : which == DDPF_PALETTEINDEXED4 ? 4 : 0;
+        if (!f.bpp || pf.dwRGBBitCount != f.bpp) return false;  // one of them, with its bit count
+        f.palLow = true;
     } else if (pf.dwFlags & DDPF_RGB) {
         f.bpp = pf.dwRGBBitCount;
         f.r = pf.dwRBitMask;
@@ -104,9 +122,21 @@ void Format::ToDDPF(DDPIXELFORMAT* pf) const {
             pf->dwStencilBitDepth = DWORD(__builtin_popcount(a));
             pf->dwStencilBitMask = a;
         }
+    } else if (lum) {
+        pf->dwFlags = DDPF_LUMINANCE | (a ? DDPF_ALPHAPIXELS : 0);
+        pf->dwLuminanceBitCount = bpp;
+        pf->dwLuminanceBitMask = r;
+        pf->dwLuminanceAlphaBitMask = a;
+    } else if (alphaOnly) {
+        pf->dwFlags = DDPF_ALPHA;
+        pf->dwAlphaBitDepth = 8;
+        pf->dwRGBAlphaBitMask = a;
     } else if (pal8) {
         pf->dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
         pf->dwRGBBitCount = 8;
+    } else if (palLow) {
+        pf->dwFlags = DDPF_RGB | (bpp == 1 ? DDPF_PALETTEINDEXED1 : bpp == 2 ? DDPF_PALETTEINDEXED2 : DDPF_PALETTEINDEXED4);
+        pf->dwRGBBitCount = bpp;
     } else {
         pf->dwFlags = DDPF_RGB | (a ? DDPF_ALPHAPIXELS : 0);
         pf->dwRGBBitCount = bpp;
@@ -134,17 +164,25 @@ static inline uint32_t Insert8(uint32_t c8, uint32_t mask) {
 }
 
 uint32_t PixelToARGB(const Format& f, uint32_t v, const PALETTEENTRY* pal) {
-    if (f.pal8) {
-        if (!pal) return 0xFF000000u | (v & 0xFF) * 0x010101u;
-        const PALETTEENTRY& e = pal[v & 0xFF];
+    if (f.Palettized()) {
+        const uint32_t i = v & f.ValueMask();
+        if (!pal) return 0xFF000000u | (i * 255 / f.ValueMask()) * 0x010101u;  // a grey ramp
+        const PALETTEENTRY& e = pal[i];
         return 0xFF000000u | (uint32_t(e.peRed) << 16) | (uint32_t(e.peGreen) << 8) | e.peBlue;
+    }
+    if (f.alphaOnly) return (v & 0xFF) << 24;  // (transparent to opaque black, as Direct3D's A8)
+    if (f.lum) {
+        const uint32_t l = Extract8(v, f.r);
+        return ((f.a ? Extract8(v, f.a) : 0xFF) << 24) | l * 0x010101u;
     }
     uint32_t a = f.a ? Extract8(v, f.a) : 0xFF;
     return (a << 24) | (Extract8(v, f.r) << 16) | (Extract8(v, f.g) << 8) | Extract8(v, f.b);
 }
 
 uint32_t ARGBToPixel(const Format& f, uint32_t argb) {
-    if (f.pal8) return 0;  // no reverse palette lookup
+    if (f.Palettized()) return 0;  // no reverse palette lookup
+    if (f.alphaOnly) return argb >> 24;
+    if (f.lum) return Insert8((argb >> 16) & 0xFF, f.r) | Insert8(argb >> 24, f.a);  // (the red as luminance)
     return Insert8((argb >> 16) & 0xFF, f.r) | Insert8((argb >> 8) & 0xFF, f.g) | Insert8(argb & 0xFF, f.b) |
            Insert8(argb >> 24, f.a);
 }

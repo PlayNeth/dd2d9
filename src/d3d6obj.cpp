@@ -200,7 +200,7 @@ HRESULT D3D::InnerQuery(REFIID r, void** out) {
     return S_OK;
 }
 
-HRESULT D3D::EnumDevices(LPD3DENUMDEVICESCALLBACK cb, void* ctx, int version) {
+HRESULT D3D::EnumDevices(LPD3DENUMDEVICESCALLBACK cb, void* ctx, int version) try {
     if (!CodeOk(reinterpret_cast<void*>(cb))) return DDERR_INVALIDPARAMS;
     for (int i : DeviceList(version)) {
         D3DDEVICEDESC hal, hel;
@@ -208,10 +208,12 @@ HRESULT D3D::EnumDevices(LPD3DENUMDEVICESCALLBACK cb, void* ctx, int version) {
         if (cb(&g_guids[i], g_descs[i], g_names[i], &hal, &hel, ctx) != D3DENUMRET_OK) break;
     }
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the device list)
+    return E_OUTOFMEMORY;
 }
 
 // A §FindDevice.
-HRESULT D3D::FindDevice(D3DFINDDEVICESEARCH* s, D3DFINDDEVICERESULT* r, int version) {
+HRESULT D3D::FindDevice(D3DFINDDEVICESEARCH* s, D3DFINDDEVICERESULT* r, int version) try {
     if (!s || s->dwSize != sizeof(D3DFINDDEVICESEARCH) || !r ||
         (r->dwSize != 0x16C && r->dwSize != 0x1AC && r->dwSize != 0x20C))
         return DDERR_INVALIDPARAMS;
@@ -263,6 +265,8 @@ HRESULT D3D::FindDevice(D3DFINDDEVICESEARCH* s, D3DFINDDEVICERESULT* r, int vers
         memcpy(p + n, &fs, n);
     }
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the device list)
+    return E_OUTOFMEMORY;
 }
 
 HRESULT D3D::CreateLight(IDirect3DLight** out, IUnknown* outerUnk) {
@@ -270,7 +274,7 @@ HRESULT D3D::CreateLight(IDirect3DLight** out, IUnknown* outerUnk) {
     if (!out) return DDERR_INVALIDPARAMS;
     Guard l;
     *out = nullptr;
-    Light* light = new (std::nothrow) Light(this);
+    Light* light = Room(lights) ? new (std::nothrow) Light(this) : nullptr;
     if (!light) return E_OUTOFMEMORY;
     lights.push_back(light);
     *out = light;
@@ -281,7 +285,7 @@ HRESULT D3D::CreateMaterial(Material** out, IUnknown* outerUnk) {
     if (outerUnk) return CLASS_E_NOAGGREGATION;
     Guard l;
     *out = nullptr;
-    Material* m = new (std::nothrow) Material(this);
+    Material* m = Room(materials) ? new (std::nothrow) Material(this) : nullptr;
     if (!m) return E_OUTOFMEMORY;
     materials.push_back(m);
     *out = m;
@@ -454,7 +458,7 @@ HRESULT D3D::F3::CreateVertexBuffer(D3DVERTEXBUFFERDESC* desc, IDirect3DVertexBu
     return D3D_OK;
 }
 
-HRESULT D3D::F3::EnumZBufferFormats(REFCLSID g, LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) {
+HRESULT D3D::F3::EnumZBufferFormats(REFCLSID g, LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) try {
     if (!CodeOk(reinterpret_cast<void*>(cb))) return DDERR_INVALIDPARAMS;
     const DevKind k = KindOf(g);
     if (k == kBadGuid) return DDERR_INVALIDPARAMS;
@@ -487,6 +491,8 @@ HRESULT D3D::F3::EnumZBufferFormats(REFCLSID g, LPD3DENUMPIXELFORMATSCALLBACK cb
     for (DDPIXELFORMAT& f : list)
         if (cb(&f, ctx) != D3DENUMRET_OK) break;
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the list)
+    return E_OUTOFMEMORY;
 }
 
 // A §~DIRECT3DI: viewports, lights, devices and materials go. Objects the game still holds
@@ -645,9 +651,15 @@ HRESULT Material::GetHandle(Device* dev, D3DMATERIALHANDLE* out) {
             *out = h->value;
             return D3D_OK;
         }
+    if (!Room(handles) || !Room(dev->matHandles)) return D3DERR_MATERIAL_CREATE_FAILED;
     MatHandle* h = new (std::nothrow) MatHandle{g_nextMatHandle++, this, dev, data};
     if (!h) return D3DERR_MATERIAL_CREATE_FAILED;
-    g_matHandles[h->value] = h;
+    try {
+        g_matHandles[h->value] = h;
+    } catch (const std::bad_alloc&) {
+        delete h;
+        return D3DERR_MATERIAL_CREATE_FAILED;
+    }
     handles.push_back(h);
     dev->matHandles.push_back(h);
     *out = h->value;
@@ -670,11 +682,11 @@ SurfaceInfo* Info(Surface* s) {
     return static_cast<SurfaceInfo*>(s->d3dLegacy);
 }
 
-DWORD TexHandleFor(Surface* s) {
+DWORD TexHandleFor(Surface* s) {  // (may throw std::bad_alloc: nothing is left half made)
     SurfaceInfo* i = Info(s);
     if (!i->texHandle) {
+        g_texHandles[g_nextTexHandle] = s;
         i->texHandle = g_nextTexHandle++;
-        g_texHandles[i->texHandle] = s;
     }
     return i->texHandle;
 }
@@ -689,8 +701,8 @@ void SwapHandles(Surface* a, Surface* b) {
     SurfaceInfo* ia = Info(a);
     SurfaceInfo* ib = Info(b);
     std::swap(ia->texHandle, ib->texHandle);
-    g_texHandles[ia->texHandle] = a;
-    g_texHandles[ib->texHandle] = b;
+    if (ia->texHandle) g_texHandles[ia->texHandle] = a;  // (entries there already: nothing is allocated)
+    if (ib->texHandle) g_texHandles[ib->texHandle] = b;
 }
 
 // ---------------------------------------------------------------- texture (C §4)
@@ -722,10 +734,11 @@ HRESULT Texture::F2::QueryInterface(REFIID r, void** out) {
 ULONG Texture::F2::AddRef() { return o->s->AddRef(Surface::SlotFor(o->version)); }
 ULONG Texture::F2::Release() { return o->s->Release(Surface::SlotFor(o->version)); }
 
-HRESULT Texture::GetHandle(Device* dev, D3DTEXTUREHANDLE* h, bool v2) {
+HRESULT Texture::GetHandle(Device* dev, D3DTEXTUREHANDLE* h, bool v2) try {
     if (!dev || !h) return DDERR_INVALIDOBJECT;
     Guard l;
     if (s->desc.ddsCaps.dwCaps2 & DDSCAPS2_TEXTUREMANAGE) return DDERR_INVALIDOBJECT;
+    if (!Room(dev->texHandles)) return DDERR_OUTOFMEMORY;
     const DWORD value = TexHandleFor(s);
     const bool known = std::find(dev->texHandles.begin(), dev->texHandles.end(), value) != dev->texHandles.end();
     *h = 0;
@@ -741,6 +754,8 @@ HRESULT Texture::GetHandle(Device* dev, D3DTEXTUREHANDLE* h, bool v2) {
     }
     *h = value;
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the handle's entry)
+    return DDERR_OUTOFMEMORY;
 }
 
 HRESULT Texture::F1::GetHandle(IDirect3DDevice* d, D3DTEXTUREHANDLE* h) {
@@ -754,7 +769,7 @@ HRESULT Texture::F2::GetHandle(IDirect3DDevice2* d, D3DTEXTUREHANDLE* h) {
 // level, with its palette and colour keys. Also D3DOP_TEXTURELOAD's.
 HRESULT CopyTexture(Surface* dst, Surface* src) {
     if ((dst->desc.ddsCaps.dwCaps2 & 0xFC00) != (src->desc.ddsCaps.dwCaps2 & 0xFC00)) return DDERR_INVALIDPARAMS;
-    if (src->palette && !dst->palette && dst->buf->fmt.pal8) return DDERR_NOPALETTEATTACHED;  // Wine's d3d TextureLoadTest
+    if (src->palette && !dst->palette && dst->buf->fmt.Palettized()) return DDERR_NOPALETTEATTACHED;  // Wine's d3d TextureLoadTest
     if (dst->palette && src->palette) {
         if ((dst->palette->caps & 0x7) != (src->palette->caps & 0x7)) return DDERR_INVALIDPARAMS;
         memcpy(dst->palette->entries, src->palette->entries, sizeof(dst->palette->entries));
@@ -773,7 +788,8 @@ HRESULT CopyTexture(Surface* dst, Surface* src) {
         if (d->lockCount || sl->lockCount) return DDERR_SURFACEBUSY;
         RECT r = {0, 0, d->W(), d->H()};
         RECT sr = {0, 0, sl->W(), sl->H()};
-        const HRESULT hr = d->BltLocked(&r, sl, &sr, 0, nullptr, false);
+        HRESULT hr = d->BltLocked(&r, sl, &sr, 0, nullptr, false);
+        if (hr == DDERR_UNSUPPORTED && d->buf->fmt.palLow) hr = d->CopyRowsFrom(sl);  // (C §6.6: 4, 2 and 1 bits)
         if (FAILED(hr)) return hr;
         d->BumpUniqueness();
     }
@@ -905,7 +921,7 @@ HRESULT D3DLegacyQuery(DDraw* dd, REFIID riid, void** out, int ddVersion) {
 }
 
 // A §Surface hand-off.
-HRESULT D3DLegacyQuerySurface(Surface* s, REFIID riid, void** out, int version) {
+HRESULT D3DLegacyQuerySurface(Surface* s, REFIID riid, void** out, int version) try {
     if (s->dd->dd7 || !D3DLegacyEnabled()) return E_NOINTERFACE;
     Guard l;
     SurfaceInfo* info = Info(s);
@@ -915,7 +931,7 @@ HRESULT D3DLegacyQuerySurface(Surface* s, REFIID riid, void** out, int version) 
     // (nothing would tear it down, and its Gpu is gone).
     if (!s->dd->alive) return E_NOINTERFACE;
     D3D* d3d = EnsureD3D(s->dd, s->ddVersion);
-    if (!d3d) return E_OUTOFMEMORY;
+    if (!d3d || !Room(info->cache)) return E_OUTOFMEMORY;
     Inner* obj = nullptr;
     if (IsEqualGUID(riid, IID_IDirect3DTexture) || IsEqualGUID(riid, IID_IDirect3DTexture2)) {
         obj = new (std::nothrow) Texture(s, version, IsEqualGUID(riid, IID_IDirect3DTexture2) ? 2 : 1);
@@ -930,6 +946,8 @@ HRESULT D3DLegacyQuerySurface(Surface* s, REFIID riid, void** out, int version) 
     }
     info->cache.push_back({riid, obj});
     return SUCCEEDED(obj->InnerQuery(riid, out)) ? S_OK : E_NOINTERFACE;
+} catch (const std::bad_alloc&) {  // (the surface's Direct3D cache itself)
+    return E_OUTOFMEMORY;
 }
 
 void D3DLegacySurfaceGone(Surface* s) {

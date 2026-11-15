@@ -9,11 +9,6 @@ namespace dd2d9 {
 
 // Counts drawing on every render target: a copy made at serial n is of that drawing alone.
 unsigned g_drawSerial = 0;
-// Emulated W buffering's scale: 1/w times this is at most 1 for every vertex so far (it only
-// shrinks, when a nearer one comes, and only while no depth has been written with it:
-// g_wWritten). Gpu lock.
-float g_wScale = 1.0f;
-bool g_wWritten = false;
 // drawtrace=on: one whole frame's draws logged every 600 scenes (about 10 s).
 unsigned g_traceScene = 0;
 
@@ -252,7 +247,7 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
                 // (A fill of the whole buffer starts emulated W buffering's scale again, as Clear: a new
                 // Z buffer's first one here, the game's in GpuDepthFill too.)
                 if (f.r.left <= 0 && f.r.top <= 0 && f.r.right >= LONG(whole.Width) && f.r.bottom >= LONG(whole.Height))
-                    g_wScale = 1.0f, g_wWritten = false;
+                    zs->WStart();
                 dev->Clear(1, &rect, D3DCLEAR_ZBUFFER | ((zs->fmt == D3DFMT_D24S8 || zs->fmt == kIntz) ? D3DCLEAR_STENCIL : 0), 0, f.z, 0);
             }
             dev->SetViewport(&vpSent);
@@ -408,7 +403,7 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
     // Emulated W buffering's scale starts again with each whole depth clear (a frame): one
     // stray near vertex shrinks it for that frame only, not for good.
-    if ((flags & D3DCLEAR_ZBUFFER) && whole) g_wScale = 1.0f, g_wWritten = false;
+    if ((flags & D3DCLEAR_ZBUFFER) && whole && p.z && p.z->buf->gpu) p.z->buf->gpu->WStart();
     if (p.rt->isPrimary) p.rt->MarkDirtyIfVisible();  // drawn into the front surface itself
     if (flags & D3DCLEAR_TARGET) {
         p.rt->buf->cpuStale = true;
@@ -468,7 +463,12 @@ IDirect3DVertexDeclaration9* GpuContext::Impl::Decl(DWORD fvf) {
         DD2D9_LOG("Direct3D: no vertex declaration for FVF 0x%lx", fvf);
         decl = nullptr;
     }
-    decls[fvf] = decl;
+    try {
+        decls[fvf] = decl;
+    } catch (...) {  // (out of memory: not kept, so not held)
+        if (decl) decl->Release();
+        throw;
+    }
     lastFvf = fvf;
     lastDecl = decl;
     return decl;

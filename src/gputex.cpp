@@ -20,7 +20,7 @@ static const Palette* TexturePalette(const Surface* s) {
 static bool PaletteHasAlpha(const Palette* pal) { return pal && (pal->caps & DDPCAPS_ALPHA); }
 
 bool TextureHasAlpha(const Surface* s) {
-    return s->buf->fmt.a || (s->buf->fmt.pal8 && PaletteHasAlpha(TexturePalette(s)));
+    return s->buf->fmt.a || (s->buf->fmt.Palettized() && PaletteHasAlpha(TexturePalette(s)));
 }
 
 // What a texture's texels are shown with: an 8-bit one's palette, and its colour key, made
@@ -30,7 +30,7 @@ struct TexLook {
     bool keyed;
     DWORD key;
     TexLook(const Surface* s, bool colorKey)
-        : pal(s->buf->fmt.pal8 ? TexturePalette(s) : nullptr),
+        : pal(s->buf->fmt.Palettized() ? TexturePalette(s) : nullptr),
           keyed(colorKey && s->hasCk[kCkSrcBlt] && !s->buf->fmt.fourcc && !s->buf->fmt.bump),
           key(keyed ? s->ck[kCkSrcBlt].dwColorSpaceLowValue : 0) {}
     // Not what the copy was made with: every level uploaded again.
@@ -169,7 +169,7 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
         if (gfmt == D3DFMT_UNKNOWN) gfmt = b->gpu->fmt;
         else if (b->gpu->fmt != gfmt) return nullptr;  // (levels drawn in different formats)
     }
-    if (gfmt == D3DFMT_UNKNOWN || fmt.pal8 || fmt.fourcc || fmt.bump) return nullptr;
+    if (gfmt == D3DFMT_UNKNOWN || fmt.Palettized() || fmt.fourcc || fmt.CopyOnly()) return nullptr;
     // The texture's format: the render targets', or with a key A8R8G8B8 (alpha for it). The
     // levels the CPU has newer go up as they are (the render targets' layout is the
     // texture's) or converted to 32-bit colour.
@@ -287,10 +287,7 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
 // The texture's GPU copy, uploaded where the CPU copy changed. Gpu lock held.
 IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, bool colorKey) {
     if (s->gpuTex && s->gpuTex->gpu != &gpu) return nullptr;
-    if (!s->gpuTex) {
-        s->gpuTex = new GpuTex(&gpu, s);
-        gpu.AddOwner(s->gpuTex);
-    }
+    if (!s->gpuTex) s->gpuTex = NewOwner<GpuTex>(gpu, s);
     GpuTex* t = s->gpuTex;
     if (s->desc.ddsCaps.dwCaps2 & DDSCAPS2_CUBEMAP) return EnsureCube(gpu, d, s, colorKey);
     struct Chain {  // the mip levels, at most 16 (no allocation per bound texture per draw)

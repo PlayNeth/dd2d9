@@ -12,13 +12,14 @@
 
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.7.4"
+#define DD2D9_VERSION "1.8.0"
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -91,6 +92,17 @@ inline void WritableVtbl(const T* obj) {
     if (!done) {
         done = true;
         MakeVtblWritable(obj);
+    }
+}
+
+// Room for one more element in v, so that the push_back after it can't fail: false without
+// the memory for it (an exception mustn't leave a COM method).
+template <class T> bool Room(std::vector<T>& v) {
+    try {
+        if (v.size() == v.capacity()) v.reserve(v.empty() ? 8 : v.size() * 2);
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
     }
 }
 
@@ -184,6 +196,14 @@ struct Format {
     DWORD bpp = 0;
     DWORD r = 0, g = 0, b = 0, a = 0;
     bool pal8 = false;
+    // Palettized at 1, 2 or 4 bits (bpp says which), the pixels packed from each byte's high
+    // bits down. ddraw.dll makes such surfaces, locks them and gives a DC on them (not at 2
+    // bits: GDI has no such bitmap); its emulation layer blits none of them, fills included
+    // (re/spec/surface-blt.md, section 0), and Direct3D's texture loads copy their rows.
+    bool palLow = false;
+    // Luminance (DDPF_LUMINANCE): r = the luminance mask, a = the alpha mask (0 without): L8,
+    // A8L8 and A4L4. Alpha alone (DDPF_ALPHA): 8 bits, a = 0xFF. Textures.
+    bool lum = false, alphaOnly = false;
     bool zbuf = false;
     bool fourcc = false;
     DWORD fourCC = 0;
@@ -193,9 +213,15 @@ struct Format {
 
     // Bytes a pixel takes in a row (a planar format: its luma plane's one).
     DWORD Bytes() const { return bpp == 12 && fourcc ? 1 : (bpp + 7) / 8; }
+    // The bytes w pixels take in a row, and the byte pixel x of a row is in (or starts at).
+    DWORD RowBytes(DWORD w) const { return palLow ? (w * bpp + 7) / 8 : w * Bytes(); }
+    DWORD Offset(DWORD x) const { return palLow ? x * bpp / 8 : x * Bytes(); }
+    bool Palettized() const { return pal8 || palLow; }
+    // Formats that aren't colours as the blitter converts them: copied as they are only.
+    bool CopyOnly() const { return bump || lum || alphaOnly; }
     DWORD ValueMask() const { return bpp >= 32 ? 0xFFFFFFFFu : ((1u << bpp) - 1); }
     // Bits that take part in color-key comparisons (ignore X / alpha bits).
-    DWORD KeyMask() const { return (pal8 || zbuf || fourcc || bump) ? ValueMask() : (r | g | b); }
+    DWORD KeyMask() const { return (Palettized() || zbuf || fourcc || bump || alphaOnly) ? ValueMask() : (r | g | b); }
     // DXT1-5: memory is described by a linear size instead of a pitch.
     bool BlockCompressed() const { return fourcc && bpp == 8; }
     // YUY2, UYVY: packed 4:2:2, two pixels in four bytes sharing their chroma.
@@ -206,7 +232,8 @@ struct Format {
     bool IsStandardX8R8G8B8() const { return bpp == 32 && r == 0xFF0000 && g == 0xFF00 && b == 0xFF; }
     bool operator==(const Format& o) const {
         return bpp == o.bpp && r == o.r && g == o.g && b == o.b && a == o.a && pal8 == o.pal8 &&
-               zbuf == o.zbuf && fourcc == o.fourcc && fourCC == o.fourCC && bump == o.bump;
+               palLow == o.palLow && lum == o.lum && alphaOnly == o.alphaOnly && zbuf == o.zbuf && fourcc == o.fourcc &&
+               fourCC == o.fourCC && bump == o.bump;
     }
     bool operator!=(const Format& o) const { return !(*this == o); }
 

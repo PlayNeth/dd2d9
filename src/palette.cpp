@@ -11,8 +11,8 @@ bool LivePalette(const Palette* p) { return g_palettes.Has(p); }
 
 Palette::Palette(DDraw* dd, DWORD c, const PALETTEENTRY* e) : caps(c), dd_(dd) {
     WritableVtbl(this);
+    g_palettes.Add(this);  // (may throw: before anything there is to undo)
     if (dd_) dd_->IntAddRef();
-    g_palettes.Add(this);
     int n = Count();
     if (e) {
         if (caps & DDPCAPS_8BITENTRIES) {
@@ -141,7 +141,7 @@ HRESULT Palette::SetEntries(DWORD flags, DWORD start, DWORD count, LPPALETTEENTR
     // strokes.
     if (dd_)
         for (Surface* sf : dd_->surfaces)
-            if (sf->dcOut && !sf->palette && sf->buf && sf->buf->fmt.pal8 && sf->buf->dcPal == this)
+            if (sf->dcOut && !sf->palette && sf->buf && sf->buf->fmt.Palettized() && sf->buf->dcPal == this)
                 sf->LoadDcColorTable(sf->dcOut, this);
     return DD_OK;
 }

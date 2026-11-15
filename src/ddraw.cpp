@@ -22,15 +22,21 @@ bool g_hwPaletteKept;
 
 DDraw::DDraw() {
     seenUniqueness_ = LONG(DisplayUniqueness());  // (before other objects' changes can reach it)
-    {
+    // Everything that needs memory first, so that running out of it leaves nothing half made.
+    try {
+        wraps_[0] = new DDWrap<1>(this);
+        wraps_[1] = new DDWrap<2>(this);
+        wraps_[2] = new DDWrap<4>(this);
+        wraps_[3] = new DDWrap<7>(this);
+        gpu_ = new Gpu;
+        presenter_ = new Presenter(this);
         Guard l;
         g_ddraws.push_back(this);
+    } catch (...) {
+        FreeParts();
+        throw;
     }
     NoteDisplayMode();
-    wraps_[0] = new DDWrap<1>(this);
-    wraps_[1] = new DDWrap<2>(this);
-    wraps_[2] = new DDWrap<4>(this);
-    wraps_[3] = new DDWrap<7>(this);
     {
         Guard l;
         if (g_hwPaletteKept) memcpy(defaultPalette, g_hwPalette, sizeof(defaultPalette));
@@ -40,8 +46,6 @@ DDraw::DDraw() {
     UpdateRefreshRate();
     QueryPerformanceFrequency(&qpcFreq_);
     QueryPerformanceCounter(&qpcBase_);
-    gpu_ = new Gpu;
-    presenter_ = new Presenter(this);
     timeBeginPeriod(1);  // precise Sleep() for vblank emulation and flip pacing
 }
 
@@ -51,6 +55,10 @@ DDraw::~DDraw() {
         g_ddraws.erase(std::find(g_ddraws.begin(), g_ddraws.end(), this));
     }
     timeEndPeriod(1);
+    FreeParts();
+}
+
+void DDraw::FreeParts() {
     delete presenter_;
     delete gpu_;  // after the presenter, which used it
     delete static_cast<DDWrap<1>*>(wraps_[0]);
@@ -186,7 +194,12 @@ HRESULT DDraw::CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPale
     if ((flags & DDPCAPS_ALLOW256) && !(flags & DDPCAPS_8BIT)) return DDERR_INVALIDPARAMS;
     if (!entries) return DDERR_INVALIDPARAMS;
     Guard l;
-    auto* p = new Palette(this, flags, entries);
+    Palette* p;
+    try {
+        p = new Palette(this, flags, entries);
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     if (version >= 4) {  // made through IDirectDraw4/7: references it, as in ddraw.dll
         AddRef(version);
         p->ddRef = version;
@@ -201,7 +214,12 @@ HRESULT DDraw::CreateClipper(DWORD flags, IDirectDrawClipper** out, IUnknown* ou
     *out = nullptr;
     if (flags) return DDERR_INVALIDPARAMS;
     Guard l;
-    auto* c = new Clipper(this);
+    Clipper* c;
+    try {
+        c = new Clipper(this);
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     c->fromDD1 = version < 2;
     if (version >= 4) {  // made through IDirectDraw4/7: references it, as in ddraw.dll
         AddRef(version);

@@ -72,8 +72,9 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
         return DD_OK;
     }
     const bool dstConv = db->fmt.fourcc, srcConv = sb->fmt.fourcc;
-    // Bump maps (du/dv, not colours) only copy as they are: never through a decoding.
-    if ((!dstConv && db->fmt.bump) || (!srcConv && sb->fmt.bump)) return DDERR_UNSUPPORTED;
+    // Bump maps (du/dv, not colours), luminance and alpha-only surfaces only copy as they are:
+    // never through a decoding.
+    if ((!dstConv && db->fmt.CopyOnly()) || (!srcConv && sb->fmt.CopyOnly())) return DDERR_UNSUPPORTED;
     std::vector<RECT>& clips = g_clips;
     if (HRESULT hr = ClipsFor(this, dr, useClipper, &clips); FAILED(hr)) return hr;
 

@@ -78,7 +78,12 @@ HRESULT DDraw::EnumDisplayModes(DWORD flags, const void* filter, void* ctx, void
     if (!callback || (flags & ~DWORD(DDEDM_REFRESHRATES | DDEDM_STANDARDVGAMODES))) return DDERR_INVALIDPARAMS;
     DDSURFACEDESC2 f = {};
     if (filter && !DescIn(filter, &f)) return DDERR_INVALIDPARAMS;
-    const std::vector<SIZE> sizes = ModeSizes();
+    std::vector<SIZE> sizes;
+    try {
+        sizes = ModeSizes();
+    } catch (const std::bad_alloc&) {
+        return DDERR_OUTOFMEMORY;
+    }
     using CB = HRESULT(WINAPI*)(void*, void*);
     static const DWORD kBpps[] = {8, 16, 32};
     for (DWORD bpp : kBpps) {
@@ -348,6 +353,12 @@ HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* ca
     std::vector<DDSURFACEDESC2> descs;
     {
         Guard l;
+        try {  // (before any is referenced)
+            list.reserve(surfaces.size());
+            descs.reserve(surfaces.size());
+        } catch (const std::bad_alloc&) {
+            return DDERR_OUTOFMEMORY;
+        }
         for (size_t k = surfaces.size(); k-- > 0;) {
             Surface* s = surfaces[k];
             if (!all && nomatch == DescMatches(want, s)) continue;

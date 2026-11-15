@@ -23,6 +23,11 @@ bool TssToSampler(DWORD type, DWORD value, DWORD* sampler, DWORD* value9);
 // The bump map formats a hardware device lists where the GPU has them with the bump-mapping
 // operations (DirectX 6 and 7: environment-mapped bump mapping), appended to list.
 void AddBumpFormats(std::vector<DDPIXELFORMAT>* list);
+// The luminance (L8, A8L8) and alpha-only (A8) formats a Direct3D 7 hardware device lists
+// where the GPU has them, appended to list. (Direct3D 3-6 devices list none: d3dim.dll shows
+// only its own inclusion list's formats, re/spec/d3d6-device.md §7.4; a game that asks for one
+// anyway gets it.)
+void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list);
 
 // ZBIAS (0-16) as D3D9's DEPTHBIAS, a fraction of the depth range: the factor Wine's ddraw
 // used until 2011 (its zbias_factor). XP leaves the scale to the driver (S, ZBIAS: not

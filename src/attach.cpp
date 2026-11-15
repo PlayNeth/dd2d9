@@ -85,6 +85,7 @@ HRESULT Surface::AddAttachedSurface(Surface* s, int version, int attacheeVersion
     for (Surface* a : s->attached)
         if (a == this) return DDERR_SURFACEALREADYATTACHED;
     if (flipPair) return AttachForFlip(s, slot);
+    if (!Room(attached) || !Room(attachRefs)) return DDERR_OUTOFMEMORY;
     s->AddRef(slot);
     attached.push_back(s);
     attachRefs.push_back({s, slot, NextAttachSeq()});
@@ -246,7 +247,11 @@ HRESULT Surface::EnumAttachedSurfaces(int v, void* ctx, void* callback) {
     {
         Guard l;
         if (IsLost()) return DDERR_SURFACELOST;
-        for (const AttachEntry& e : AttachList()) list.push_back(e.s);
+        try {
+            for (const AttachEntry& e : AttachList()) list.push_back(e.s);
+        } catch (const std::bad_alloc&) {
+            return DDERR_OUTOFMEMORY;
+        }
         for (Surface* s : list) s->AddRef(SlotFor(HandedOut(v)));  // the callback releases it
     }
     size_t i = 0;
@@ -341,8 +346,13 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         if (!chainNext) return DDERR_NOTFLIPPABLE;
         DD2D9_TRACE("Flip %p target=%p flags=0x%lx", static_cast<void*>(this), static_cast<void*>(target), flags);
         // The chain's order is the ring's (back buffers attached later sit right after the front).
-        std::vector<Surface*> chain{this};
-        for (Surface* m = chainNext; m && m != this && chain.size() < 4096; m = m->chainNext) chain.push_back(m);
+        std::vector<Surface*> chain;
+        try {
+            chain.push_back(this);
+            for (Surface* m = chainNext; m && m != this && chain.size() < 4096; m = m->chainNext) chain.push_back(m);
+        } catch (const std::bad_alloc&) {
+            return DDERR_OUTOFMEMORY;
+        }
         // Only the buffers that change hands have to be free: with a target, the others may be locked.
         size_t k = 0;
         for (size_t i = 1; i < chain.size(); i++) {

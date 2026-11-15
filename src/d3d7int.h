@@ -312,7 +312,7 @@ public:
     DWORD keyAlphaSentV_[6] = {};
     // Reused from draw to draw (g_lock): strided vertices gathered, vertices given a normal,
     // a clipped vertex buffer's primitives, indices made safe.
-    std::vector<uint8_t> gathered_, withNormal_, clipped_;
+    std::vector<uint8_t> gathered_, withNormal_, clipped_, lit_;
     std::vector<WORD> safeIdx_;
     D3DVIEWPORT7 vp_;
     DWORD rs_[256];
@@ -325,10 +325,12 @@ public:
         bool onGpu = false;  // enabled in D3D9 (SendLightEnables)
     };
     std::vector<Light> lights_;
-    // More lights enabled than the GPU lights at once (SendLightEnables chooses among them
-    // for each object: again when the world matrix changes).
+    // More lights enabled than the GPU lights at once (SendLightEnables): the draws are lit
+    // here instead (LightOnCpu), by all of them, as XP's front end lit a HAL device's.
     bool lightsOver_ = false;
     bool lightsOverLogged_ = false;
+    DWORD lightingSent_ = 0xFFFFFFFF;  // LIGHTING as last sent to D3D9 (off for a draw lit here)
+    bool LightOnCpu(DWORD* fvf, const void** v, UINT* stride, DWORD* n, const WORD* idx, DWORD ni);
     D3DCLIPSTATUS cs_ = {};
     // The clip status drawing updates (as XP's front end): kept only once the game has asked
     // for it (GetClipStatus), as it costs a transform of every untransformed vertex drawn.

@@ -64,10 +64,7 @@ bool ReadableDepth(IDirect3DDevice9* d) {
 // The buffer's render-target (or Z) surface, made if needed. Gpu lock held, device usable.
 GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth) {
     if (b->gpu && b->gpu->gpu != &gpu) return nullptr;  // another object's device (not expected)
-    if (!b->gpu) {
-        b->gpu = new GpuSurf(&gpu, b, depth);
-        gpu.AddOwner(b->gpu);
-    }
+    if (!b->gpu) b->gpu = NewOwner<GpuSurf>(gpu, b, depth);
     GpuSurf* g = b->gpu;
     g->TakeLoss();
     if (g->surf) return g;
@@ -332,11 +329,12 @@ void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
         g->sysmem = nullptr;
         return;
     }
+    // (Before the lock: without the memory for it nothing is left locked.)
+    if (g->convert && !b->fmt.pal8 && !g->toPixel) g->toPixel = new ToPixel(b->fmt);
     gpu.CloseScene();
     if (FAILED(d->GetRenderTargetData(g->surf, g->sysmem))) return;
     D3DLOCKED_RECT lr;
     if (FAILED(g->sysmem->LockRect(&lr, nullptr, D3DLOCK_READONLY))) return;
-    if (g->convert && !b->fmt.pal8 && !g->toPixel) g->toPixel = new ToPixel(b->fmt);
     for (int y = 0; y < b->h; y++)
         RowFromGpu(b, y, static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch, g->convert, g->pal, g->toPixel);
     g->sysmem->UnlockRect();
@@ -346,7 +344,7 @@ void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
 void GpuCpuAccess(Surface* s, bool write, const RECT* area) {
     Buffer* b = s->buf;
     GpuSurf* g = b->gpu;
-    if (g && g->gpu && b->cpuStale) {
+    if (g && g->gpu && b->cpuStale) try {
         Gpu& gpu = *g->gpu;
         GpuGuard l(gpu);
         g->SetPalette(s);  // a palettized target maps back through the palette it has now
@@ -362,6 +360,10 @@ void GpuCpuAccess(Surface* s, bool write, const RECT* area) {
             if (!partly) ReadBack(gpu, d, g);
         }
         if (!partly) b->cpuStale = false;
+    } catch (const std::bad_alloc&) {
+        // Without the memory to read it back: the CPU copy as it was (every caller is a
+        // DirectDraw method, with nothing to undo here and its own result to give).
+        b->cpuStale = false;
     }
     // A writable Z buffer written with depth fills still pending: the CPU copy has them (the
     // fill drew there too), so the upload carries them, in order with the write.

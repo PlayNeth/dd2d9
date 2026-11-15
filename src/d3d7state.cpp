@@ -142,7 +142,6 @@ void Device7::Flush() {
         ctx_.SetTexture(i, tex_[i]);
         if (i == 0) PushKeyAlpha();
     }
-    const bool worldMoved = (xformDirty_ & (1u << D3DTRANSFORMSTATE_WORLD)) != 0;
     for (DWORD m = std::exchange(xformDirty_, 0u); m; m &= m - 1) PushTransform(DWORD(__builtin_ctz(m)));
     if (std::exchange(vpDirty_, false)) ctx_.SetViewport(vp_.dwX, vp_.dwY, vp_.dwWidth, vp_.dwHeight, vp_.dvMinZ, vp_.dvMaxZ);
     if (std::exchange(matDirty_, false)) ctx_.SetMaterial(&mat_);
@@ -150,8 +149,6 @@ void Device7::Flush() {
         for (DWORD i = 0; i < lights_.size(); i++)
             if (std::exchange(lights_[i].dirty, false)) PushLight(i);
         SendLightEnables(false);
-    } else if (lightsOver_ && worldMoved) {
-        SendLightEnables(false);  // (another object: the lights that matter there)
     }
     for (DWORD m = std::exchange(planesDirty_, 0u); m; m &= m - 1) {
         const DWORD i = DWORD(__builtin_ctz(m));
@@ -187,6 +184,10 @@ void Device7::PushRS(DWORD s) {
         blendSent_ = std::min<DWORD>(v, D3DVBLEND_3WEIGHTS);
         ctx_.SetRenderState(151, blendSent_);
         break;
+    case 137:  // LIGHTING: off for the draws dd2d9 lights itself (DrawCommon)
+        lightingSent_ = v;
+        ctx_.SetRenderState(137, v);
+        break;
     case 35: case 36: case 37: case 140:  // FOGTABLEMODE, FOGSTART, FOGEND, FOGVERTEXMODE:
         // sent per draw (DrawCommon: SendFog), what D3D9 gets depending on the vertices
         fogSent_ = false;
@@ -197,7 +198,7 @@ void Device7::PushRS(DWORD s) {
         break;
     case 8: case 9: case 14: case 16: case 19: case 20: case 22: case 23: case 26: case 28: case 29:
     case 34: case 38: case 48: case 52: case 53: case 54: case 55: case 56: case 57:
-    case 58: case 59: case 60: case 136: case 137: case 139: case 141: case 142: case 143: case 145:
+    case 58: case 59: case 60: case 136: case 139: case 141: case 142: case 143: case 145:
     case 146: case 147: case 148:
         ctx_.SetRenderState(s, v);
         break;
@@ -289,10 +290,8 @@ void Device7::PushLight(DWORD i) {
 // The lights D3D9 has enabled. XP lit a HAL or software device's vertices itself, with any
 // number of lights (dwMaxActiveLights unlimited); D3D9's hardware lights only so many at once
 // (D3DCAPS9::MaxActiveLights, 8 as a rule) and refuses to enable more. With more enabled than
-// that, those that light the object most are chosen: by their colour, and for point and spot
-// lights their attenuation at the object's place (the world matrix's translation), none past
-// their range. Chosen again when a light or the world matrix changes. An approximation: an
-// object large against the lights' distances could be lit by others.
+// that, dd2d9 lights the draws itself, by all of them (LightOnCpu), and D3D9 has the first
+// ones enabled, unused.
 // all: D3D9's own state is unknown (a new device, another context drew): every light sent.
 void Device7::SendLightEnables(bool all) {
     DWORD limit = GpuGetCaps().maxActiveLights;
@@ -300,42 +299,16 @@ void Device7::SendLightEnables(bool all) {
     DWORD enabled = 0;
     for (const Light& l : lights_) enabled += l.set && l.enabled;
     lightsOver_ = enabled > limit;
-    static std::vector<std::pair<float, DWORD>> ranked;  // (g_lock held)
-    if (lightsOver_) {
-        if (!std::exchange(lightsOverLogged_, true))
-            DD2D9_LOG("Direct3D 7: %lu lights enabled, the GPU lights %lu at once: the %lu that light each object most are used",
-                      enabled, limit, limit);
-        ranked.clear();
-        const float ox = world_._41, oy = world_._42, oz = world_._43;
-        for (DWORD i = 0; i < lights_.size(); i++) {
-            const Light& l = lights_[i];
-            if (!l.set || !l.enabled) continue;
-            const D3DLIGHT7& d = l.l;
-            float score = std::max({d.dcvDiffuse.r, d.dcvDiffuse.g, d.dcvDiffuse.b, d.dcvSpecular.r, d.dcvSpecular.g,
-                                    d.dcvSpecular.b, d.dcvAmbient.r, d.dcvAmbient.g, d.dcvAmbient.b});
-            if (d.dltType == D3DLIGHT_POINT || d.dltType == D3DLIGHT_SPOT) {
-                const float dx = d.dvPosition.x - ox, dy = d.dvPosition.y - oy, dz = d.dvPosition.z - oz;
-                const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-                const float att = d.dvAttenuation0 + d.dvAttenuation1 * dist + d.dvAttenuation2 * dist * dist;
-                if (dist > d.dvRange) score = 0.0f;
-                else if (att > 1e-6f) score /= att;
-                else score *= 1e6f;
-            }
-            if (!(score >= 0.0f)) score = 0.0f;  // (NaN, negative colours: last)
-            ranked.emplace_back(-score, i);       // strongest first; equal ones by index
-        }
-        std::sort(ranked.begin(), ranked.end());
-    }
+    if (lightsOver_ && !std::exchange(lightsOverLogged_, true))
+        DD2D9_LOG("Direct3D 7: %lu lights enabled, the GPU lights %lu at once: such draws are lit by dd2d9 itself", enabled,
+                  limit);
     // Off before on: never more enabled in D3D9 than it takes.
     for (int pass = 0; pass < 2; pass++) {
+        DWORD on = 0;
         for (DWORD i = 0; i < lights_.size(); i++) {
             Light& l = lights_[i];
             if (!l.set) continue;
-            bool want = l.enabled;
-            if (want && lightsOver_) {
-                want = false;
-                for (DWORD k = 0; k < limit && k < ranked.size(); k++) want = want || ranked[k].second == i;
-            }
+            const bool want = l.enabled && on++ < limit;
             if (want != (pass == 1)) continue;
             if (all || want != l.onGpu) ctx_.LightEnable(i, want);
             l.onGpu = want;
@@ -635,7 +608,7 @@ HRESULT Device7::SetClipPlane(DWORD i, D3DVALUE* p) {
     return D3D_OK;
 }
 
-HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) {
+HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) try {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(reinterpret_cast<void*>(cb)))) return DDERR_INVALIDPARAMS;
     std::vector<DDPIXELFORMAT> list;
     auto rgb = [&](DWORD bpp, DWORD r, DWORD g, DWORD b, DWORD a) {
@@ -677,10 +650,13 @@ HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx)
             list.push_back(f);
         }
         AddBumpFormats(&list);
+        AddLuminanceFormats(&list);  // (last: after every colour format a game may be looking for)
     }
     for (DDPIXELFORMAT& f : list)
         if (cb(&f, ctx) != D3DENUMRET_OK) break;
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the list)
+    return E_OUTOFMEMORY;
 }
 
 // No driver to ask (a deliberate difference, S §For dd2d9 17): ValidateStages.

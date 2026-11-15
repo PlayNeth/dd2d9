@@ -2084,12 +2084,442 @@ static int RunExecute() {
               whole.x1, whole.y1, whole.x2, whole.y2, left.x1, left.y1, left.x2, left.y2);
     }
 
+    // A frame as Direct3D Retained Mode builds one: matrices by handle, a material and a light,
+    // and one execute buffer that sets the transforms, the light state and render states, lights
+    // a quad (TRANSFORMLIGHT), changes the world matrix behind its handle (MATRIXMULTIPLY), then
+    // transforms lit vertices with it, branching over a quad on the status it has just set.
+    {
+        D3DMATRIX ident = {};
+        ident._11 = ident._22 = ident._33 = ident._44 = 1.0f;
+        D3DMATRIX move = ident;
+        move._41 = 1.0f;  // one unit to the right
+        D3DMATRIXHANDLE hWorld = 0, hView = 0, hProj = 0, hMove = 0;
+        dev->CreateMatrix(&hWorld);
+        dev->CreateMatrix(&hView);
+        dev->CreateMatrix(&hProj);
+        dev->CreateMatrix(&hMove);
+        dev->SetMatrix(hWorld, &ident);
+        dev->SetMatrix(hView, &ident);
+        dev->SetMatrix(hProj, &ident);
+        dev->SetMatrix(hMove, &move);
+        IDirect3DMaterial* mat = nullptr;
+        IDirect3DLight* light = nullptr;
+        D3DMATERIALHANDLE hMat = 0;
+        d3d->CreateMaterial(&mat, nullptr);
+        d3d->CreateLight(&light, nullptr);
+        D3DMATERIAL md = {};
+        md.dwSize = sizeof(md);
+        md.diffuse.g = md.diffuse.a = 1.0f;
+        md.dwRampSize = 1;
+        D3DLIGHT ld = {};
+        ld.dwSize = sizeof(ld);
+        ld.dltType = D3DLIGHT_DIRECTIONAL;
+        ld.dcvColor.r = ld.dcvColor.g = ld.dcvColor.b = ld.dcvColor.a = 1.0f;
+        ld.dvDirection.z = 1.0f;
+        IDirect3DExecuteBuffer* eb4 = nullptr;
+        D3DEXECUTEBUFFERDESC ed4 = {};
+        ed4.dwSize = sizeof(ed4);
+        ed4.dwFlags = D3DDEB_BUFSIZE;
+        ed4.dwBufferSize = 2048;
+        DWORD seen[4] = {0xBAD, 0xBAD, 0xBAD, 0xBAD};
+        HRESULT xr = E_FAIL;
+        if (mat && light && SUCCEEDED(mat->SetMaterial(&md)) && SUCCEEDED(mat->GetHandle(dev, &hMat)) &&
+            SUCCEEDED(light->SetLight(&ld)) && SUCCEEDED(vp->AddLight(light)) &&
+            SUCCEEDED(dev->CreateExecuteBuffer(&ed4, &eb4, nullptr)) && SUCCEEDED(eb4->Lock(&ed4))) {
+            BYTE* b4 = static_cast<BYTE*>(ed4.lpData);
+            // 0-3: unlit vertices facing the light, the left of the view. 4-15: lit ones, placed one
+            // unit to the left of where the moved world matrix shows them: a blue quad (top
+            // right), a white one over the whole view (branched over), a yellow one (bottom right).
+            const D3DVERTEX uv[4] = {{{-1.0f}, {1.0f}, {0.5f}, {0}, {0}, {-1.0f}, {0}, {0}},
+                                     {{-0.25f}, {1.0f}, {0.5f}, {0}, {0}, {-1.0f}, {0}, {0}},
+                                     {{-1.0f}, {-1.0f}, {0.5f}, {0}, {0}, {-1.0f}, {0}, {0}},
+                                     {{-0.25f}, {-1.0f}, {0.5f}, {0}, {0}, {-1.0f}, {0}, {0}}};
+            auto lit = [](float x, float y, DWORD c) { return D3DLVERTEX{{x}, {y}, {0.5f}, 0, {c}, {0}, {0}, {0}}; };
+            const D3DLVERTEX lv[12] = {lit(-0.75f, 1, 0xFF0000FF), lit(-0.25f, 1, 0xFF0000FF), lit(-0.75f, 0, 0xFF0000FF),
+                                       lit(-0.25f, 0, 0xFF0000FF), lit(-2, 1, 0xFFFFFFFF), lit(0, 1, 0xFFFFFFFF),
+                                       lit(-2, -1, 0xFFFFFFFF), lit(0, -1, 0xFFFFFFFF), lit(-0.75f, -0.5f, 0xFFFFFF00),
+                                       lit(-0.25f, -0.5f, 0xFFFFFF00), lit(-0.75f, -1, 0xFFFFFF00), lit(-0.25f, -1, 0xFFFFFF00)};
+            memcpy(b4, uv, sizeof(uv));
+            memcpy(b4 + sizeof(uv), lv, sizeof(lv));
+            p = b4 + sizeof(uv) + sizeof(lv);
+            const DWORD start4 = DWORD(p - b4);
+            auto put = [&](const void* rec, size_t n) {
+                memcpy(p, rec, n);
+                p += n;
+            };
+            auto state = [&](DWORD type, DWORD arg) {
+                D3DSTATE st = {};
+                st.drstRenderStateType = D3DRENDERSTATETYPE(type);
+                st.dwArg[0] = arg;
+                put(&st, sizeof(st));
+            };
+            auto quadAt = [&](WORD first) {
+                ins(D3DOP_TRIANGLE, sizeof(D3DTRIANGLE), 2);
+                D3DTRIANGLE q[2] = {};
+                q[0].v1 = first, q[0].v2 = WORD(first + 1), q[0].v3 = WORD(first + 2), q[0].wFlags = D3DTRIFLAG_EDGEENABLETRIANGLE;
+                q[1].v1 = WORD(first + 2), q[1].v2 = WORD(first + 1), q[1].v3 = WORD(first + 3), q[1].wFlags = D3DTRIFLAG_EDGEENABLETRIANGLE;
+                put(q, sizeof(q));
+            };
+            ins(D3DOP_STATETRANSFORM, sizeof(D3DSTATE), 3);
+            state(D3DTRANSFORMSTATE_WORLD, hWorld);
+            state(D3DTRANSFORMSTATE_VIEW, hView);
+            state(D3DTRANSFORMSTATE_PROJECTION, hProj);
+            ins(D3DOP_STATELIGHT, sizeof(D3DSTATE), 2);
+            state(D3DLIGHTSTATE_MATERIAL, hMat);
+            state(D3DLIGHTSTATE_AMBIENT, 0);
+            ins(D3DOP_STATERENDER, sizeof(D3DSTATE), 3);
+            state(D3DRENDERSTATE_ZENABLE, FALSE);
+            state(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+            state(D3DRENDERSTATE_SHADEMODE, D3DSHADE_GOURAUD);
+            ins(D3DOP_PROCESSVERTICES, sizeof(D3DPROCESSVERTICES), 1);
+            const D3DPROCESSVERTICES pvLight = {D3DPROCESSVERTICES_TRANSFORMLIGHT, 0, 0, 4, 0};
+            put(&pvLight, sizeof(pvLight));
+            quadAt(0);
+            ins(D3DOP_MATRIXMULTIPLY, sizeof(D3DMATRIXMULTIPLY), 1);
+            const D3DMATRIXMULTIPLY mm = {hWorld, hWorld, hMove};
+            put(&mm, sizeof(mm));
+            ins(D3DOP_PROCESSVERTICES, sizeof(D3DPROCESSVERTICES), 1);
+            const D3DPROCESSVERTICES pvMoved = {D3DPROCESSVERTICES_TRANSFORM, 4, 4, 12, 0};
+            put(&pvMoved, sizeof(pvMoved));
+            quadAt(4);
+            ins(D3DOP_SETSTATUS, sizeof(D3DSTATUS), 1);
+            D3DSTATUS st = {};
+            st.dwFlags = D3DSETSTATUS_STATUS;
+            st.dwStatus = D3DSTATUS_CLIPUNIONLEFT;
+            put(&st, sizeof(st));
+            // The status isn't 0: a branch on its being 0 isn't taken; the same one negated is,
+            // over the white quad.
+            const DWORD quadBytes = sizeof(D3DINSTRUCTION) + 2 * sizeof(D3DTRIANGLE);
+            ins(D3DOP_BRANCHFORWARD, sizeof(D3DBRANCH), 1);
+            const D3DBRANCH stay = {0xFFFFFFFF, 0, FALSE, 2 * (sizeof(D3DINSTRUCTION) + sizeof(D3DBRANCH)) + 2 * quadBytes};
+            put(&stay, sizeof(stay));
+            ins(D3DOP_BRANCHFORWARD, sizeof(D3DBRANCH), 1);
+            const D3DBRANCH skip = {0xFFFFFFFF, 0, TRUE, sizeof(D3DINSTRUCTION) + sizeof(D3DBRANCH) + quadBytes};
+            put(&skip, sizeof(skip));
+            quadAt(8);
+            quadAt(12);
+            ins(D3DOP_EXIT, 0, 0);
+            eb4->Unlock();
+            D3DEXECUTEDATA xd4 = {};
+            xd4.dwSize = sizeof(xd4);
+            xd4.dwVertexCount = 16;
+            xd4.dwInstructionOffset = start4;
+            xd4.dwInstructionLength = DWORD(p - b4) - start4;
+            eb4->SetExecuteData(&xd4);
+            DDBLTFX black = {};
+            black.dwSize = sizeof(black);
+            rt->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &black);
+            dev->BeginScene();
+            xr = dev->Execute(eb4, vp, D3DEXECUTE_CLIPPED);
+            dev->EndScene();
+            DDSURFACEDESC ld4 = {};
+            ld4.dwSize = sizeof(ld4);
+            if (SUCCEEDED(rt->Lock(nullptr, &ld4, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                static const int kAt[4][2] = {{10, 32}, {48, 16}, {48, 56}, {32, 40}};
+                for (int k = 0; k < 4; k++)
+                    seen[k] = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(ld4.lpSurface) + kAt[k][1] * ld4.lPitch)[kAt[k][0]] & 0xFFFFFF;
+                rt->Unlock(nullptr);
+            }
+        }
+        CHECK(SUCCEEDED(xr) && seen[0] == 0x00FF00 && seen[1] == 0x0000FF && seen[2] == 0xFFFF00 && seen[3] == 0,
+              "a Retained Mode frame's execute buffer (0x%08lx): the lit quad 0x%06lx (green), the one after the world "
+              "matrix moved 0x%06lx (blue), the one after the branches 0x%06lx (yellow), the one branched over 0x%06lx (none)",
+              xr, seen[0], seen[1], seen[2], seen[3]);
+        if (eb4) eb4->Release();
+        if (light) {
+            vp->DeleteLight(light);
+            light->Release();
+        }
+        if (mat) mat->Release();
+        for (D3DMATRIXHANDLE h : {hWorld, hView, hProj, hMove})
+            if (h) dev->DeleteMatrix(h);
+    }
+
     eb->Release();
     vp->Release();
     dev->Release();
     d3d->Release();
     rt->Release();
     dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// A Direct3D 2 device whose render target was set to a Z buffer (refused, but the device has
+// switched to it, without a reference) and the Z buffer released: state changes after that,
+// and drawing again once it has a target.
+static int RunTargetGone() {
+    IDirectDraw* dd = nullptr;
+    if (FAILED(DirectDrawCreate(nullptr, &dd, nullptr))) return 1;
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    DDSURFACEDESC sd = {};
+    sd.dwSize = sizeof(sd);
+    sd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    sd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+    sd.dwWidth = sd.dwHeight = 64;
+    sd.ddpfPixelFormat.dwSize = sizeof(sd.ddpfPixelFormat);
+    sd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    sd.ddpfPixelFormat.dwRGBBitCount = 32;
+    sd.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    sd.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    sd.ddpfPixelFormat.dwBBitMask = 0xFF;
+    DDSURFACEDESC zd = {};
+    zd.dwSize = sizeof(zd);
+    zd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_ZBUFFERBITDEPTH;
+    zd.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+    zd.dwWidth = zd.dwHeight = 64;
+    zd.dwZBufferBitDepth = 16;
+    IDirectDrawSurface *rt = nullptr, *zs = nullptr;
+    IDirect3D2* d3d = nullptr;
+    IDirect3DDevice2* dev = nullptr;
+    IDirect3DViewport2* vp = nullptr;
+    HRESULT hr = dd->CreateSurface(&sd, &rt, nullptr);
+    if (SUCCEEDED(hr)) hr = dd->CreateSurface(&zd, &zs, nullptr);
+    if (SUCCEEDED(hr)) hr = dd->QueryInterface(IID_IDirect3D2, reinterpret_cast<void**>(&d3d));
+    if (SUCCEEDED(hr)) hr = d3d->CreateDevice(IID_IDirect3DHALDevice, rt, &dev);
+    if (SUCCEEDED(hr)) hr = d3d->CreateViewport(&vp, nullptr);
+    if (SUCCEEDED(hr)) hr = dev->AddViewport(vp);
+    D3DVIEWPORT2 vd = {};
+    vd.dwSize = sizeof(vd);
+    vd.dwWidth = vd.dwHeight = 64;
+    vd.dvClipX = -1.0f, vd.dvClipY = 1.0f, vd.dvClipWidth = vd.dvClipHeight = 2.0f;
+    vd.dvMaxZ = 1.0f;
+    if (SUCCEEDED(hr)) hr = vp->SetViewport2(&vd);
+    if (SUCCEEDED(hr)) hr = dev->SetCurrentViewport(vp);
+    CHECK(SUCCEEDED(hr), "Direct3D 2 device, viewport and a Z buffer surface (0x%08lx)", hr);
+    if (SUCCEEDED(hr)) {
+        const HRESULT toZ = dev->SetRenderTarget(zs, 0);
+        IDirectDrawSurface* now = nullptr;
+        dev->GetRenderTarget(&now);
+        const bool switched = now == zs;
+        if (now) now->Release();
+        const ULONG left = zs->Release();
+        zs = nullptr;
+        // (The texture stages are worked out again from these: with no target to look at.)
+        dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_TEXTUREMAPBLEND, D3DTBLEND_MODULATEALPHA);
+        dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_TEXTUREHANDLE, 0);
+        dev->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, FALSE);
+        dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+        dev->SetRenderState(D3DRENDERSTATE_TEXTUREMAPBLEND, D3DTBLEND_MODULATE);
+        const HRESULT back = dev->SetRenderTarget(rt, 0);
+        D3DTLVERTEX tri[3] = {{{4}, {4}, {0.5f}, {1}, {0xFFFFFFFF}, {0}, {0}, {0}},
+                              {{60}, {4}, {0.5f}, {1}, {0xFFFFFFFF}, {0}, {0}, {0}},
+                              {{4}, {60}, {0.5f}, {1}, {0xFFFFFFFF}, {0}, {0}, {0}}};
+        dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+        dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+        dev->BeginScene();
+        dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DVT_TLVERTEX, tri, 3, 0);
+        dev->EndScene();
+        DWORD px = 0xBAD;
+        DDSURFACEDESC l = {};
+        l.dwSize = sizeof(l);
+        if (SUCCEEDED(rt->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+            px = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(l.lpSurface) + 16 * l.lPitch)[16] & 0xFFFFFF;
+            rt->Unlock(nullptr);
+        }
+        CHECK(toZ == DDERR_INVALIDPIXELFORMAT && switched && left == 0 && SUCCEEDED(back) && px == 0xFFFFFF,
+              "SetRenderTarget to a Z buffer (0x%08lx, the device's target now: %d), the Z buffer released (%lu left), "
+              "state changes, then the first target again (0x%08lx): a triangle drawn 0x%06lx (white)",
+              toZ, switched, left, back, px);
+    }
+    if (vp) vp->Release();
+    if (dev) dev->Release();
+    if (d3d) d3d->Release();
+    if (zs) zs->Release();
+    if (rt) rt->Release();
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// 1-, 2- and 4-bit palettized surfaces, luminance and alpha-only ones: what ddraw.dll makes of
+// them (memory to lock, a palette of their size, a DC where GDI has the format; no blits for the
+// low depths, copies between the same format for the others).
+static int RunFormats() {
+    IDirectDraw7* dd = nullptr;
+    if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    auto make = [&](const DDPIXELFORMAT& pf, int w, int h, HRESULT* hrOut = nullptr) {
+        DDSURFACEDESC2 d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+        d.dwWidth = DWORD(w);
+        d.dwHeight = DWORD(h);
+        d.ddpfPixelFormat = pf;
+        d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+        IDirectDrawSurface7* s = nullptr;
+        const HRESULT hr = dd->CreateSurface(&d, &s, nullptr);
+        if (hrOut) *hrOut = hr;
+        return s;
+    };
+    auto indexed = [](int bits, DWORD count) {
+        DDPIXELFORMAT pf = {};
+        pf.dwFlags = DDPF_RGB | (bits == 1 ? DDPF_PALETTEINDEXED1 : bits == 2 ? DDPF_PALETTEINDEXED2 : DDPF_PALETTEINDEXED4);
+        pf.dwRGBBitCount = count;
+        return pf;
+    };
+    // Rows of `n` bytes written through Lock and read back through another.
+    auto rows = [](IDirectDrawSurface7* s, int h, int n, BYTE seed, LONG* pitch) {
+        DDSURFACEDESC2 l = {};
+        l.dwSize = sizeof(l);
+        if (FAILED(s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) return false;
+        *pitch = l.lPitch;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < n; x++) (static_cast<BYTE*>(l.lpSurface) + y * l.lPitch)[x] = BYTE(seed + y * 16 + x);
+        s->Unlock(nullptr);
+        bool same = SUCCEEDED(s->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr));
+        if (!same) return false;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < n; x++) same = same && (static_cast<BYTE*>(l.lpSurface) + y * l.lPitch)[x] == BYTE(seed + y * 16 + x);
+        s->Unlock(nullptr);
+        return same;
+    };
+    for (int bits : {1, 2, 4}) {
+        HRESULT hr = E_FAIL;
+        IDirectDrawSurface7* s = make(indexed(bits, DWORD(bits)), 20, 3, &hr);
+        const int rowBytes = (20 * bits + 7) / 8;
+        DDPIXELFORMAT got = {};
+        got.dwSize = sizeof(got);
+        LONG pitch = 0;
+        const bool kept = s && SUCCEEDED(s->GetPixelFormat(&got)) && rows(s, 3, rowBytes, BYTE(bits), &pitch);
+        CHECK(kept && got.dwFlags == indexed(bits, 0).dwFlags && got.dwRGBBitCount == DWORD(bits) && pitch >= rowBytes,
+              "a %d-bit palettized surface (0x%08lx): format flags 0x%lx, %lu bits, pitch %ld for rows of %d bytes, rows kept %d",
+              bits, hr, got.dwFlags, got.dwRGBBitCount, pitch, rowBytes, kept);
+        if (!s) continue;
+        // Its palette: one of its own size.
+        PALETTEENTRY pe[256] = {};
+        pe[1] = {10, 200, 30, 0};
+        IDirectDrawPalette *own = nullptr, *big = nullptr;
+        dd->CreatePalette(bits == 1 ? DDPCAPS_1BIT : bits == 2 ? DDPCAPS_2BIT : DDPCAPS_4BIT, pe, &own, nullptr);
+        dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, pe, &big, nullptr);
+        const HRESULT wrong = big ? s->SetPalette(big) : E_FAIL, right = own ? s->SetPalette(own) : E_FAIL;
+        CHECK(wrong == DDERR_INVALIDPIXELFORMAT && right == DD_OK,
+              "its palette: an 8-bit one 0x%08lx (DDERR_INVALIDPIXELFORMAT), one of %d entries 0x%08lx", wrong, 1 << bits, right);
+        // No blits, as ddraw.dll's emulation layer: fills, copies out and in.
+        IDirectDrawSurface7* twin = make(indexed(bits, DWORD(bits)), 20, 3);
+        IDirectDrawSurface7* rgb = Make32(dd, 20, 3);
+        DDBLTFX fx = {};
+        fx.dwSize = sizeof(fx);
+        const HRESULT fill = s->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+        const HRESULT same = twin ? twin->Blt(nullptr, s, nullptr, DDBLT_WAIT, nullptr) : E_FAIL;
+        const HRESULT out = rgb ? rgb->Blt(nullptr, s, nullptr, DDBLT_WAIT, nullptr) : E_FAIL;
+        const HRESULT in = rgb ? s->BltFast(0, 0, rgb, nullptr, DDBLTFAST_WAIT) : E_FAIL;
+        CHECK(fill == DDERR_UNSUPPORTED && same == DDERR_UNSUPPORTED && out == DDERR_UNSUPPORTED && in == DDERR_UNSUPPORTED,
+              "its blits are DDERR_UNSUPPORTED: a fill 0x%08lx, a copy to its like 0x%08lx, to 32 bits 0x%08lx, from 32 bits 0x%08lx",
+              fill, same, out, in);
+        // A DC where GDI has the format (1 and 4 bits), drawing with the surface's palette.
+        DDSURFACEDESC2 l = {};
+        l.dwSize = sizeof(l);
+        if (SUCCEEDED(s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) {
+            memset(l.lpSurface, bits == 1 ? 0xFF : bits == 2 ? 0x55 : 0x11, size_t(l.lPitch) * 3);  // index 1 everywhere
+            s->Unlock(nullptr);
+        }
+        HDC dc = nullptr;
+        const HRESULT dr = s->GetDC(&dc);
+        COLORREF c = 0xBAD;
+        if (SUCCEEDED(dr)) {
+            c = GetPixel(dc, 5, 1);
+            s->ReleaseDC(dc);
+        }
+        CHECK(bits == 2 ? FAILED(dr) : SUCCEEDED(dr) && c == RGB(10, 200, 30),
+              "its DC: 0x%08lx, a pixel of index 1 is 0x%06lx through it (%s)", dr, c,
+              bits == 2 ? "none: GDI has no 2-bit bitmaps" : "the palette's 0x1ec80a");
+        if (rgb) rgb->Release();
+        if (twin) twin->Release();
+        s->Release();
+        if (big) big->Release();
+        if (own) own->Release();
+    }
+    {
+        HRESULT mixed = E_FAIL, count = E_FAIL;
+        DDPIXELFORMAT two = indexed(4, 4);
+        two.dwFlags |= DDPF_PALETTEINDEXED1;
+        IDirectDrawSurface7* a = make(two, 8, 8, &mixed);
+        IDirectDrawSurface7* b = make(indexed(4, 8), 8, 8, &count);
+        CHECK(!a && !b && FAILED(mixed) && FAILED(count),
+              "palettized formats refused: two depths flagged 0x%08lx, 4-bit flagged with a count of 8 0x%08lx", mixed, count);
+        if (a) a->Release();
+        if (b) b->Release();
+    }
+    // Luminance (with alpha or not) and alpha-only surfaces.
+    struct Kind {
+        const char* name;
+        DWORD flags, bits, lum, alpha;
+    };
+    static const Kind kKinds[] = {{"8-bit luminance", DDPF_LUMINANCE, 8, 0xFF, 0},
+                                  {"luminance with alpha, 16 bits", DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 16, 0xFF, 0xFF00},
+                                  {"luminance with alpha, 8 bits", DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 8, 0x0F, 0xF0},
+                                  {"alpha-only", DDPF_ALPHA, 8, 0, 0}};
+    for (const Kind& k : kKinds) {
+        DDPIXELFORMAT pf = {};
+        pf.dwFlags = k.flags;
+        pf.dwLuminanceBitCount = k.bits;  // (dwAlphaBitDepth, the same field)
+        pf.dwLuminanceBitMask = k.lum;
+        pf.dwLuminanceAlphaBitMask = k.alpha;
+        HRESULT hr = E_FAIL;
+        IDirectDrawSurface7* s = make(pf, 8, 4, &hr);
+        IDirectDrawSurface7* twin = make(pf, 8, 4);
+        IDirectDrawSurface7* rgb = Make32(dd, 8, 4);
+        DDPIXELFORMAT got = {};
+        got.dwSize = sizeof(got);
+        LONG pitch = 0;
+        const int rowBytes = int(8 * k.bits / 8);
+        const bool kept = s && SUCCEEDED(s->GetPixelFormat(&got)) && rows(s, 4, rowBytes, 0x40, &pitch);
+        CHECK(kept && got.dwFlags == k.flags && got.dwLuminanceBitCount == k.bits && got.dwLuminanceBitMask == k.lum &&
+                  (k.flags == DDPF_ALPHA || got.dwLuminanceAlphaBitMask == k.alpha),
+              "a surface of %s (0x%08lx): format flags 0x%lx, %lu bits, masks 0x%lx and 0x%lx, rows kept %d", k.name, hr,
+              got.dwFlags, got.dwLuminanceBitCount, got.dwLuminanceBitMask, got.dwLuminanceAlphaBitMask, kept);
+        // Copied as it is to another of its format; nothing converts it.
+        const HRESULT copy = s && twin ? twin->Blt(nullptr, s, nullptr, DDBLT_WAIT, nullptr) : E_FAIL;
+        bool copied = SUCCEEDED(copy);
+        DDSURFACEDESC2 l = {};
+        l.dwSize = sizeof(l);
+        if (copied && SUCCEEDED(twin->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+            for (int y = 0; y < 4; y++)
+                for (int x = 0; x < rowBytes; x++)
+                    copied = copied && (static_cast<BYTE*>(l.lpSurface) + y * l.lPitch)[x] == BYTE(0x40 + y * 16 + x);
+            twin->Unlock(nullptr);
+        }
+        const HRESULT out = s && rgb ? rgb->Blt(nullptr, s, nullptr, DDBLT_WAIT, nullptr) : E_FAIL;
+        const HRESULT in = s && rgb ? s->Blt(nullptr, rgb, nullptr, DDBLT_WAIT, nullptr) : E_FAIL;
+        HDC dc = nullptr;
+        const HRESULT dr = s ? s->GetDC(&dc) : E_FAIL;
+        if (SUCCEEDED(dr)) s->ReleaseDC(dc);
+        CHECK(copied && out == DDERR_UNSUPPORTED && in == DDERR_UNSUPPORTED && FAILED(dr),
+              "its blits: to its like 0x%08lx (copied %d), to 32 bits 0x%08lx and from 32 bits 0x%08lx (DDERR_UNSUPPORTED); "
+              "no DC (0x%08lx)", copy, copied, out, in, dr);
+        if (rgb) rgb->Release();
+        if (twin) twin->Release();
+        if (s) s->Release();
+    }
+    // Not made: luminance flagged as RGB too (as ddraw.dll), and layouts dd2d9 has no texture
+    // for (its own limit: the ones Direct3D 9 has are made).
+    {
+        DDPIXELFORMAT lumRgb = {}, alpha4 = {}, lum24 = {};
+        lumRgb.dwFlags = DDPF_LUMINANCE | DDPF_RGB;
+        lumRgb.dwLuminanceBitCount = 8;
+        lumRgb.dwLuminanceBitMask = 0xFF;
+        alpha4.dwFlags = DDPF_ALPHA;
+        alpha4.dwAlphaBitDepth = 4;
+        lum24.dwFlags = DDPF_LUMINANCE;
+        lum24.dwLuminanceBitCount = 24;
+        lum24.dwLuminanceBitMask = 0xFFFFFF;
+        HRESULT h1 = E_FAIL, h2 = E_FAIL, h3 = E_FAIL;
+        IDirectDrawSurface7* a = make(lumRgb, 8, 8, &h1);
+        IDirectDrawSurface7* b = make(alpha4, 8, 8, &h2);
+        IDirectDrawSurface7* c = make(lum24, 8, 8, &h3);
+        CHECK(!a && !b && !c, "refused: luminance flagged with RGB 0x%08lx, 4-bit alpha-only 0x%08lx, 24-bit luminance 0x%08lx", h1, h2, h3);
+        if (a) a->Release();
+        if (b) b->Release();
+        if (c) c->Release();
+    }
+    const ULONG left = dd->Release();
+    CHECK(left == 0, "DirectDraw released (refcount %lu)", left);
     DestroyWindow(hwnd);
     return 0;
 }
@@ -3869,7 +4299,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     else if (strstr(cmd, "overlay")) r = RunOverlay() | RunOverlayWindowed() | RunDeviceWindow();
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
-    else r = RunUnit() | RunExecute() | RunLifetime() | RunCoopModes();
+    else r = RunUnit() | RunExecute() | RunTargetGone() | RunFormats() | RunLifetime() | RunCoopModes();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);

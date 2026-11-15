@@ -46,7 +46,8 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
     if (!(s->desc.ddsCaps.dwCaps & DDSCAPS_3DDEVICE) || !(BitsToDDBD(s->buf->fmt.bpp) & caps_.dwDeviceRenderBitDepth) ||
         s->W() > 2048 || s->H() > 2048)
         return DDERR_INVALIDPARAMS;
-    if (s->buf->fmt.pal8 && !s->palette) return DDERR_NOPALETTEATTACHED;
+    // (Below 16 bits, palettized or not, as d3dim700: an 8-bit luminance or alpha-only surface too.)
+    if (s->buf->fmt.bpp < 16 && !s->palette) return DDERR_NOPALETTEATTACHED;
     Surface* z = AttachedZ(s);
     if (s == rt_ && z == z_) return D3D_OK;  // the Z buffer is looked up again (S §SetRenderTarget)
     s->AddRef(Surface::kRefV7);
@@ -68,7 +69,7 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
     return D3D_OK;
 }
 
-HRESULT Device7::Clear(DWORD count, D3DRECT* rects, DWORD flags, D3DCOLOR color, D3DVALUE z, DWORD stencil) {
+HRESULT Device7::Clear(DWORD count, D3DRECT* rects, DWORD flags, D3DCOLOR color, D3DVALUE z, DWORD stencil) try {
     if (count > 4096) return DDERR_INVALIDPARAMS;
     Guard l;
     if (flags & (D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL)) {
@@ -90,6 +91,8 @@ HRESULT Device7::Clear(DWORD count, D3DRECT* rects, DWORD flags, D3DCOLOR color,
     Use u(this);
     if (u.ok) ctx_.Clear(DWORD(clipped.size()), clipped.empty() ? nullptr : clipped.data(), flags & 7, color, z, stencil);
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the target's GPU copy)
+    return DDERR_OUTOFMEMORY;
 }
 
 // ---- drawing
@@ -111,7 +114,7 @@ const WORD* Device7::SafeIndices(const WORD* idx, DWORD ni, DWORD n) {
 
 // fromVB: the vertices are a vertex buffer's (a transformed one's leave the clip status alone).
 HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT stride, DWORD n, const WORD* idx,
-                            DWORD ni, bool fromVB) {
+                            DWORD ni, bool fromVB) try {
     if (!ValidPrim(t)) return DDERR_INVALIDPARAMS;  // undefined on XP (V §5.3)
     const UINT prims = PrimCount(t, idx ? ni : n);
     if (!prims || !n) return D3D_OK;
@@ -167,9 +170,18 @@ HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT s
             blendSent_ = want;
         }
     }
+    // More lights than the GPU lights at once: lit here, D3D9's lighting off for the draw.
+    const bool cpuLit = lightsOver_ && rs_[D3DRENDERSTATE_LIGHTING] == TRUE && !rhw;
+    if (cpuLit && !LightOnCpu(&fvf, &v, &stride, &n, idx, ni)) return DDERR_OUTOFMEMORY;
+    if (const DWORD lighting = cpuLit ? DWORD(FALSE) : rs_[D3DRENDERSTATE_LIGHTING]; lighting != lightingSent_) {
+        ctx_.SetRenderState(137, lighting);
+        lightingSent_ = lighting;
+    }
     SendFog(fvf);
     ctx_.Draw(t, fvf, v, stride, n, idx, ni, prims, rs_[7] != D3DZB_FALSE);
     return D3D_OK;
+} catch (const std::bad_alloc&) {  // (the GPU copies of the target and the textures, the draw's scratch vertices)
+    return DDERR_OUTOFMEMORY;
 }
 
 // The fog states D3D9 gets for a draw, as Windows' hardware path behaved (Wine's tests,
@@ -592,7 +604,9 @@ HRESULT Device7::Load(IDirectDrawSurface7* dstI, POINT* pt, IDirectDrawSurface7*
             const LONG cutB = std::max<LONG>(0, std::max(b.bottom - d->H(), a.bottom - s->H()));
             a.right -= cutR, b.right -= cutR, a.bottom -= cutB, b.bottom -= cutB;
             if (a.right > a.left && a.bottom > a.top) {
-                const HRESULT hr = d->BltLocked(&b, s, &a, 0, nullptr, false);
+                HRESULT hr = d->BltLocked(&b, s, &a, 0, nullptr, false);
+                // (Blt takes no 1-, 2- or 4-bit surface: the whole level, row by row.)
+                if (hr == DDERR_UNSUPPORTED && d->buf->fmt.palLow) hr = d->CopyRowsFrom(s);
                 if (hr == DDERR_SURFACELOST && inScene_) {
                     lostInScene_ = true;
                     return S_FALSE;  // (stop: D3D_OK)

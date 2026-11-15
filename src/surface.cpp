@@ -13,11 +13,19 @@ namespace dd2d9 {
 // ================================================================ Surface
 
 Surface::Surface(DDraw* d, const DDSURFACEDESC2& sd, Buffer* b, int ver) : dd(d), desc(sd), buf(b), version(ver) {
-    wraps_[0] = new SurfaceWrap<1>(this);
-    wraps_[1] = new SurfaceWrap<2>(this);
-    wraps_[2] = new SurfaceWrap<3>(this);
-    wraps_[3] = new SurfaceWrap<4>(this);
-    wraps_[4] = new SurfaceWrap<7>(this);
+    // Everything that needs memory first, so that running out of it leaves nothing half made.
+    const bool overlay = (sd.ddsCaps.dwCaps & DDSCAPS_OVERLAY) != 0;
+    try {
+        if (!Room(dd->surfaces) || (overlay && !Room(OverlayZOrder()))) throw std::bad_alloc();
+        wraps_[0] = new SurfaceWrap<1>(this);
+        wraps_[1] = new SurfaceWrap<2>(this);
+        wraps_[2] = new SurfaceWrap<3>(this);
+        wraps_[3] = new SurfaceWrap<4>(this);
+        wraps_[4] = new SurfaceWrap<7>(this);
+    } catch (...) {
+        FreeWraps();
+        throw;
+    }
     static const DWORD kCkFlags[4] = {DDSD_CKDESTBLT, DDSD_CKDESTOVERLAY, DDSD_CKSRCBLT, DDSD_CKSRCOVERLAY};
     const DDCOLORKEY* keys[4] = {&sd.ddckCKDestBlt, &sd.ddckCKDestOverlay, &sd.ddckCKSrcBlt, &sd.ddckCKSrcOverlay};
     for (int i = 0; i < 4; i++) {
@@ -30,12 +38,20 @@ Surface::Surface(DDraw* d, const DDSURFACEDESC2& sd, Buffer* b, int ver) : dd(d)
     dd->DisplayMode(&modeW, &modeH, &modeBpp);
     dd->IntAddRef();
     dd->surfaces.push_back(this);
-    if (desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY) OverlayZOrder().insert(OverlayZOrder().begin(), this);  // in front
+    if (overlay) OverlayZOrder().insert(OverlayZOrder().begin(), this);  // in front
     if (desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) {  // called with g_lock held
         vidMemBytes = buf->fmt.Planar() ? uint64_t(buf->pitch) * buf->h + uint64_t(buf->pitch / 2) * ((buf->h + 1) / 2) * 2
                                         : uint64_t(buf->pitch) * uint64_t(buf->fmt.BlockCompressed() ? (buf->h + 3) & ~3 : buf->h);
         dd->vidMemUsed += vidMemBytes;
     }
+}
+
+void Surface::FreeWraps() {
+    delete static_cast<SurfaceWrap<1>*>(wraps_[0]);
+    delete static_cast<SurfaceWrap<2>*>(wraps_[1]);
+    delete static_cast<SurfaceWrap<3>*>(wraps_[2]);
+    delete static_cast<SurfaceWrap<4>*>(wraps_[3]);
+    delete static_cast<SurfaceWrap<7>*>(wraps_[4]);
 }
 
 Surface::~Surface() {
@@ -80,11 +96,7 @@ Surface::~Surface() {
     D3DLegacySurfaceGone(this);
     if (gpuTex) GpuSurfaceGone(this);
     buf->Release();
-    delete static_cast<SurfaceWrap<1>*>(wraps_[0]);
-    delete static_cast<SurfaceWrap<2>*>(wraps_[1]);
-    delete static_cast<SurfaceWrap<3>*>(wraps_[2]);
-    delete static_cast<SurfaceWrap<4>*>(wraps_[3]);
-    delete static_cast<SurfaceWrap<7>*>(wraps_[4]);
+    FreeWraps();
     delete gamma;
     delete gammaRamp;
     dd->vidMemUsed -= vidMemBytes;
@@ -128,7 +140,7 @@ HRESULT Surface::QueryInterface(REFIID r, void** out, int version) {
     }
     if (IsEqualGUID(r, IID_IDirectDrawGammaControl)) {
         Guard l;
-        if (!gamma) gamma = new GammaControl(this);
+        if (!gamma && !(gamma = new (std::nothrow) GammaControl(this))) return E_OUTOFMEMORY;
         AddRef(kRefGamma);
         *out = gamma;
         return S_OK;
@@ -292,6 +304,7 @@ HRESULT Surface::SetClipper(IDirectDrawClipper* c) {
     if (c && (!nc || !LiveClipper(nc))) return DDERR_INVALIDPARAMS;
     if (!nc && !clipper) return DDERR_NOCLIPPERATTACHED;  // nothing to detach
     if (nc) {
+        if (!Room(nc->users)) return DDERR_OUTOFMEMORY;
         nc->AddRef();
         nc->users.push_back(this);
     }
@@ -415,9 +428,13 @@ HRESULT Surface::SetPalette(IDirectDrawPalette* p, int version) {
     if (np && (np->caps & DDPCAPS_ALPHA) && !(desc.ddsCaps.dwCaps & DDSCAPS_TEXTURE)) return DDERR_INVALIDSURFACETYPE;
     if (isPrimary && dd->OtherExclusive()) return DDERR_NOEXCLUSIVEMODE;
     if (!np && !palette) return DDERR_NOPALETTEATTACHED;
-    // An 8-bit palette (256 entries of colours) for an 8-bit surface only.
-    if (np && (!buf->fmt.pal8 || !(np->caps & DDPCAPS_8BIT) || (np->caps & DDPCAPS_8BITENTRIES)))
-        return DDERR_INVALIDPIXELFORMAT;
+    // A palette of the surface's own size (2, 4, 16 or 256 entries of colours) on a palettized
+    // surface only.
+    if (np) {
+        const Format& f = buf->fmt;
+        const DWORD need = f.pal8 ? DDPCAPS_8BIT : !f.palLow ? 0 : f.bpp == 1 ? DDPCAPS_1BIT : f.bpp == 2 ? DDPCAPS_2BIT : DDPCAPS_4BIT;
+        if (!need || !(np->caps & need) || (np->caps & DDPCAPS_8BITENTRIES)) return DDERR_INVALIDPIXELFORMAT;
+    }
     DD2D9_TRACE("SetPalette %p%s <- %p", static_cast<void*>(this), isPrimary ? " (primary)" : "", static_cast<void*>(np));
     if (np) np->AddRef();
     if (palette && isPrimary) dd->KeepHardwarePalette(palette->entries);  // (shown until another is)
@@ -564,12 +581,17 @@ HRESULT Surface::SetPrivateData(REFGUID tag, void* data, DWORD size, DWORD flags
         return DDERR_INVALIDPARAMS;
     }
     PrivateData p = {tag, {}, nullptr, (flags & DDSPD_VOLATILE) != 0, uniqueness};
+    if (!Room(priv_)) return DDERR_OUTOFMEMORY;
     if (flags & DDSPD_IUNKNOWNPOINTER) {
         // The pointer the game passes, not what it points to (a copy of the pointer).
         p.unk = static_cast<IUnknown*>(data);
         p.unk->AddRef();
     } else {
-        p.data.assign(static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
+        try {
+            p.data.assign(static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
+        } catch (const std::bad_alloc&) {
+            return DDERR_OUTOFMEMORY;
+        }
     }
     FreePrivateData(tag);
     priv_.push_back(std::move(p));
@@ -688,7 +710,7 @@ HRESULT GammaControl::SetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
         delete surface->gammaRamp;
         surface->gammaRamp = nullptr;
     } else {
-        if (!surface->gammaRamp) surface->gammaRamp = new DDGAMMARAMP;
+        if (!surface->gammaRamp && !(surface->gammaRamp = new (std::nothrow) DDGAMMARAMP)) return DDERR_OUTOFMEMORY;
         *surface->gammaRamp = *ramp;
     }
     if (surface->dd->primary == surface) {

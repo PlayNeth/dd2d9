@@ -568,6 +568,9 @@ GpuCaps GpuGetCaps() {
             caps.bumpV8U8 = bumpOps && texOk(D3DFMT_V8U8);
             caps.bumpL6V5U5 = bumpOps && texOk(D3DFMT_L6V5U5);
             caps.bumpX8L8V8U8 = bumpOps && texOk(D3DFMT_X8L8V8U8);
+            caps.lumL8 = texOk(D3DFMT_L8);
+            caps.lumA8L8 = texOk(D3DFMT_A8L8);
+            caps.alphaA8 = texOk(D3DFMT_A8);
             d3d->Release();
         }
         InterlockedExchange(&done, 2);
