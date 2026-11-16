@@ -277,7 +277,9 @@ All checks pass under Wine 11 (wined3d, Xvfb).
 
 ## Credits
 
-- **KyoriAsh**, for testing obscure games and helping out in general.
+Thanks to **KyoriAsh** for testing dd2d9 with many lesser-known games, for running tests on
+older versions of Windows in virtual machines to show how the original `ddraw.dll` behaves,
+and for his help throughout.
 
 ## License
 
