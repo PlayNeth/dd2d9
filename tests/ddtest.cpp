@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // A timer callback that keeps none of the registers it must (ESI, EDI, EBX, EBP), sets the
@@ -149,7 +150,8 @@ static IDirectDrawSurface7* MakeSurface(IDirectDraw7* dd, int w, int h, DWORD bp
     d.dwWidth = w;
     d.dwHeight = h;
     d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
-    d.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    // (8 bits without masks: palettized.)
+    d.ddpfPixelFormat.dwFlags = DDPF_RGB | (bpp == 8 && !r ? DDPF_PALETTEINDEXED8 : 0);
     d.ddpfPixelFormat.dwRGBBitCount = bpp;
     d.ddpfPixelFormat.dwRBitMask = r;
     d.ddpfPixelFormat.dwGBitMask = g;
@@ -2335,19 +2337,44 @@ static int RunTargetGone() {
     return 0;
 }
 
-// 1-, 2- and 4-bit palettized surfaces, luminance and alpha-only ones: what ddraw.dll makes of
-// them (memory to lock, a palette of their size, a DC where GDI has the format; no blits for the
-// low depths, copies between the same format for the others).
+// A texture format as a short name ("565", "P4", "A8L8"), and a device's list of them in order.
+static void ListFormat(const DDPIXELFORMAT& f, std::string* list) {
+    const char* name = "?";
+    if (f.dwFlags & DDPF_PALETTEINDEXED4) name = "P4";
+    else if (f.dwFlags & DDPF_PALETTEINDEXED8) name = "P8";
+    else if (f.dwFlags == DDPF_LUMINANCE) name = f.dwLuminanceBitCount == 8 ? "L8" : "?";
+    else if (f.dwFlags == (DDPF_LUMINANCE | DDPF_ALPHAPIXELS)) name = f.dwLuminanceBitCount == 16 ? "A8L8" : "A4L4";
+    else if (f.dwFlags == DDPF_ALPHA) name = "A";
+    else if (f.dwFlags == DDPF_RGB && f.dwRGBBitCount == 32) name = "X8";
+    else if (f.dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && f.dwRGBBitCount == 32) name = "A8";
+    else if (f.dwFlags == DDPF_RGB && f.dwRGBBitCount == 16) name = f.dwGBitMask == 0x07E0 ? "565" : "555";
+    else if (f.dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && f.dwRGBBitCount == 16)
+        name = f.dwRGBAlphaBitMask == 0x8000 ? "1555" : "4444";
+    if (!list->empty()) *list += ' ';
+    *list += name;
+}
+static HRESULT WINAPI ListFormatCb(DDPIXELFORMAT* f, void* list) {
+    ListFormat(*f, static_cast<std::string*>(list));
+    return D3DENUMRET_OK;
+}
+static HRESULT WINAPI ListFormatCb2(DDSURFACEDESC* d, void* list) {
+    ListFormat(d->ddpfPixelFormat, static_cast<std::string*>(list));
+    return D3DENUMRET_OK;
+}
+
+// 1-, 2- and 4-bit palettized surfaces, luminance and alpha-only textures: what ddraw.dll makes
+// of them (memory to lock, a palette of their size, a DC where GDI has the format and the
+// surface a palette; no blits for the low depths, copies between the same format for the others).
 static int RunFormats() {
     IDirectDraw7* dd = nullptr;
     if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
     HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
     dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
-    auto make = [&](const DDPIXELFORMAT& pf, int w, int h, HRESULT* hrOut = nullptr) {
+    auto make = [&](const DDPIXELFORMAT& pf, int w, int h, HRESULT* hrOut = nullptr, bool texture = false) {
         DDSURFACEDESC2 d = {};
         d.dwSize = sizeof(d);
         d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
-        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+        d.ddsCaps.dwCaps = (texture ? DDSCAPS_TEXTURE : DDSCAPS_OFFSCREENPLAIN) | DDSCAPS_SYSTEMMEMORY;
         d.dwWidth = DWORD(w);
         d.dwHeight = DWORD(h);
         d.ddpfPixelFormat = pf;
@@ -2391,6 +2418,11 @@ static int RunFormats() {
               "a %d-bit palettized surface (0x%08lx): format flags 0x%lx, %lu bits, pitch %ld for rows of %d bytes, rows kept %d",
               bits, hr, got.dwFlags, got.dwRGBBitCount, pitch, rowBytes, kept);
         if (!s) continue;
+        // No DC before it has a palette (the display isn't palettized).
+        HDC bare = nullptr;
+        const HRESULT noPal = s->GetDC(&bare);
+        if (SUCCEEDED(noPal)) s->ReleaseDC(bare);
+        CHECK(noPal == DDERR_CANTCREATEDC, "its DC without a palette: 0x%08lx (DDERR_CANTCREATEDC)", noPal);
         // Its palette: one of its own size.
         PALETTEENTRY pe[256] = {};
         pe[1] = {10, 200, 30, 0};
@@ -2436,17 +2468,49 @@ static int RunFormats() {
         if (own) own->Release();
     }
     {
-        HRESULT mixed = E_FAIL, count = E_FAIL;
-        DDPIXELFORMAT two = indexed(4, 4);
+        HRESULT mixed = E_FAIL, count = E_FAIL, bare = E_FAIL;
+        DDPIXELFORMAT two = indexed(4, 4), noRgb = indexed(4, 4);
         two.dwFlags |= DDPF_PALETTEINDEXED1;
+        noRgb.dwFlags &= ~DWORD(DDPF_RGB);
         IDirectDrawSurface7* a = make(two, 8, 8, &mixed);
         IDirectDrawSurface7* b = make(indexed(4, 8), 8, 8, &count);
-        CHECK(!a && !b && FAILED(mixed) && FAILED(count),
-              "palettized formats refused: two depths flagged 0x%08lx, 4-bit flagged with a count of 8 0x%08lx", mixed, count);
+        IDirectDrawSurface7* c = make(noRgb, 8, 8, &bare);
+        CHECK(!a && !b && !c && FAILED(mixed) && FAILED(count) && bare == DDERR_INVALIDPIXELFORMAT,
+              "palettized formats refused: two depths flagged 0x%08lx, 4-bit flagged with a count of 8 0x%08lx, "
+              "4-bit without DDPF_RGB 0x%08lx (DDERR_INVALIDPIXELFORMAT)", mixed, count, bare);
+        if (a) a->Release();
+        if (b) b->Release();
+        if (c) c->Release();
+        // 8 bits: palettized with both its flags; DDPF_RGB without masks is no format.
+        DDPIXELFORMAT flagOnly = {}, noMasks = {}, both = {}, rgb332 = {};
+        flagOnly.dwFlags = DDPF_PALETTEINDEXED8;
+        noMasks.dwFlags = DDPF_RGB;
+        both.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+        flagOnly.dwRGBBitCount = noMasks.dwRGBBitCount = both.dwRGBBitCount = 8;
+        HRESULT h1 = E_FAIL, h2 = E_FAIL, h3 = E_FAIL;
+        a = make(flagOnly, 8, 8, &h1);
+        b = make(noMasks, 8, 8, &h2);
+        c = make(both, 8, 8, &h3);
+        CHECK(!a && !b && c && h1 == DDERR_INVALIDPIXELFORMAT && h2 == DDERR_INVALIDPIXELFORMAT,
+              "8 bits: palettized without DDPF_RGB 0x%08lx, DDPF_RGB without masks 0x%08lx (DDERR_INVALIDPIXELFORMAT), "
+              "palettized with both flags 0x%08lx", h1, h2, h3);
+        if (a) a->Release();
+        if (b) b->Release();
+        if (c) c->Release();
+        // 8-bit RGB 3-3-2: a texture's format alone.
+        rgb332.dwFlags = DDPF_RGB;
+        rgb332.dwRGBBitCount = 8;
+        rgb332.dwRBitMask = 0xE0;
+        rgb332.dwGBitMask = 0x1C;
+        rgb332.dwBBitMask = 0x03;
+        a = make(rgb332, 8, 8, &h1);
+        b = make(rgb332, 8, 8, &h2, true);
+        CHECK(!a && h1 == DDERR_INVALIDPIXELFORMAT && b, "8-bit RGB 3-3-2: a plain surface 0x%08lx (DDERR_INVALIDPIXELFORMAT), a texture 0x%08lx",
+              h1, h2);
         if (a) a->Release();
         if (b) b->Release();
     }
-    // Luminance (with alpha or not) and alpha-only surfaces.
+    // Luminance (with alpha or not) and alpha-only: textures only, as ddraw.dll.
     struct Kind {
         const char* name;
         DWORD flags, bits, lum, alpha;
@@ -2461,9 +2525,13 @@ static int RunFormats() {
         pf.dwLuminanceBitCount = k.bits;  // (dwAlphaBitDepth, the same field)
         pf.dwLuminanceBitMask = k.lum;
         pf.dwLuminanceAlphaBitMask = k.alpha;
-        HRESULT hr = E_FAIL;
-        IDirectDrawSurface7* s = make(pf, 8, 4, &hr);
-        IDirectDrawSurface7* twin = make(pf, 8, 4);
+        HRESULT hr = E_FAIL, plainHr = E_FAIL;
+        IDirectDrawSurface7* plain = make(pf, 8, 4, &plainHr);
+        CHECK(!plain && plainHr == DDERR_INVALIDPIXELFORMAT, "a plain surface of %s: 0x%08lx (DDERR_INVALIDPIXELFORMAT)", k.name,
+              plainHr);
+        if (plain) plain->Release();
+        IDirectDrawSurface7* s = make(pf, 8, 4, &hr, true);
+        IDirectDrawSurface7* twin = make(pf, 8, 4, nullptr, true);
         IDirectDrawSurface7* rgb = Make32(dd, 8, 4);
         DDPIXELFORMAT got = {};
         got.dwSize = sizeof(got);
@@ -2472,7 +2540,7 @@ static int RunFormats() {
         const bool kept = s && SUCCEEDED(s->GetPixelFormat(&got)) && rows(s, 4, rowBytes, 0x40, &pitch);
         CHECK(kept && got.dwFlags == k.flags && got.dwLuminanceBitCount == k.bits && got.dwLuminanceBitMask == k.lum &&
                   (k.flags == DDPF_ALPHA || got.dwLuminanceAlphaBitMask == k.alpha),
-              "a surface of %s (0x%08lx): format flags 0x%lx, %lu bits, masks 0x%lx and 0x%lx, rows kept %d", k.name, hr,
+              "a texture of %s (0x%08lx): format flags 0x%lx, %lu bits, masks 0x%lx and 0x%lx, rows kept %d", k.name, hr,
               got.dwFlags, got.dwLuminanceBitCount, got.dwLuminanceBitMask, got.dwLuminanceAlphaBitMask, kept);
         // Copied as it is to another of its format; nothing converts it.
         const HRESULT copy = s && twin ? twin->Blt(nullptr, s, nullptr, DDBLT_WAIT, nullptr) : E_FAIL;
@@ -2500,7 +2568,7 @@ static int RunFormats() {
     // Not made: luminance flagged as RGB too (as ddraw.dll), and layouts dd2d9 has no texture
     // for (its own limit: the ones Direct3D 9 has are made).
     {
-        DDPIXELFORMAT lumRgb = {}, alpha4 = {}, lum24 = {};
+        DDPIXELFORMAT lumRgb = {}, alpha4 = {}, lum24 = {}, alphaRgb = {}, lumBump = {};
         lumRgb.dwFlags = DDPF_LUMINANCE | DDPF_RGB;
         lumRgb.dwLuminanceBitCount = 8;
         lumRgb.dwLuminanceBitMask = 0xFF;
@@ -2510,16 +2578,305 @@ static int RunFormats() {
         lum24.dwLuminanceBitCount = 24;
         lum24.dwLuminanceBitMask = 0xFFFFFF;
         HRESULT h1 = E_FAIL, h2 = E_FAIL, h3 = E_FAIL;
-        IDirectDrawSurface7* a = make(lumRgb, 8, 8, &h1);
-        IDirectDrawSurface7* b = make(alpha4, 8, 8, &h2);
-        IDirectDrawSurface7* c = make(lum24, 8, 8, &h3);
+        IDirectDrawSurface7* a = make(lumRgb, 8, 8, &h1, true);
+        IDirectDrawSurface7* b = make(alpha4, 8, 8, &h2, true);
+        IDirectDrawSurface7* c = make(lum24, 8, 8, &h3, true);
         CHECK(!a && !b && !c, "refused: luminance flagged with RGB 0x%08lx, 4-bit alpha-only 0x%08lx, 24-bit luminance 0x%08lx", h1, h2, h3);
         if (a) a->Release();
         if (b) b->Release();
         if (c) c->Release();
+        // DDPF_ALPHA with another flag is DDERR_INVALIDPARAMS (as ddraw.dll); a bump map
+        // flagged luminance too is no format.
+        alphaRgb.dwFlags = DDPF_ALPHA | DDPF_RGB;
+        alphaRgb.dwRGBBitCount = 16;
+        alphaRgb.dwRBitMask = 0xF800;
+        alphaRgb.dwGBitMask = 0x07E0;
+        alphaRgb.dwBBitMask = 0x001F;
+        lumBump.dwFlags = DDPF_LUMINANCE | DDPF_BUMPDUDV;
+        lumBump.dwBumpBitCount = 16;
+        lumBump.dwBumpDuBitMask = 0xFF;
+        lumBump.dwBumpDvBitMask = 0xFF00;
+        HRESULT h4 = E_FAIL, h5 = E_FAIL, h6 = E_FAIL;
+        a = make(alphaRgb, 8, 8, &h4, true);
+        b = make(alphaRgb, 8, 8, &h5);
+        c = make(lumBump, 8, 8, &h6, true);
+        CHECK(!a && !b && !c && h4 == DDERR_INVALIDPARAMS && h5 == DDERR_INVALIDPARAMS && h6 == DDERR_INVALIDPIXELFORMAT,
+              "5-6-5 flagged alpha-only too: a texture 0x%08lx, a plain surface 0x%08lx (DDERR_INVALIDPARAMS); a bump map flagged "
+              "luminance 0x%08lx (DDERR_INVALIDPIXELFORMAT)", h4, h5, h6);
+        if (a) a->Release();
+        if (b) b->Release();
+        if (c) c->Release();
+    }
+    // The texture formats the devices list, in order: the software ones as Windows XP's, the
+    // hardware ones with luminance from Direct3D 3 on.
+    {
+        const char* const kFull = "X8 A8 565 555 P4 P8 1555 4444 L8 A8L8";
+        auto has = [](const std::string& list, const char* name) {
+            return (" " + list + " ").find(std::string(" ") + name + " ") != std::string::npos;
+        };
+        DDSURFACEDESC2 d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        d.dwWidth = d.dwHeight = 32;
+        IDirectDrawSurface7 *soft7 = nullptr, *hard7 = nullptr;
+        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY;
+        dd->CreateSurface(&d, &soft7, nullptr);
+        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+        dd->CreateSurface(&d, &hard7, nullptr);
+        IDirect3D7* d3d7 = nullptr;
+        dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d7));
+        std::string rgb7, hal7;
+        IDirect3DDevice7* dev7 = nullptr;
+        if (d3d7 && soft7 && SUCCEEDED(d3d7->CreateDevice(IID_IDirect3DRGBDevice, soft7, &dev7))) {
+            dev7->EnumTextureFormats(ListFormatCb, &rgb7);
+            dev7->Release();
+        }
+        if (d3d7 && hard7 && SUCCEEDED(d3d7->CreateDevice(IID_IDirect3DHALDevice, hard7, &dev7))) {
+            dev7->EnumTextureFormats(ListFormatCb, &hal7);
+            dev7->Release();
+        }
+        CHECK(rgb7 == kFull, "Direct3D 7's RGB device lists: %s (%s)", rgb7.c_str(), kFull);
+        // The RGB device's clear, as XP's software rasterizer leaves it: 4-bit channels and
+        // the alpha bit scaled down and cut, the byte no channel has clear.
+        struct Soft {
+            const char* name;
+            DWORD bits, r, g, b, a, first, second;  // held after 0x40c02010 and 0xc0c0c0c0
+        };
+        static const Soft kSoft[] = {
+            {"1-5-5-5", 16, 0x7C00, 0x03E0, 0x001F, 0x8000, 0x6082, 0x6318},
+            {"4-4-4-4", 16, 0x0F00, 0x00F0, 0x000F, 0xF000, 0x3B10, 0xBBBB},
+            {"8-8-8 in 32 bits", 32, 0xFF0000, 0xFF00, 0xFF, 0, 0x00C02010, 0x00C0C0C0},
+            {"8-8-8-8", 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000, 0x40C02010, 0xC0C0C0C0},
+        };
+        for (const Soft& k : kSoft) {
+            DDSURFACEDESC2 td = d;
+            td.dwFlags |= DDSD_PIXELFORMAT;
+            td.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY;
+            td.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            td.ddpfPixelFormat.dwFlags = DDPF_RGB | (k.a ? DDPF_ALPHAPIXELS : 0);
+            td.ddpfPixelFormat.dwRGBBitCount = k.bits;
+            td.ddpfPixelFormat.dwRBitMask = k.r;
+            td.ddpfPixelFormat.dwGBitMask = k.g;
+            td.ddpfPixelFormat.dwBBitMask = k.b;
+            td.ddpfPixelFormat.dwRGBAlphaBitMask = k.a;
+            IDirectDrawSurface7* target = nullptr;
+            DWORD held[2] = {0xBAD, 0xBAD};
+            dev7 = nullptr;
+            if (d3d7 && SUCCEEDED(dd->CreateSurface(&td, &target, nullptr)) &&
+                SUCCEEDED(d3d7->CreateDevice(IID_IDirect3DRGBDevice, target, &dev7))) {
+                for (int i = 0; i < 2; i++) {
+                    dev7->Clear(0, nullptr, D3DCLEAR_TARGET, i ? 0xC0C0C0C0 : 0x40C02010, 1.0f, 0);
+                    DDSURFACEDESC2 l = {};
+                    l.dwSize = sizeof(l);
+                    if (FAILED(target->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) continue;
+                    held[i] = k.bits == 16 ? *static_cast<const WORD*>(l.lpSurface) : *static_cast<const DWORD*>(l.lpSurface);
+                    target->Unlock(nullptr);
+                }
+            }
+            CHECK(held[0] == k.first && held[1] == k.second,
+                  "Direct3D 7's RGB device clearing a %s target to 0x40c02010 leaves 0x%lx (0x%lx), to 0xc0c0c0c0 0x%lx (0x%lx)", k.name,
+                  held[0], k.first, held[1], k.second);
+            if (dev7) dev7->Release();
+            if (target) target->Release();
+        }
+        CHECK(has(hal7, "L8") && has(hal7, "A8L8") && has(hal7, "A4L4") && has(hal7, "A") && !has(hal7, "P4"),
+              "Direct3D 7's hardware device lists: %s (with L8, A8L8, A4L4 and A; without P4)", hal7.c_str());
+        if (d3d7) d3d7->Release();
+        if (hard7) hard7->Release();
+        if (soft7) soft7->Release();
+        // Direct3D 3 and 2, on a DirectDraw object of their time.
+        IDirectDraw* dd1 = nullptr;
+        IDirectDraw4* dd4 = nullptr;
+        IDirect3D3* d3d3 = nullptr;
+        IDirect3D2* d3d2 = nullptr;
+        if (SUCCEEDED(DirectDrawCreate(nullptr, &dd1, nullptr))) {
+            dd1->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+            dd1->QueryInterface(IID_IDirectDraw4, reinterpret_cast<void**>(&dd4));
+            dd1->QueryInterface(IID_IDirect3D3, reinterpret_cast<void**>(&d3d3));
+            dd1->QueryInterface(IID_IDirect3D2, reinterpret_cast<void**>(&d3d2));
+        }
+        std::string rgb3, hal3, rgb2, hal2, mmx2;
+        DWORD cleared[2] = {0xBAD, 0xBAD};  // an 8-8-8-8 target after Clear2 to 0xc0c0c0c0: software, hardware
+        for (int hard = 0; hard < 2 && dd4 && d3d3 && d3d2; hard++) {
+            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | (hard ? DDSCAPS_VIDEOMEMORY : DDSCAPS_SYSTEMMEMORY);
+            IDirectDrawSurface4* s4 = nullptr;
+            IDirectDrawSurface* s1 = nullptr;
+            if (FAILED(dd4->CreateSurface(&d, &s4, nullptr))) continue;
+            s4->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<void**>(&s1));
+            IDirect3DDevice3* dev3 = nullptr;
+            if (SUCCEEDED(d3d3->CreateDevice(hard ? IID_IDirect3DHALDevice : IID_IDirect3DRGBDevice, s4, &dev3, nullptr))) {
+                dev3->EnumTextureFormats(ListFormatCb, hard ? &hal3 : &rgb3);
+                dev3->Release();
+            }
+            IDirect3DDevice2* dev2 = nullptr;
+            if (s1 && SUCCEEDED(d3d2->CreateDevice(hard ? IID_IDirect3DHALDevice : IID_IDirect3DRGBDevice, s1, &dev2))) {
+                dev2->EnumTextureFormats(ListFormatCb2, hard ? &hal2 : &rgb2);
+                dev2->Release();
+            }
+            if (!hard && s1 && SUCCEEDED(d3d2->CreateDevice(IID_IDirect3DMMXDevice, s1, &dev2))) {
+                dev2->EnumTextureFormats(ListFormatCb2, &mmx2);
+                dev2->Release();
+            }
+            if (s1) s1->Release();
+            s4->Release();
+            // A clear through the viewport, into a target with alpha.
+            DDSURFACEDESC2 ad = d;
+            ad.dwFlags |= DDSD_PIXELFORMAT;
+            ad.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            ad.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_ALPHAPIXELS;
+            ad.ddpfPixelFormat.dwRGBBitCount = 32;
+            ad.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+            ad.ddpfPixelFormat.dwGBitMask = 0xFF00;
+            ad.ddpfPixelFormat.dwBBitMask = 0xFF;
+            ad.ddpfPixelFormat.dwRGBAlphaBitMask = 0xFF000000;
+            IDirectDrawSurface4* target = nullptr;
+            IDirect3DViewport3* vp = nullptr;
+            dev3 = nullptr;
+            if (SUCCEEDED(dd4->CreateSurface(&ad, &target, nullptr)) &&
+                SUCCEEDED(d3d3->CreateDevice(hard ? IID_IDirect3DHALDevice : IID_IDirect3DRGBDevice, target, &dev3, nullptr)) &&
+                SUCCEEDED(d3d3->CreateViewport(&vp, nullptr)) && SUCCEEDED(dev3->AddViewport(vp))) {
+                D3DVIEWPORT2 vd = {};
+                vd.dwSize = sizeof(vd);
+                vd.dwWidth = vd.dwHeight = 32;
+                vd.dvClipX = -1.0f, vd.dvClipY = 1.0f, vd.dvClipWidth = vd.dvClipHeight = 2.0f;
+                vd.dvMaxZ = 1.0f;
+                vp->SetViewport2(&vd);
+                dev3->SetCurrentViewport(vp);
+                D3DRECT all = {{0}, {0}, {32}, {32}};
+                vp->Clear2(1, &all, D3DCLEAR_TARGET, 0xC0C0C0C0, 1.0f, 0);
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (SUCCEEDED(target->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                    cleared[hard] = *static_cast<const DWORD*>(l.lpSurface);
+                    target->Unlock(nullptr);
+                }
+            }
+            if (vp) vp->Release();
+            if (dev3) dev3->Release();
+            if (target) target->Release();
+        }
+        CHECK(cleared[0] == 0x00C0C0C0 && cleared[1] == 0xC0C0C0C0,
+              "Direct3D 3's Clear2 to 0xc0c0c0c0 on an 8-8-8-8 target: the RGB device leaves 0x%08lx (0x00c0c0c0: no alpha written), "
+              "the hardware device 0x%08lx (0xc0c0c0c0)", cleared[0], cleared[1]);
+        CHECK(rgb3 == kFull, "Direct3D 3's RGB device lists: %s (%s)", rgb3.c_str(), kFull);
+        CHECK(has(hal3, "L8") && has(hal3, "A8L8") && !has(hal3, "A4L4") && !has(hal3, "A") && !has(hal3, "P4"),
+              "Direct3D 3's hardware device lists: %s (with L8 and A8L8; without A4L4, A and P4)", hal3.c_str());
+        CHECK(rgb2 == "X8 A8 565 555 P4 P8" && mmx2 == "P8", "Direct3D 2's RGB device lists: %s (X8 A8 565 555 P4 P8); its MMX one: %s (P8)",
+              rgb2.c_str(), mmx2.c_str());
+        CHECK(!hal2.empty() && !has(hal2, "L8") && !has(hal2, "A8L8") && !has(hal2, "P4"),
+              "Direct3D 2's hardware device lists: %s (no luminance, no P4)", hal2.c_str());
+        if (d3d2) d3d2->Release();
+        if (d3d3) d3d3->Release();
+        if (dd4) dd4->Release();
+        if (dd1) dd1->Release();
     }
     const ULONG left = dd->Release();
     CHECK(left == 0, "DirectDraw released (refcount %lu)", left);
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// "desktop8", with desktopbpp=8 in dd2d9.ini: the desktop a 256-colour one to the game, through
+// DirectDraw, GDI's device capabilities and the display settings alike.
+static int RunDesktop8() {
+    IDirectDraw7* dd = nullptr;
+    if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    DDSURFACEDESC2 mode = {};
+    mode.dwSize = sizeof(mode);
+    HRESULT hr = dd->GetDisplayMode(&mode);
+    CHECK(SUCCEEDED(hr) && (mode.ddpfPixelFormat.dwFlags & DDPF_PALETTEINDEXED8) && mode.ddpfPixelFormat.dwRGBBitCount == 8,
+          "desktopbpp=8: GetDisplayMode says %lu bits, format flags 0x%lx (8, palettized)", mode.ddpfPixelFormat.dwRGBBitCount,
+          mode.ddpfPixelFormat.dwFlags);
+    HDC screen = GetDC(nullptr);
+    const int bits = GetDeviceCaps(screen, BITSPIXEL), raster = GetDeviceCaps(screen, RASTERCAPS),
+              entries = GetDeviceCaps(screen, SIZEPALETTE);
+    ReleaseDC(nullptr, screen);
+    CHECK(bits == 8 && (raster & RC_PALETTE) && entries == 256,
+          "desktopbpp=8: the screen's DC has %d bits a pixel, a palette %d, of %d entries (8, yes, 256)", bits,
+          (raster & RC_PALETTE) != 0, entries);
+    DEVMODEA dm = {};
+    dm.dmSize = sizeof(dm);
+    const BOOL got = EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &dm);
+    // (The mode read put back: its made-up depth isn't asked of the real display.)
+    const LONG back = got ? ChangeDisplaySettingsA(&dm, CDS_TEST) : -99;
+    CHECK(got && dm.dmBitsPerPel == 8 && back == DISP_CHANGE_SUCCESSFUL,
+          "desktopbpp=8: the current display settings say %lu bits (8); asking for them again gives %ld (0)", dm.dmBitsPerPel,
+          back);
+    // The primary and a plain surface are 8-bit palettized; the primary takes a palette, and
+    // a surface without one has a DC (the screen is palettized).
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7 *prim = nullptr, *plain = nullptr;
+    hr = dd->CreateSurface(&d, &prim, nullptr);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    d.dwWidth = d.dwHeight = 16;
+    const HRESULT hr2 = dd->CreateSurface(&d, &plain, nullptr);
+    DDPIXELFORMAT pf = {}, pf2 = {};
+    pf.dwSize = pf2.dwSize = sizeof(pf);
+    if (prim) prim->GetPixelFormat(&pf);
+    if (plain) plain->GetPixelFormat(&pf2);
+    PALETTEENTRY pe[256] = {};
+    pe[7] = {200, 100, 50, 0};
+    IDirectDrawPalette* pal = nullptr;
+    dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, pe, &pal, nullptr);
+    const HRESULT sp = prim && pal ? prim->SetPalette(pal) : E_FAIL;
+    HDC dc = nullptr;
+    const HRESULT dr = plain ? plain->GetDC(&dc) : E_FAIL;
+    if (SUCCEEDED(dr)) plain->ReleaseDC(dc);
+    CHECK(SUCCEEDED(hr) && SUCCEEDED(hr2) && (pf.dwFlags & DDPF_PALETTEINDEXED8) && (pf2.dwFlags & DDPF_PALETTEINDEXED8) &&
+              sp == DD_OK && dr == DD_OK,
+          "desktopbpp=8: the primary (0x%08lx, format flags 0x%lx) and a plain surface (0x%08lx, 0x%lx) are 8-bit palettized; "
+          "SetPalette on the primary 0x%08lx, GetDC on the plain one without a palette 0x%08lx",
+          hr, pf.dwFlags, hr2, pf2.dwFlags, sp, dr);
+    // (A 4-bit one without a palette has none on a palettized display either.)
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    d.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED4;
+    d.ddpfPixelFormat.dwRGBBitCount = 4;
+    IDirectDrawSurface7* four = nullptr;
+    dd->CreateSurface(&d, &four, nullptr);
+    const HRESULT dr4 = four ? four->GetDC(&dc) : E_FAIL;
+    if (SUCCEEDED(dr4)) four->ReleaseDC(dc);
+    CHECK(dr4 == DDERR_CANTCREATEDC, "desktopbpp=8: GetDC on a 4-bit surface without a palette 0x%08lx (DDERR_CANTCREATEDC)", dr4);
+    if (four) four->Release();
+    // Drawn into the window through the primary: shown in its palette's colours.
+    IDirectDrawClipper* clip = nullptr;
+    dd->CreateClipper(0, &clip, nullptr);
+    int right = 0, other = 0;
+    HRESULT fr = E_FAIL;
+    if (prim && clip && SUCCEEDED(sp)) {
+        clip->SetHWnd(0, hwnd);
+        prim->SetClipper(clip);
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&cr), 2);
+        DDBLTFX fx = {};
+        fx.dwSize = sizeof(fx);
+        fx.dwFillColor = 7;
+        fr = prim->Blt(&cr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+        for (int i = 0; i < 50; i++) {
+            Pump();
+            Sleep(25);
+            if (i < 20) continue;  // (shown by then: the presenter's device made)
+            HDC sdc = GetDC(nullptr);
+            const COLORREF c = GetPixel(sdc, (cr.left + cr.right) / 2, (cr.top + cr.bottom) / 2) & 0xFFFFFF;
+            ReleaseDC(nullptr, sdc);
+            (c == RGB(200, 100, 50) ? right : other)++;
+        }
+    }
+    CHECK(SUCCEEDED(fr) && right == 30 && !other,
+          "desktopbpp=8: index 7 filled into the window through the primary (0x%08lx) shows its palette's colour (%d of 30 reads, "
+          "%d other)", fr, right, other);
+    if (clip) clip->Release();
+    if (pal) pal->Release();
+    if (plain) plain->Release();
+    if (prim) prim->Release();
+    dd->Release();
     DestroyWindow(hwnd);
     return 0;
 }
@@ -4283,7 +4640,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     g_out = fopen(path, "a");
     fprintf(g_out, "== ddtest %s\n", cmd);
     int r = 0;
-    if (strstr(cmd, "pattern")) {
+    if (strstr(cmd, "desktop8")) r = RunDesktop8();
+    else if (strstr(cmd, "pattern")) {
         int w = 640, h = 480;
         sscanf(strstr(cmd, "pattern") + 7, "%d %d", &w, &h);
         r = RunPattern(w, h);

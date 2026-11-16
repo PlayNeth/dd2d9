@@ -373,7 +373,7 @@ HRESULT D3D::CreateDeviceI(REFCLSID guid, Surface* rt, int rtVersion, int versio
     const bool hw = kind == kHAL;
     // checkDeviceSurface (A Init 11).
     if (hw && !(caps & DDSCAPS_VIDEOMEMORY)) return D3DERR_SURFACENOTINVIDMEM;
-    if (f.fourcc || f.zbuf) return DDERR_INVALIDPIXELFORMAT;
+    if (f.fourcc || f.zbuf || f.CopyOnly()) return DDERR_INVALIDPIXELFORMAT;  // (as Direct3D 7's: a colour format)
     {
         D3DDEVICEDESC hal, hel;
         if (hw) {

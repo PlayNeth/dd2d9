@@ -24,6 +24,7 @@ bool Retired(DWORD s) {
 Device7::Device7(Direct3D7* d3d, DevKind kind, Surface* rt, Surface* z, Palette* pal)
     : d3d_(d3d), dd_(d3d->dd_), kind_(kind), rt_(rt), z_(z), pal_(pal), ctx_(d3d->dd_->GetGpu()) {
     caps_ = kind == kRGB ? RgbDesc() : HalDesc(kind == kTnLHAL);
+    ctx_.SetSoftware(kind == kRGB);
     // References (D §Reference counting): the render target's v7 interface, the Z buffer's v1,
     // the palette, the DirectDraw interface.
     rt_->AddRef(Surface::kRefV7);
@@ -611,35 +612,37 @@ HRESULT Device7::SetClipPlane(DWORD i, D3DVALUE* p) {
 HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) try {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(reinterpret_cast<void*>(cb)))) return DDERR_INVALIDPARAMS;
     std::vector<DDPIXELFORMAT> list;
-    auto rgb = [&](DWORD bpp, DWORD r, DWORD g, DWORD b, DWORD a) {
-        DDPIXELFORMAT f = {};
-        f.dwSize = sizeof(f);
-        f.dwFlags = DDPF_RGB | (a ? DDPF_ALPHAPIXELS : 0);
-        f.dwRGBBitCount = bpp;
-        f.dwRBitMask = r;
-        f.dwGBitMask = g;
-        f.dwBBitMask = b;
-        f.dwRGBAlphaBitMask = a;
-        list.push_back(f);
-    };
-    rgb(16, 0x7C00, 0x03E0, 0x001F, 0);
-    rgb(16, 0x7C00, 0x03E0, 0x001F, 0x8000);
-    rgb(16, 0x0F00, 0x00F0, 0x000F, 0xF000);
-    rgb(16, 0xF800, 0x07E0, 0x001F, 0);
-    rgb(32, 0xFF0000, 0xFF00, 0xFF, 0);
-    rgb(32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
-    // Palettized: converted through the palette on the way to the GPU. Not offered with
-    // palettizedtextures=off, as on a card without them (Matrox's G200 and G400, today's
+    // Palettized formats: converted through the palette on the way to the GPU. Not offered
+    // with palettizedtextures=off, as on a card without them (Matrox's G200 and G400, today's
     // drivers): N.I.C.E. 2 loads its 256-colour textures when it finds this format listed,
     // its 16-bit ones otherwise. (Still made if a game asks for one anyway.)
-    if (g_config.palTextures) {
-        DDPIXELFORMAT f = {};
-        f.dwSize = sizeof(f);
-        f.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
-        f.dwRGBBitCount = 8;
-        list.push_back(f);
-    }
-    if (kind_ != kRGB) {
+    if (kind_ == kRGB) {
+        AddSoftwareFormats(&list, kSoftFull, g_config.palTextures);  // the RGB rasterizer's own
+    } else {
+        auto rgb = [&](DWORD bpp, DWORD r, DWORD g, DWORD b, DWORD a) {
+            DDPIXELFORMAT f = {};
+            f.dwSize = sizeof(f);
+            f.dwFlags = DDPF_RGB | (a ? DDPF_ALPHAPIXELS : 0);
+            f.dwRGBBitCount = bpp;
+            f.dwRBitMask = r;
+            f.dwGBitMask = g;
+            f.dwBBitMask = b;
+            f.dwRGBAlphaBitMask = a;
+            list.push_back(f);
+        };
+        rgb(16, 0x7C00, 0x03E0, 0x001F, 0);
+        rgb(16, 0x7C00, 0x03E0, 0x001F, 0x8000);
+        rgb(16, 0x0F00, 0x00F0, 0x000F, 0xF000);
+        rgb(16, 0xF800, 0x07E0, 0x001F, 0);
+        rgb(32, 0xFF0000, 0xFF00, 0xFF, 0);
+        rgb(32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
+        if (g_config.palTextures) {
+            DDPIXELFORMAT f = {};
+            f.dwSize = sizeof(f);
+            f.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+            f.dwRGBBitCount = 8;
+            list.push_back(f);
+        }
         const GpuCaps c = GpuGetCaps();
         for (int i = 0; i < 5; i++) {
             if (!c.dxt[i]) continue;
@@ -650,7 +653,7 @@ HRESULT Device7::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx)
             list.push_back(f);
         }
         AddBumpFormats(&list);
-        AddLuminanceFormats(&list);  // (last: after every colour format a game may be looking for)
+        AddLuminanceFormats(&list, false);  // (last: after every colour format a game may be looking for)
     }
     for (DDPIXELFORMAT& f : list)
         if (cb(&f, ctx) != D3DENUMRET_OK) break;

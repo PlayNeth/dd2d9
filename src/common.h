@@ -19,7 +19,7 @@
 namespace dd2d9 {
 
 // ---------------------------------------------------------------- config
-#define DD2D9_VERSION "1.8.0"
+// (DD2D9_VERSION: the project's version, from meson.build.)
 
 enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
@@ -39,7 +39,7 @@ struct Config {
     int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
     int cpus = 1;                  // processors the game runs on and is told about; 0: all
-    int desktopBpp = 32;           // the desktop's colour depth DirectDraw reports (16, 24 or 32)
+    int desktopBpp = 32;           // the desktop's colour depth DirectDraw reports (8, 16, 24 or 32)
     bool lockWhole = false;        // a Lock of a rectangle counts as a write to the whole surface
     bool zAccess = true;           // zaccess=off: Z buffers on the GPU only, DirectDraw can't read or write them
     int fpsLimit = 0;              // frames per second at most (Flip, full blits to the primary); 0: off

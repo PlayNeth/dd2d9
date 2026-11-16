@@ -1362,7 +1362,7 @@ static int Run(int w, int h, int bpp) {
                   ops, made);
         }
 
-        // Luminance and alpha-only textures (where the device lists them) and 1- and 4-bit
+        // Luminance and alpha-only textures (where the device lists them) and 1-, 2- and 4-bit
         // palettized ones: made, filled through Lock and drawn. A texture Load between two
         // palettized textures copies the pixels and the palette, also onto a texture drawn before.
         {
@@ -1453,17 +1453,17 @@ static int Run(int w, int h, int bpp) {
                       "colour keyed on luminance 0x80: its texels show 0x%06lx (nothing drawn), texels of 0x40 0x%06lx (grey 0x40)",
                       keyedPx, otherPx);
                 if (tex) tex->Release();
-                // As a render target, as d3dim700 takes it: a new device refuses an 8-bit one
-                // for having no palette (the rule for every target below 16 bits), an existing
-                // hardware device because it renders to no 8-bit surface.
+                // As a render target: a new device refuses an 8-bit one for having no palette
+                // (the rule for every target below 16 bits), an existing hardware device
+                // because it renders to no 8-bit surface.
                 IDirectDrawSurface7* target = makeTex(pf, DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY, 0);
                 IDirect3DDevice7* onIt = nullptr;
                 const HRESULT dr = target ? d3d->CreateDevice(IID_IDirect3DHALDevice, target, &onIt) : E_FAIL;
                 const HRESULT sr = target ? dev->SetRenderTarget(target, 0) : E_FAIL;
                 if (SUCCEEDED(sr)) dev->SetRenderTarget(back, 0);
-                CHECK(dr == DDERR_NOPALETTEATTACHED && !onIt && sr == DDERR_INVALIDPARAMS,
+                CHECK(dr == DDERR_NOPALETTEATTACHED && !onIt && sr == DDERR_INVALIDCAPS,
                       "an 8-bit luminance surface as a render target: CreateDevice 0x%08lx (DDERR_NOPALETTEATTACHED), "
-                      "SetRenderTarget 0x%08lx (DDERR_INVALIDPARAMS)", dr, sr);
+                      "SetRenderTarget 0x%08lx (DDERR_INVALIDCAPS)", dr, sr);
                 if (onIt) onIt->Release();
                 if (target) target->Release();
             }
@@ -1485,27 +1485,24 @@ static int Run(int w, int h, int bpp) {
                     dev->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
                 }
                 CHECK(about(keyedPx, 0x808080), "the same texture colour keyed on another value shows 0x%06lx (grey 0x80)", keyedPx);
-                // As a render target (d3dim700 checks the format of RGB targets only): what is
-                // drawn is kept as its red and its alpha.
+                // As a render target: not a colour format, DDERR_INVALIDPIXELFORMAT from a new
+                // device and from an existing one, which has switched to it all the same
+                // (as to a Z buffer) and draws nothing until given another.
                 IDirectDrawSurface7* target = makeTex(pf, DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY, 0);
+                IDirect3DDevice7* onIt = nullptr;
+                const HRESULT dr = target ? d3d->CreateDevice(IID_IDirect3DHALDevice, target, &onIt) : E_FAIL;
                 const HRESULT sr = target ? dev->SetRenderTarget(target, 0) : E_FAIL;
-                DWORD drawn = 0xBAD;
-                if (SUCCEEDED(sr)) {
-                    D3DVIEWPORT7 small = {0, 0, 8, 8, 0.0f, 1.0f};
-                    dev->SetViewport(&small);
-                    dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0x40C02010, 1.0f, 0);
-                    dev->SetRenderTarget(back, 0);
-                    dev->SetViewport(&vp);
-                    DDSURFACEDESC2 tl = {};
-                    tl.dwSize = sizeof(tl);
-                    if (SUCCEEDED(target->Lock(nullptr, &tl, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
-                        drawn = *static_cast<const WORD*>(tl.lpSurface);
-                        target->Unlock(nullptr);
-                    }
-                }
-                CHECK(SUCCEEDED(sr) && drawn == 0x40C0,
-                      "a 16-bit luminance surface with alpha as a render target (0x%08lx): cleared to 0x40c02010 it holds 0x%04lx "
-                      "(0x40c0: the alpha, the red)", sr, drawn);
+                IDirectDrawSurface7* now = nullptr;
+                dev->GetRenderTarget(&now);
+                const HRESULT cr = dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0x40C02010, 1.0f, 0);
+                const HRESULT br = dev->SetRenderTarget(back, 0);
+                CHECK(dr == DDERR_INVALIDPIXELFORMAT && !onIt && sr == DDERR_INVALIDPIXELFORMAT && target && now == target &&
+                          SUCCEEDED(br),
+                      "a 16-bit luminance surface with alpha as a render target: CreateDevice 0x%08lx, SetRenderTarget 0x%08lx "
+                      "(both DDERR_INVALIDPIXELFORMAT), the device's target then is it %d, a clear 0x%08lx, the back buffer "
+                      "again 0x%08lx", dr, sr, now == target, cr, br);
+                if (now) now->Release();
+                if (onIt) onIt->Release();
                 if (target) target->Release();
                 if (tex) tex->Release();
             }
@@ -1533,19 +1530,67 @@ static int Run(int w, int h, int bpp) {
                       c, own);
                 if (tex) tex->Release();
             }
-            // Palettized, 4 and 1 bits: index 3 of sixteen, index 1 of two.
-            for (int bits : {4, 1}) {
+            // A target cleared by the hardware device, as drivers on XP SP3 leave it: a 16-bit
+            // format without alpha keeps each channel's high bits (not rounded) and the bit no
+            // channel has clear; one with alpha is rounded; 32 bits without alpha has the byte
+            // no channel has set.
+            {
+                struct Cleared {
+                    const char* name;
+                    DWORD bits, r, g, b, a, first, second;  // held after 0x40c02010 and 0xc0c0c0c0
+                };
+                static const Cleared kCleared[] = {
+                    {"5-6-5", 16, 0xF800, 0x07E0, 0x001F, 0, 0xC102, 0xC618},
+                    {"5-5-5", 16, 0x7C00, 0x03E0, 0x001F, 0, 0x6082, 0x6318},
+                    {"1-5-5-5", 16, 0x7C00, 0x03E0, 0x001F, 0x8000, 0x5C82, 0xDEF7},
+                    {"4-4-4-4", 16, 0x0F00, 0x00F0, 0x000F, 0xF000, 0x4B21, 0xBBBB},
+                    {"8-8-8 in 32 bits", 32, 0xFF0000, 0xFF00, 0xFF, 0, 0xFFC02010, 0xFFC0C0C0},
+                    {"8-8-8-8", 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000, 0x40C02010, 0xC0C0C0C0},
+                };
+                for (const Cleared& k : kCleared) {
+                    DDPIXELFORMAT pf = {};
+                    pf.dwFlags = DDPF_RGB | (k.a ? DDPF_ALPHAPIXELS : 0);
+                    pf.dwRGBBitCount = k.bits;
+                    pf.dwRBitMask = k.r;
+                    pf.dwGBitMask = k.g;
+                    pf.dwBBitMask = k.b;
+                    pf.dwRGBAlphaBitMask = k.a;
+                    IDirectDrawSurface7* target = makeTex(pf, DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY, 0);
+                    const HRESULT sr = target ? dev->SetRenderTarget(target, 0) : E_FAIL;
+                    DWORD held[2] = {0xBAD, 0xBAD};
+                    if (SUCCEEDED(sr)) {
+                        D3DVIEWPORT7 small = {0, 0, 8, 8, 0.0f, 1.0f};
+                        dev->SetViewport(&small);
+                        for (int i = 0; i < 2; i++) {
+                            dev->Clear(0, nullptr, D3DCLEAR_TARGET, i ? 0xC0C0C0C0 : 0x40C02010, 1.0f, 0);
+                            DDSURFACEDESC2 tl = {};
+                            tl.dwSize = sizeof(tl);
+                            if (FAILED(target->Lock(nullptr, &tl, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) continue;
+                            held[i] = k.bits == 16 ? *static_cast<const WORD*>(tl.lpSurface) : *static_cast<const DWORD*>(tl.lpSurface);
+                            target->Unlock(nullptr);
+                        }
+                        dev->SetRenderTarget(back, 0);
+                        dev->SetViewport(&vp);
+                    }
+                    CHECK(held[0] == k.first && held[1] == k.second,
+                          "a %s render target (0x%08lx) cleared to 0x40c02010 holds 0x%lx (0x%lx), to 0xc0c0c0c0 0x%lx (0x%lx)", k.name,
+                          sr, held[0], k.first, held[1], k.second);
+                    if (target) target->Release();
+                }
+            }
+            // Palettized, 4, 2 and 1 bits: index 3 of sixteen, 3 of four, 1 of two.
+            for (int bits : {4, 2, 1}) {
                 DDPIXELFORMAT pf = {};
-                pf.dwFlags = DDPF_RGB | (bits == 4 ? DDPF_PALETTEINDEXED4 : DDPF_PALETTEINDEXED1);
+                pf.dwFlags = DDPF_RGB | (bits == 4 ? DDPF_PALETTEINDEXED4 : bits == 2 ? DDPF_PALETTEINDEXED2 : DDPF_PALETTEINDEXED1);
                 pf.dwRGBBitCount = DWORD(bits);
                 PALETTEENTRY pe[16] = {};
-                pe[bits == 4 ? 3 : 1] = {200, 40, 90, 0};
+                pe[bits == 1 ? 1 : 3] = {200, 40, 90, 0};
                 IDirectDrawPalette* pal = nullptr;
-                dd->CreatePalette(bits == 4 ? DDPCAPS_4BIT : DDPCAPS_1BIT, pe, &pal, nullptr);
+                dd->CreatePalette(bits == 4 ? DDPCAPS_4BIT : bits == 2 ? DDPCAPS_2BIT : DDPCAPS_1BIT, pe, &pal, nullptr);
                 IDirectDrawSurface7* tex = makeTex(pf, 0, DDSCAPS2_TEXTUREMANAGE);
                 const HRESULT sp = tex && pal ? tex->SetPalette(pal) : E_FAIL;
                 const BYTE v = bits == 4 ? 0x33 : 0xFF;
-                const DWORD c = SUCCEEDED(sp) && fill(tex, bits == 4 ? 4 : 1, v, v) ? shown(tex, false, D3DTOP_SELECTARG1) : 0xBAD;
+                const DWORD c = SUCCEEDED(sp) && fill(tex, bits, v, v) ? shown(tex, false, D3DTOP_SELECTARG1) : 0xBAD;
                 CHECK(about(c, 0xC8285A), "a %d-bit palettized texture shows 0x%06lx (its palette's 0xc8285a; SetPalette 0x%08lx)", bits, c, sp);
                 if (tex) tex->Release();
                 if (pal) pal->Release();

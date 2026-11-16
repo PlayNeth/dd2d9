@@ -106,6 +106,13 @@ GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth) {
         if ((g_config.render32 || msaa) && b->fmt.bpp == 16 && !b->fmt.pal8) g->convert = true;
         g->fmt = g->convert ? (b->fmt.a && !b->fmt.pal8 ? D3DFMT_A8R8G8B8 : D3DFMT_X8R8G8B8) : native;
         hr = d->CreateRenderTarget(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
+        if (FAILED(hr) && !g->convert) {
+            // A format this GPU doesn't draw into after all (A1R5G5B5 under Wine): in 32 bits,
+            // converted when the CPU reads it.
+            g->convert = true;
+            g->fmt = b->fmt.a ? D3DFMT_A8R8G8B8 : D3DFMT_X8R8G8B8;
+            hr = d->CreateRenderTarget(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
+        }
         if (SUCCEEDED(hr) && msaa &&
             FAILED(d->CreateRenderTarget(b->w, b->h, g->fmt, msaa, 0, FALSE, &g->ms, nullptr))) {
             g->surf->Release();  // the Z buffers are multisampled: no target without it

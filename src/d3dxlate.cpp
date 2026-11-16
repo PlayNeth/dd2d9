@@ -41,7 +41,7 @@ void AddBumpFormats(std::vector<DDPIXELFORMAT>* list) {
     bump(c.bumpX8L8V8U8, 24, 0xFF, 0xFF00, 0xFF0000);
 }
 
-void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list) {
+void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list, bool dx6) {
     const GpuCaps c = GpuGetCaps();
     auto add = [&](bool have, DWORD flags, DWORD bits, DWORD lum, DWORD alpha) {
         if (!have) return;
@@ -54,8 +54,42 @@ void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list) {
         list->push_back(f);
     };
     add(c.lumL8, DDPF_LUMINANCE, 8, 0xFF, 0);
+    add(c.alphaA8 && !dx6, DDPF_ALPHA, 8, 0, 0xFF);
+    // (A4L4: Direct3D 9's own format where the GPU has it, converted where not.)
+    add(c.lumA8L8 && !dx6, DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 8, 0x0F, 0xF0);
     add(c.lumA8L8, DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 16, 0xFF, 0xFF00);
-    add(c.alphaA8, DDPF_ALPHA, 8, 0, 0xFF);
+}
+
+void AddSoftwareFormats(std::vector<DDPIXELFORMAT>* list, SoftList which, bool palettized) {
+    auto add = [&](DWORD flags, DWORD bits, DWORD m0, DWORD m1, DWORD m2, DWORD alpha) {
+        DDPIXELFORMAT f = {};
+        f.dwSize = sizeof(f);
+        f.dwFlags = flags;
+        f.dwRGBBitCount = bits;  // (dwLuminanceBitCount, in the same place)
+        f.dwRBitMask = m0;       // (dwLuminanceBitMask)
+        f.dwGBitMask = m1;
+        f.dwBBitMask = m2;
+        f.dwRGBAlphaBitMask = alpha;
+        list->push_back(f);
+    };
+    const DWORD rgb = DDPF_RGB, rgba = DDPF_RGB | DDPF_ALPHAPIXELS;
+    if (which == kSoftPal8) {
+        add(DDPF_RGB | DDPF_PALETTEINDEXED8, 8, 0, 0, 0, 0);
+        return;
+    }
+    add(rgb, 32, 0xFF0000, 0xFF00, 0xFF, 0);
+    add(rgba, 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
+    add(rgb, 16, 0xF800, 0x07E0, 0x001F, 0);
+    add(rgb, 16, 0x7C00, 0x03E0, 0x001F, 0);
+    if (palettized) {
+        add(DDPF_RGB | DDPF_PALETTEINDEXED4, 4, 0, 0, 0, 0);
+        add(DDPF_RGB | DDPF_PALETTEINDEXED8, 8, 0, 0, 0, 0);
+    }
+    if (which == kSoftDx5) return;
+    add(rgba, 16, 0x7C00, 0x03E0, 0x001F, 0x8000);
+    add(rgba, 16, 0x0F00, 0x00F0, 0x000F, 0xF000);
+    add(DDPF_LUMINANCE, 8, 0xFF, 0, 0, 0);
+    add(DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 16, 0xFF, 0, 0, 0xFF00);
 }
 
 float ZBiasToDepthBias(DWORD zbias) { return -0.000005f * float(LONG(zbias)); }

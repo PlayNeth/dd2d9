@@ -14,6 +14,15 @@ HRESULT Surface::GetDC(HDC* out) {
     if (dcOut) return DDERR_DCALREADYCREATED;  // *out left alone, as ddraw.dll
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
+    // A palettized surface without a palette of its own has no colours to give a DC: none
+    // (XP SP3 at 16 and 32 bits: DDERR_CANTCREATEDC at 1, 2, 4 and 8 bits; with a palette
+    // attached, a DC at 1, 4 and 8). Except an 8-bit one while the display is palettized:
+    // its colours are the screen's then (XP SP3 in a 256-colour mode; a 4-bit one still has none).
+    if (buf->fmt.Palettized() && !palette) {
+        DWORD w, h, bpp = 0;
+        if (buf->fmt.pal8) dd->DisplayMode(&w, &h, &bpp);
+        if (bpp != 8) return DDERR_CANTCREATEDC;
+    }
     CpuAccess(true);  // what Direct3D drew is read back first
     HDC dc = buf->GetDC();
     if (!dc) return DDERR_CANTCREATEDC;

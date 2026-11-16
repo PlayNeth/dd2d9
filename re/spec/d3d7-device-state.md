@@ -501,7 +501,9 @@ ddrval is returned (e.g. D3DERR_UNSUPPORTEDCOLOROPERATION...). NULL pdwPasses fa
 SetRenderTarget(pNew, flags) — `flags` ignored:
 1. `This == NULL` or **`pNew == NULL` → DDERR_INVALIDOBJECT** (`@7391ff2f`, `@7391ff40`).
 2. `GetSurfaceDesc` must succeed, the surface must have **DDSCAPS_3DDEVICE**, its bit depth must be in the device's
-   dwDeviceRenderBitDepth, and width/height ≤ 2048; else **DDERR_INVALIDPARAMS** (lines 51-62, `@73920198`).
+   dwDeviceRenderBitDepth, and width/height ≤ 2048; else **DDERR_INVALIDCAPS** (lines 51-62, `@73920198`;
+   the code measured: XP SP3's RGB device for a 4-bit palettized target, and Wine's test_rt_caps, verified on
+   Windows, for a surface without 3DDEVICE and for an 8-bit one on a hardware device).
 3. Attached Z buffer looked up (`GetAttachedSurface(DDSCAPS_ZBUFFER)`; none is fine). Any other error →
    DDERR_INVALIDPARAMS (lines 63-65, 147-149).
 4. Palette: `GetPalette` error other than DDERR_NOPALETTEATTACHED → DDERR_INVALIDPARAMS; no palette on a target
@@ -512,6 +514,22 @@ SetRenderTarget(pNew, flags) — `flags` ignored:
    new one held (lines 123-140). The viewport is **not** changed or revalidated, so a viewport larger than a smaller
    new target stays in effect. No in-scene check. Result of `CalcDDSurfInfo` returned (D3D_OK normally,
    `@73920191`).
+7. A target that isn't a colour format gets **DDERR_INVALIDPIXELFORMAT** after the switch: Wine's test_rt_caps
+   for a Z buffer with DDSCAPS_3DDEVICE (GetRenderTarget then returns it); XP SP3's RGB device for 16-bit
+   luminance with alpha and 16-bit bump maps (the code measured; dd2d9 takes the device to have switched to
+   them too). 8-bit luminance and alpha-only targets without a palette stop at 4.
+A clear's colour in the target (measured: XP SP3's RGB device, colours 0x40c02010, 0xc0c0c0c0, 0xffffffff):
+5-6-5 0xc102 0xc618 0xffff; X1R5G5B5 0x6082 0x6318 0x7fff; A1R5G5B5 0x6082 0x6318 0xffff; A4R4G4B4 0x3b10 0xbbbb
+0xffff; X8R8G8B8 0x00c02010 0x00c0c0c0 0x00ffffff; A8R8G8B8 as given. So a 5- or 6-bit channel is v >> (8 - bits),
+a 4-bit channel and the 1-bit alpha floor(v·max/255), and bits no channel has are 0. The same on XP SP3 in VMware.
+Hardware devices: a Voodoo3 gives the same on 5-6-5 (and writes 5-6-5 values into its other 16-bit targets: the
+driver's own). VMware's SVGA II adapter (16- and 32-bit desktop alike): 5-6-5 0xc102 0xc618 0xffff; X1R5G5B5 0x6082
+0x6318 0x7fff; A1R5G5B5 0x5c82 0xdef7 0xffff; A4R4G4B4 0x4b21 0xbbbb 0xffff (the formats with alpha rounded);
+X8R8G8B8 0xffc02010 0xffc0c0c0 0xffffffff (the unused byte set); A8R8G8B8 as given. Its Direct3D 3 hardware
+device's Clear2 (inside a scene; outside one the clear isn't in the surface when it is locked next) leaves the
+same values, alpha included. dd2d9's hardware devices follow these.
+Through IDirect3DViewport3::Clear2 on a Direct3D 3 RGB device the colour channels are the same but **no alpha is
+written**: A1R5G5B5 0x6082 0x6318 0x7fff; A4R4G4B4 0x0b10 0x0bbb 0x0fff; A8R8G8B8 0x00c02010 0x00c0c0c0 0x00ffffff.
 GetRenderTarget: `This == NULL` → DDERR_INVALIDOBJECT; NULL out → DDERR_INVALIDPARAMS; else the v7 render target,
 AddRef'd, D3D_OK (lines 184-194).
 

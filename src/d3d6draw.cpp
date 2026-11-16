@@ -629,6 +629,10 @@ void ClearRects(Device* d, const std::vector<RECT>& rects, DWORD flags, DWORD co
     if (!u.ok) return;
     if (!d->z) flags &= ~DWORD(D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL);
     if (!flags) return;
+    // The software rasterizers' clear writes no alpha: the target's alpha bits are left 0
+    // (XP SP3's RGB device through Clear2, on 1-5-5-5, 4-4-4-4 and 8-8-8-8 targets;
+    // Direct3D 7's does write it). A hardware device writes it (VMware's adapter on XP).
+    if (d->kind != kHAL) color &= 0x00FFFFFF;
     d->ctx.SetViewport(0, 0, DWORD(d->rt->W()), DWORD(d->rt->H()), 0.0f, 1.0f);
     d->ctx.Clear(DWORD(rects.size()), rects.data(), flags, color, zv, stencil);
     d->SetViewport9();

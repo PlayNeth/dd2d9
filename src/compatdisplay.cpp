@@ -12,12 +12,13 @@ namespace {
 
 // ---------------------------------------------------------------- desktopbpp=
 
-// What a 16-bit (or 24-bit) desktop answered through GDI and EnumDisplaySettings: the colour
-// depth, for display device contexts and the current (or registry) display settings. Games
-// check it there too, as Moto Racer checks it through DirectDraw (GetDisplayMode, answered in
-// ddcaps.cpp). While the game has a display mode of its own, that mode's depth, as on XP. A
-// palettized depth (8 bits) isn't faked there (GetDeviceCaps does answer one for an 8-bit mode
-// of the game's own, below).
+// What a 16-bit (or 24-bit, or 256-colour) desktop answered through GDI and
+// EnumDisplaySettings: the colour depth, for display device contexts and the current (or
+// registry) display settings. Games check it there too, as Moto Racer checks it through
+// DirectDraw (GetDisplayMode, answered in ddcaps.cpp). While the game has a display mode of
+// its own, that mode's depth, as on XP. An 8-bit mode of the game's own isn't reported by
+// EnumDisplaySettings unless the desktop is said to be one too (desktopbpp=8); GetDeviceCaps
+// does answer it (compatgdi.cpp).
 using EnumDisplaySettingsAFn = BOOL(WINAPI*)(LPCSTR, DWORD, DEVMODEA*);
 using EnumDisplaySettingsWFn = BOOL(WINAPI*)(LPCWSTR, DWORD, DEVMODEW*);
 using EnumDisplaySettingsExAFn = BOOL(WINAPI*)(LPCSTR, DWORD, DEVMODEA*, DWORD);
@@ -29,7 +30,7 @@ EnumDisplaySettingsExWFn g_enumDisplaySettingsExW;
 
 int ShownBppOrZero() {
     const int b = ShownDisplayBpp();
-    return b >= 16 ? b : 0;
+    return b >= 16 || (b == 8 && g_config.desktopBpp == 8) ? b : 0;
 }
 
 // The current or registry settings of the primary display (null or its name): the depth.

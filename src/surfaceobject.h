@@ -61,6 +61,7 @@ struct Buffer {
     // behind. g_lock (and the Gpu lock for gpu).
     GpuSurf* gpu = nullptr;
     bool gpuStale = true;   // the CPU copy changed since the render target's GPU copy was made
+    bool softDrawn = false;  // the last device to draw into it was a software one (RowFromGpu)
     // Where (gpuStale): the union of what the CPU wrote since; kAllRect: all of it.
     static constexpr RECT kAllRect = {0, 0, 0x7FFFFFFF, 0x7FFFFFFF};
     RECT gpuDirty = kAllRect;

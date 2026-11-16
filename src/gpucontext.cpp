@@ -157,6 +157,8 @@ void GpuContext::SetTargets(Surface* rt, Surface* z) {
     p_->z = z;
 }
 
+void GpuContext::SetSoftware(bool software) { p_->software = software; }
+
 // The viewport covers the whole render target (a clear of it replaces every pixel).
 bool GpuContext::Impl::CoversTarget() const {
     return rt && vp.X == 0 && vp.Y == 0 && vp.Width >= DWORD(rt->buf->w) && vp.Height >= DWORD(rt->buf->h);
@@ -203,6 +205,7 @@ bool GpuContext::Impl::BindTargets(bool overwriteColor, bool overwriteZ) {
     if (!rt) return false;
     GpuSurf* r = EnsureSurf(gpu, dev, rt->buf, false);
     if (!r) return false;
+    rt->buf->softDrawn = software;
     r->SetPalette(rt);
     if (rt->buf->gpuStale) {
         if (overwriteColor) rt->buf->gpuStale = false;
@@ -385,6 +388,30 @@ void GpuContext::Impl::SetAddr(const DWORD (&want)[8][2]) {
             }
 }
 
+// `color` as a 16-bit target of format f takes it on XP SP3, written as the 8-bit value that
+// rounding brings to exactly that (the GPU alone would round red 0xC0 to 23 of 31).
+// A software device (XP's RGB device): a channel of 5 or 6 bits keeps its high bits (red 0xC0
+// is 24 of 31), a narrower one (4-4-4-4's, 1-5-5-5's alpha) is scaled down and cut (0xC0 is
+// 11 of 15; alpha is set by 0xFF alone).
+// A hardware device: a format without alpha keeps the high bits as well (a Voodoo3 and
+// VMware's adapter on 5-6-5, the latter on 5-5-5); one with alpha is rounded (VMware's on
+// 1-5-5-5 and 4-4-4-4, the one driver measured).
+static DWORD ClearColor16(const Format& f, DWORD color, bool software) {
+    static const int kShift[4] = {16, 8, 0, 24};
+    const DWORD masks[4] = {f.r, f.g, f.b, f.a};
+    DWORD out = color;
+    for (int c = 0; c < 4; c++) {
+        const int bits = __builtin_popcount(masks[c]);
+        if (!bits || bits >= 8) continue;
+        const DWORD top = (1u << bits) - 1, v = (color >> kShift[c]) & 0xFF;
+        DWORD q;
+        if (software) q = bits >= 5 ? v >> (8 - bits) : v * top / 255;
+        else q = f.a ? (v * top + 127) / 255 : v >> (8 - bits);
+        out = (out & ~(0xFFu << kShift[c])) | ((q * 255 + top / 2) / top) << kShift[c];
+    }
+    return out;
+}
+
 void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, float z, DWORD stencil) {
     Impl& p = *p_;
     if (!p.dev) return;
@@ -400,6 +427,10 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     if (p.z && p.z->buf->gpu && p.z->buf->gpu->fmt != D3DFMT_D24S8 && p.z->buf->gpu->fmt != kIntz)
         flags &= ~DWORD(D3DCLEAR_STENCIL);
     if (!flags) return;
+    // (Also for a 16-bit target drawn in 32 bits, render32 or antialiasing: the colour shown
+    // and the one read back are the 16-bit target's.)
+    const Format& tf = p.rt->buf->fmt;
+    if ((flags & D3DCLEAR_TARGET) && tf.bpp == 16 && !tf.CopyOnly()) color = ClearColor16(tf, color, p.software);
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
     // Emulated W buffering's scale starts again with each whole depth clear (a frame): one
     // stray near vertex shrinks it for that frame only, not for good.

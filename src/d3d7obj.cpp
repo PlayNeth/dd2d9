@@ -158,7 +158,9 @@ HRESULT Direct3D7::CreateDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, I
     const bool hw = kind != kRGB;
     if (hw && !(caps & DDSCAPS_VIDEOMEMORY)) return D3DERR_SURFACENOTINVIDMEM;
     const Format& f = rt->buf->fmt;
-    if (f.fourcc || f.zbuf) return DDERR_INVALIDPIXELFORMAT;
+    // (Not a colour format: refused by XP SP3's RGB device for 16-bit luminance and bump-map
+    // targets; the 8-bit ones by the palette rule above.)
+    if (f.fourcc || f.zbuf || f.CopyOnly()) return DDERR_INVALIDPIXELFORMAT;
     // d3dim700's RGB device doesn't render to palettized surfaces (Wine's test_rt_caps):
     // refused by the format check in video memory, failing later in system memory.
     if (f.pal8) return (caps & DDSCAPS_VIDEOMEMORY) ? DDERR_INVALIDPIXELFORMAT : E_FAIL;

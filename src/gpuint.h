@@ -371,6 +371,7 @@ struct GpuContext::Impl final : Gpu::Owner {
     // antialias2d=off: this draw is 2D (Draw: screen-aligned, the depth test passing
     // always): drawn into the resolved, single-sampled image, not the multisampled one.
     bool flat2d = false;
+    bool software = false;  // a software device's context (SetSoftware)
     Surface* tex[8] = {};
     bool colorKey = false;
     // Each stage's mip filter as the game set it, and as D3D9 has it: mipmaps=on turns it on

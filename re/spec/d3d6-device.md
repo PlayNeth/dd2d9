@@ -526,6 +526,8 @@ v3, in order:
    DDERR_INVALIDPARAMS (87-89, 281-283).
 6. QI for IDirectDrawSurface (error returned) and GetPalette: an error other than DDERR_NOPALETTEATTACHED →
    DDERR_INVALIDPARAMS; no palette on a target below 16 bpp → **DDERR_NOPALETTEATTACHED** (93-101).
+   (A target that isn't a colour format, a Z buffer or a 16-bit luminance surface or bump map: dd2d9 returns
+   DDERR_INVALIDPIXELFORMAT with the device switched to it, as Wine's test_rt_caps has it for a Z buffer.)
 7. **New target without a Z buffer while the device has one → DDERR_INVALIDPARAMS** (102-104). (Gaining a Z
    buffer is allowed.)
 8. The driver is switched: DDI 3 through a DP2 SETRENDERTARGET (225-226); DDI 2 through its SetRenderTarget
@@ -572,8 +574,14 @@ CreateDevice/caps spec).
      formats skip it.** The built-in list (9 entries at 0x6defe010, count at 0x6defe130):
      X1R5G5B5, A1R5G5B5, R5G6B5, A4R4G4B4, A8R8G8B8, X8R8G8B8 (32-bit RGB), R3G3B2 (8-bit RGB),
      4-bit palettized (DDPF_RGB|PALETTEINDEXED4), 8-bit palettized (DDPF_RGB|PALETTEINDEXED8).
-     So by default **every interface version sees only these 9 formats plus FOURCC formats** (luminance,
-     bump, 24-bit RGB and alpha-only formats are hidden unless listed in the registry).
+     So with empty registry lists every interface version sees only these 9 formats plus FOURCC formats.
+     XP SP3 installs a DX6TextureEnumInclusionList, though: measured there (Voodoo3), a version 3 device
+     lists 8-bit luminance and 16-bit luminance with alpha (and its software devices list both), while
+     alpha-only and 8-bit luminance with alpha stay hidden, and a version 2 device lists no luminance.
+     The software devices' lists, measured on XP SP3, in order: RGB and MMX (version 3; Direct3D 7's RGB
+     device the same): X8R8G8B8, A8R8G8B8, R5G6B5, X1R5G5B5, 4-bit palettized, 8-bit palettized, A1R5G5B5,
+     A4R4G4B4, L8, A8L8; RGB (version 2): the first six of those; MMX and Ramp (version 2): 8-bit palettized
+     only.
    - **version 1/2 devices**: DXT1-DXT5 are never enumerated, and on a DDI 3 driver no FOURCC format at all;
      and at most **10** formats are enumerated unless dwAppHackFlags & 0x100 (lines 138-144).
 4. Callback per format in the driver's order, v1/v2 with the 0x6C-byte DDSURFACEDESC, v3 with its

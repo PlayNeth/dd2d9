@@ -232,11 +232,21 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
     }
     if (F & DDSD_PIXELFORMAT) {
         if (primary) return DDERR_INVALIDPARAMS;
+        // DDPF_ALPHA goes with none of these (ddraw.dll's check, FUN_73736cad: mask 0x27e6d;
+        // XP SP3 returns this for each one tried): ALPHAPIXELS, FOURCC, the palettized flags,
+        // RGB, YUV, ZBUFFER, ZPIXELS, STENCILBUFFER, LUMINANCE.
+        if ((pf.dwFlags & DDPF_ALPHA) && (pf.dwFlags & 0x27E6D)) return DDERR_INVALIDPARAMS;
         Format f;
         if (!z && !Format::FromDDPF(pf, &f)) {
             DD2D9_LOG("CreateSurface: unsupported pixel format (flags 0x%lx, %lu bpp)", pf.dwFlags, pf.dwRGBBitCount);
             return DDERR_INVALIDPIXELFORMAT;
         }
+        // Formats that aren't colours (luminance, alpha-only, bump maps) are textures' alone:
+        // ddraw.dll makes no other surface of them (XP SP3 and Windows 98: every luminance
+        // and alpha-only layout refused as a plain surface, a bump map as a plain render target).
+        // 8-bit RGB (3-3-2) as well (XP SP3 at 8-, 16- and 32-bit displays).
+        const bool rgb8 = f.bpp == 8 && !f.Palettized() && !f.CopyOnly() && !f.fourcc && !f.zbuf;
+        if ((f.CopyOnly() || rgb8) && !(C & DDSCAPS_TEXTURE)) return DDERR_INVALIDPIXELFORMAT;
         if (f.BlockCompressed() && ((in.dwWidth | in.dwHeight) & 3)) return DDERR_INVALIDPARAMS;
         // Planar video (YV12, I420): offscreen and overlay surfaces only (no texture format lists it).
         if (f.Planar() && (C & (DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER))) return DDERR_INVALIDPIXELFORMAT;

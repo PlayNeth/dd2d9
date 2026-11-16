@@ -220,7 +220,12 @@ GetDC, ReleaseDC, Unlock all succeed). No process-id check.
   colour table is **the surface's own palette's lpColorTable, or NULL** — a primary never
   passes its palette (27–33). With NULL, win32k chooses the DIB colour table (kernel-
   dependent; Wine's tests show the primary's / system palette on an 8-bit surface without
-  one, and the surface's palette overriding it).
+  one, and the surface's palette overriding it). Measured on XP SP3 with a 16- or 32-bit
+  display: a palettized surface (1, 2, 4 or 8 bits) without a palette of its own →
+  **DDERR_CANTCREATEDC**; with one, DD_OK at 1, 4 and 8 bits (drawing in its colours) and
+  DDERR_CANTCREATEDC at 2 (GDI has no 2-bit bitmap). In a 256-colour mode: an 8-bit surface
+  without a palette has a DC, a 4-bit one still DDERR_CANTCREATEDC. dd2d9 does the same, by
+  the display depth the game is told.
 * Emulated (system-memory) primary: the DirectDraw object's screen DC (recreated with
   CreateDC on the device name when DDRAWILCL_DIRTYDC, with the primary palette's HPALETTE
   selected and realized) — GDI draws on the screen, not in the surface (36–47).

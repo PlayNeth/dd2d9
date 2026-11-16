@@ -105,7 +105,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **What the game is told about the machine,** as a PC of its era would answer:
   - 1 GB of memory by default (`ram`): Windows reports 2 GB and a 4 GB page file, and old games overflow adding them up and claim there isn't enough;
   - one processor (`cpus`), and a 2 GHz clock in the registry (`cpu`);
-  - a 16 or 24-bit desktop (`desktopbpp`) for games that refuse a 32-bit one, through DirectDraw, GDI and the display settings alike.
+  - a 256-colour, 16 or 24-bit desktop (`desktopbpp`) for games that refuse a 32-bit one, through DirectDraw, GDI and the display settings alike.
 - **Windows 9x and XP behaviour games relied on,** on by default:
   - memory from the process heap comes zeroed (`heapzero`), for games that read it before writing, such as Daytona USA Deluxe;
   - a critical section a thread releases goes to the thread waiting for it (`fairlocks`), where Windows since Vista lets the releasing thread take it straight back (KOF 99 Evolution's intro movie);
@@ -182,7 +182,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `nobuffering` | `off`: `FILE_FLAG_NO_BUFFERING` is dropped from the game's `CreateFileA`/`CreateFileW`, as Windows 9x ignored it (Biko); `on`: kept, as Windows has it |
 | `flipcopy` | `auto`: after each `Flip` the back buffer gets a copy of the frame just shown while Direct3D Retained Mode (`d3drm.dll`) is loaded (Biko needs it); `on`: always; `off`: never, as `ddraw.dll` has it |
 | `selfsuspend` | `off`: a sound callback (`waveOutOpen`, `midiOutOpen`) that suspends its own thread carries on, and gets back the registers it should have kept (Mega Man X needs it since Vista); `on`: as Windows has it |
-| `desktopbpp` | `32`; `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth |
+| `desktopbpp` | `32`; `8`, `16` or `24`: the desktop's colour depth the game is told about; while the game has a mode of its own, that mode's depth. With `8` a windowed game draws through a palette, as on a 256-colour desktop |
 | `lockwhole` | `off`; `on`: a `Lock` of part of a surface counts as a change to all of it, for a game that writes outside what it locked |
 | `zaccess` | `on`: Z buffers can be locked and blitted by DirectDraw where the GPU allows it; `off`: on the GPU only, for a driver that misbehaves with it |
 | `palettizedtextures` | `on`: 8-bit palettized textures offered to Direct3D 3–7, as most cards of the time; `off`: not offered, as Matrox's G200/G400 (N.I.C.E. 2 then loads its 16-bit textures instead of its 256-colour ones) |
@@ -204,7 +204,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 ## Troubleshooting
 
 - **Nothing changes, and `log=1` writes no `dd2d9.log`:** dd2d9 isn't being loaded. Under Wine, check the `ddraw=n` override, or run `install-dd2d9.sh install` again after a Wine update. On load, dd2d9 also sends a debug message saying where it was loaded from: under Wine 9, `WINEDEBUG=warn+seh` prints it; on Windows, use DebugView.
-- **A game refuses to start on a 32-bit desktop** ("16 bit screen mode required"): set `desktopbpp=16` in a `[game.exe]` section.
+- **A game refuses to start on a 32-bit desktop** ("16 bit screen mode required"): set `desktopbpp=16` in a `[game.exe]` section; `desktopbpp=8` for one that asks for 256 colours.
 - **A game says there isn't enough memory:** keep `ram` at its default, or lower it.
 - **A game runs too fast:** set `fpslimit`. If it times itself from the registry's processor clock, try `cpu=0`.
 - **The mouse is off in a scaled or windowed mode:** please report it with `dd2d9.log` (`log=2`); the translation can't be turned off since 1.3.0.
@@ -263,7 +263,7 @@ All checks pass under Wine 11 (wined3d, Xvfb).
 
 `build/d3dimbench.exe [seconds]` checks and times Direct3D 3-6's CPU vertex pipeline: ProcessVertices with lights, fog and clipping (and odd vertices: NaN, infinities, zero normals), a lit sphere drawn with DrawIndexedPrimitive (whole, and a row at a time through IDirect3DDevice2, which transforms only the vertices each draw uses), 2048 small DrawPrimitive calls of transformed vertices a frame (the cost of a draw), one texture drawn with colour keying on and off in turn (and the key checked transparent only with it), and execute buffers (a TRIANGLE instruction per row, per triangle, and cut by the near plane), and checks that consecutive TRIANGLE instructions draw the same pixels as drawn one by one. It writes `d3dimbench.txt` with a hash of each part's output, the time spent in the drawing calls, the transformed vertices (`d3dimbench-tl-*.bin`) and images (`d3dimbench-*.raw`, 256x256 32-bit): two builds meant to give the same output are compared by those.
 
-`build/fmtprobe.exe` writes `fmtprobe.txt`: the texture formats each Direct3D 7 device and a Direct3D 2 hardware device list, and whether luminance, alpha-only, bump-map and 1- and 4-bit palettized surfaces can be made as textures and used as render targets. It asks whatever `ddraw.dll` it loads, so run beside dd2d9's it shows dd2d9's answers, and without it Windows' own (on XP with a card of the time, or on today's Windows).
+`build/fmtprobe.exe` writes `fmtprobe.txt`: the texture formats each Direct3D 7 device and Direct3D 3's and 2's hardware and software devices list; whether luminance, alpha-only, bump-map and 1- and 4-bit palettized surfaces can be made as textures, as plain surfaces and as render targets (a new device on them, `SetRenderTarget` to them); what plain 1-, 2-, 4- and 8-bit surfaces do (pitch, fills, a DC with and without a palette, palettes of other sizes, blits); `SetRenderTarget` and the target the device then has; what each target format holds after a clear; and which 8-bit layouts are made with the display in 256 colours (it sets that mode for a moment). It asks whatever `ddraw.dll` it loads, so run beside dd2d9's it shows dd2d9's answers, and without it Windows' own (on XP with a card of the time, or on today's Windows). It runs on Windows 98 with DirectX 6 too (a Pentium Pro or later), where it leaves Direct3D 7 out; `fmtprobe dx6` (or a copy named `fmtprobe-dx6.exe`) does so anywhere, and writes `fmtprobe-dx6.txt`.
 
 `build/reloadtest.exe [dll]` frees and reloads dd2d9 (by default `ddraw_.dll`) while the game window stays subclassed, as a wrapper loading dd2d9 under another name may do.
 

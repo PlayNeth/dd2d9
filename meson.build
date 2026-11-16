@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.8.0',
+  version : '1.8.1',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -11,6 +11,8 @@ endif
 # pipeline's four-lane code gives exactly the scalar code's answers, operation by operation).
 add_project_arguments('-Wno-unused-parameter', '-Wno-missing-field-initializers', '-msse2', '-mfpmath=sse',
                       '-ffp-contract=off', language : 'cpp')
+# The version the log's first line gives: the project's, above.
+add_project_arguments('-DDD2D9_VERSION="' + meson.project_version() + '"', language : 'cpp')
 
 win_deps = []
 foreach lib : ['d3d9', 'dxguid', 'uuid', 'gdi32', 'user32', 'ole32', 'winmm']
@@ -77,9 +79,12 @@ executable('d3d7test', 'tests/d3d7test.cpp',
   link_args : static_link + ['-mwindows'],
   install : false)
 
-# What a ddraw.dll and its driver list as texture formats (see the file's comment).
+# What a ddraw.dll and its driver list as texture formats (see the file's comment). Built
+# without SSE (the project's -msse2 undone): it is run on machines of the time, a Pentium II
+# among them, where dd2d9 itself doesn't run.
 executable('fmtprobe', 'tests/fmtprobe.cpp',
-  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid')],
+  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32')],
+  cpp_args : ['-march=pentium', '-mno-sse2', '-mno-sse', '-mno-mmx', '-mfpmath=387'],
   link_args : static_link + ['-mwindows'],
   install : false)
 

@@ -23,11 +23,19 @@ bool TssToSampler(DWORD type, DWORD value, DWORD* sampler, DWORD* value9);
 // The bump map formats a hardware device lists where the GPU has them with the bump-mapping
 // operations (DirectX 6 and 7: environment-mapped bump mapping), appended to list.
 void AddBumpFormats(std::vector<DDPIXELFORMAT>* list);
-// The luminance (L8, A8L8) and alpha-only (A8) formats a Direct3D 7 hardware device lists
-// where the GPU has them, appended to list. (Direct3D 3-6 devices list none: d3dim.dll shows
-// only its own inclusion list's formats, re/spec/d3d6-device.md §7.4; a game that asks for one
-// anyway gets it.)
-void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list);
+// The luminance and alpha-only formats a hardware device lists where the GPU has them,
+// appended to list in the order a card of the time had them (a Voodoo3 on XP SP3): L8, A8,
+// A4L4, A8L8 for Direct3D 7. dx6: an IDirect3DDevice3's, which d3dim.dll filters through XP's
+// DX6TextureEnumInclusionList (re/spec/d3d6-device.md §7.4): L8 and A8L8 alone.
+void AddLuminanceFormats(std::vector<DDPIXELFORMAT>* list, bool dx6);
+// The texture formats XP's software rasterizers list, in their order (XP SP3):
+//   kSoftFull   Direct3D 7's RGB device, Direct3D 3's RGB and MMX devices: X8R8G8B8, A8R8G8B8,
+//               R5G6B5, X1R5G5B5, 4-bit palettized, 8-bit palettized, A1R5G5B5, A4R4G4B4, L8, A8L8;
+//   kSoftDx5    Direct3D 1 and 2's RGB device: the first six of those;
+//   kSoftPal8   Direct3D 1 and 2's MMX and Ramp devices: 8-bit palettized alone.
+// palettized: false leaves the palettized formats out of the first two (palettizedtextures=off).
+enum SoftList { kSoftFull, kSoftDx5, kSoftPal8 };
+void AddSoftwareFormats(std::vector<DDPIXELFORMAT>* list, SoftList which, bool palettized);
 
 // ZBIAS (0-16) as D3D9's DEPTHBIAS, a fraction of the depth range: the factor Wine's ddraw
 // used until 2011 (its zbias_factor). XP leaves the scale to the driver (S, ZBIAS: not

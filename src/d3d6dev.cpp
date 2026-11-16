@@ -19,6 +19,7 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
     : d3d(d3d), dd(d3d->dd), kind(kind), guid(guid), version(version), rt(rt), rtVersion(rtVersion), z(z), pal(pal),
       ddHold(d3d->dd), ctx(d3d->dd->GetGpu()) {
     f1.o = f2.o = f3.o = this;
+    ctx.SetSoftware(kind != kHAL);
     g_liveDevices.push_back(this);
     if (kind == kHAL) {
         HalHalDesc(&hal);
@@ -655,9 +656,13 @@ HRESULT Device::SetRenderTargetI(Surface* s) {
     const DWORD depths = hal.dwDeviceRenderBitDepth | hel.dwDeviceRenderBitDepth;
     if (!(caps & DDSCAPS_3DDEVICE) || !(BitsToDDBD(s->buf->fmt.bpp) & depths)) return DDERR_INVALIDCAPS;
     if (s->W() > 2048 || s->H() > 2048) return DDERR_INVALIDPARAMS;
-    if (caps & DDSCAPS_ZBUFFER) {
-        // A Z buffer: the driver refuses it, but the device has switched already, without
-        // a reference on it (Wine's test_rt_caps: GetRenderTarget then returns it).
+    // Below 16 bits a palette, palettized or not (as Direct3D 7's).
+    const bool zbuf = (caps & DDSCAPS_ZBUFFER) != 0;
+    if (!zbuf && !s->palette && s->buf->fmt.bpp < 16) return DDERR_NOPALETTEATTACHED;
+    if (zbuf || s->buf->fmt.CopyOnly()) {
+        // Not a colour format (a Z buffer, a luminance surface, a bump map): the driver
+        // refuses it, but the device has switched already, without a reference on it
+        // (Wine's test_rt_caps for a Z buffer: GetRenderTarget then returns it).
         if (rt && !rtUnheld) rt->Release(version == 2 ? Surface::SlotFor(rtVersion) : Surface::kRefV4);
         rtUnheld = true;
         rt = s;
@@ -669,7 +674,6 @@ HRESULT Device::SetRenderTargetI(Surface* s) {
         }
         return DDERR_INVALIDPIXELFORMAT;
     }
-    if (!s->palette && s->buf->fmt.bpp < 16) return DDERR_NOPALETTEATTACHED;
     Surface* nz = AttachedZ(s);
     if (!nz && z) return DDERR_INVALIDPARAMS;  // a Z buffer can be gained, not lost
     // A version 2 device holds the new target's IDirectDrawSurface (v1) interface (B §7.1).
@@ -744,45 +748,54 @@ HRESULT Device::EnumTexFormats(void* cb, void* ctxp, bool v3) try {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(cb))) return DDERR_INVALIDPARAMS;
     Guard l;
     std::vector<DDPIXELFORMAT> list;
-    auto rgb = [&](DWORD bpp, DWORD r, DWORD g, DWORD b, DWORD a) {
-        DDPIXELFORMAT f = {};
-        f.dwSize = sizeof(f);
-        f.dwFlags = DDPF_RGB | (a ? DDPF_ALPHAPIXELS : 0);
-        f.dwRGBBitCount = bpp;
-        f.dwRBitMask = r;
-        f.dwGBitMask = g;
-        f.dwBBitMask = b;
-        f.dwRGBAlphaBitMask = a;
-        list.push_back(f);
-    };
-    rgb(16, 0x7C00, 0x03E0, 0x001F, 0);
-    rgb(16, 0x7C00, 0x03E0, 0x001F, 0x8000);
-    rgb(16, 0xF800, 0x07E0, 0x001F, 0);
-    rgb(16, 0x0F00, 0x00F0, 0x000F, 0xF000);
-    rgb(32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
-    rgb(32, 0xFF0000, 0xFF00, 0xFF, 0);
-    // Palettized: converted through the palette on the way to the GPU. Not offered with
-    // palettizedtextures=off, as on a card without them (Matrox's G200 and G400, today's
+    // Palettized formats: converted through the palette on the way to the GPU. Not offered
+    // with palettizedtextures=off, as on a card without them (Matrox's G200 and G400, today's
     // drivers): N.I.C.E. 2 loads its 256-colour textures when it finds this format listed,
     // its 16-bit ones otherwise. (Still made if a game asks for one anyway.)
-    if (g_config.palTextures) {
-        DDPIXELFORMAT f = {};
-        f.dwSize = sizeof(f);
-        f.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
-        f.dwRGBBitCount = 8;
-        list.push_back(f);
-    }
-    if (version >= 3 && kind == kHAL) {  // DXTn: never for version 1/2 devices
-        const GpuCaps c = GpuGetCaps();
-        for (int i = 0; i < 5; i++) {
-            if (!c.dxt[i]) continue;
+    if (kind != kHAL) {
+        // The software rasterizers' own lists (XP SP3): an IDirect3DDevice3's RGB and MMX
+        // devices have the newer rasterizer's; before it the RGB device lists no alpha or
+        // luminance format, and the MMX and Ramp devices the 8-bit palettized one alone.
+        const SoftList which = version >= 3 ? kSoftFull : kind == kRGB || kind == kNewRGB ? kSoftDx5 : kSoftPal8;
+        AddSoftwareFormats(&list, which, g_config.palTextures);
+    } else {
+        auto rgb = [&](DWORD bpp, DWORD r, DWORD g, DWORD b, DWORD a) {
             DDPIXELFORMAT f = {};
             f.dwSize = sizeof(f);
-            f.dwFlags = DDPF_FOURCC;
-            f.dwFourCC = MAKEFOURCC('D', 'X', 'T', '1' + i);
+            f.dwFlags = DDPF_RGB | (a ? DDPF_ALPHAPIXELS : 0);
+            f.dwRGBBitCount = bpp;
+            f.dwRBitMask = r;
+            f.dwGBitMask = g;
+            f.dwBBitMask = b;
+            f.dwRGBAlphaBitMask = a;
+            list.push_back(f);
+        };
+        rgb(16, 0x7C00, 0x03E0, 0x001F, 0);
+        rgb(16, 0x7C00, 0x03E0, 0x001F, 0x8000);
+        rgb(16, 0xF800, 0x07E0, 0x001F, 0);
+        rgb(16, 0x0F00, 0x00F0, 0x000F, 0xF000);
+        rgb(32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
+        rgb(32, 0xFF0000, 0xFF00, 0xFF, 0);
+        if (g_config.palTextures) {
+            DDPIXELFORMAT f = {};
+            f.dwSize = sizeof(f);
+            f.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+            f.dwRGBBitCount = 8;
             list.push_back(f);
         }
-        AddBumpFormats(&list);
+        if (version >= 3) {  // DXTn, bump maps and luminance: never for version 1/2 devices
+            const GpuCaps c = GpuGetCaps();
+            for (int i = 0; i < 5; i++) {
+                if (!c.dxt[i]) continue;
+                DDPIXELFORMAT f = {};
+                f.dwSize = sizeof(f);
+                f.dwFlags = DDPF_FOURCC;
+                f.dwFourCC = MAKEFOURCC('D', 'X', 'T', '1' + i);
+                list.push_back(f);
+            }
+            AddBumpFormats(&list);
+            AddLuminanceFormats(&list, true);
+        }
     }
     if (version < 3 && list.size() > 10) list.resize(10);
     for (DDPIXELFORMAT& f : list) {

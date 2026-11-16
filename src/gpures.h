@@ -98,6 +98,9 @@ public:
     void SetClipPlane(DWORD index, const float* plane);
     void SetTexture(DWORD stage, Surface* top);  // bound (and uploaded) at the next draw
     void SetTargets(Surface* rt, Surface* z);
+    // The device is a software one (RGB, MMX, ramp): its clears and what is read back from
+    // its targets follow XP's software rasterizer where a hardware driver did otherwise.
+    void SetSoftware(bool software);
     void SetColorKeyEnable(bool on);  // D3DRENDERSTATE_COLORKEYENABLE: textures' keys become alpha
 
     // flags: D3DCLEAR_TARGET 1, ZBUFFER 2, STENCIL 4. rects as RECT (= D3DRECT), clipped

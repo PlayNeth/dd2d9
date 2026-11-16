@@ -108,10 +108,11 @@ nobuffering=off
 ; of two frames, and pieces left behind the characters).
 flipcopy=auto
 ; The desktop's colour depth DirectDraw reports before the game sets its own mode: 32
-; (default), 24 or 16. Some games refuse to start unless the desktop is 16-bit, even ones
+; (default), 24, 16 or 8. Some games refuse to start unless the desktop is 16-bit, even ones
 ; that then switch to their own mode (Moto Racer: "16 bit screen mode required"): set 16 for
-; them, best in their own section ([game.exe]). A windowed game then draws in 16 bits, as on
-; a 16-bit desktop; dd2d9 shows it either way.
+; them, best in their own section ([game.exe]); 8 for a game that asks for 256 colours. A
+; windowed game then draws in 16 bits (or in 8, through a palette), as on such a desktop;
+; dd2d9 shows it either way.
 ; Also what GDI (GetDeviceCaps) and EnumDisplaySettings report, for games that check there:
 ; the game's own display mode's depth while it has one, else this.
 desktopbpp=32

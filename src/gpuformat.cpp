@@ -55,7 +55,22 @@ void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, PaletteMap* 
     uint8_t* dst = b->Row(y);
     const DWORD bytes = b->fmt.Bytes();
     if (!convert) {
-        memcpy(dst, src, size_t(b->w) * bytes);
+        // The bits no channel has. X1R5G5B5's: clear, as XP's software rasterizer and a
+        // hardware driver (VMware's) leave it; the GPU's copy has it set. X8R8G8B8's byte:
+        // clear after a software device (XP's RGB device), set after a hardware one
+        // (VMware's driver), as the GPU's copy has it.
+        const DWORD used = b->fmt.r | b->fmt.g | b->fmt.b | b->fmt.a;
+        if (bytes == 2 && used && used != 0xFFFF) {
+            const auto* s16 = reinterpret_cast<const uint16_t*>(src);
+            auto* d16 = reinterpret_cast<uint16_t*>(dst);
+            for (int x = 0; x < b->w; x++) d16[x] = uint16_t(s16[x] & used);
+        } else if (bytes == 4 && b->softDrawn && used && used != 0xFFFFFFFF) {
+            const auto* s32 = reinterpret_cast<const uint32_t*>(src);
+            auto* d32 = reinterpret_cast<uint32_t*>(dst);
+            for (int x = 0; x < b->w; x++) d32[x] = s32[x] & used;
+        } else {
+            memcpy(dst, src, size_t(b->w) * bytes);
+        }
         return;
     }
     const auto* in = reinterpret_cast<const uint32_t*>(src);

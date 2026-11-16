@@ -3,6 +3,60 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.1
+What Windows XP SP3's `ddraw.dll` answers was measured with `fmtprobe` on a machine of the
+time (a Voodoo3 and the software devices); where dd2d9 1.8.0 answered otherwise it now
+answers the same.
+- **`desktopbpp=8`**: a 256-colour desktop for games that ask for one. DirectDraw reports
+  an 8-bit palettized display mode, `GetDeviceCaps` a palette device with 8 bits a pixel and
+  256 entries, `EnumDisplaySettings` 8 bits; a primary surface made without a mode of the
+  game's own is 8-bit palettized and shown through its palette, in a window too. GDI's
+  palette functions and the bitmaps made compatible with the screen are the real display's.
+- Luminance, alpha-only and bump-map formats, and 8-bit RGB (3-3-2), are made as textures
+  only: as a plain surface `CreateSurface` returns `DDERR_INVALIDPIXELFORMAT`. A 1-, 2- or 4-bit palettized format
+  needs `DDPF_RGB` beside its `DDPF_PALETTEINDEXEDn` flag, and so does an 8-bit one now
+  (dd2d9 took `DDPF_PALETTEINDEXED8` alone, and 8-bit `DDPF_RGB` without masks, as 8-bit
+  palettized; XP refuses both, in a 256-colour mode too). `DDPF_ALPHA` with another flag
+  (`DDPF_RGB`, `DDPF_ALPHAPIXELS`, `DDPF_LUMINANCE`, a palettized flag, ...) is
+  `DDERR_INVALIDPARAMS`, where it was `DDERR_INVALIDPIXELFORMAT`; a bump map flagged with
+  anything but `DDPF_BUMPLUMINANCE` is refused.
+- `GetDC` on a palettized surface that has no palette of its own returns
+  `DDERR_CANTCREATEDC` (1.8.0 gave a DC), except an 8-bit one while the display is in a
+  256-colour mode.
+- Render targets. A 16-bit luminance surface or bump map is refused by `CreateDevice` and
+  `SetRenderTarget` with `DDERR_INVALIDPIXELFORMAT` (1.8.0 took one and kept the red and the
+  alpha of what was drawn). `IDirect3DDevice7::SetRenderTarget` returns `DDERR_INVALIDCAPS`,
+  not `DDERR_INVALIDPARAMS`, for a surface without `DDSCAPS_3DDEVICE`, of a depth the device
+  doesn't draw in, or too large; given a Z buffer it returns `DDERR_INVALIDPIXELFORMAT` and
+  `GetRenderTarget` then returns that surface, as Direct3D 2-6 already did (Wine's
+  `test_rt_caps`, which now passes for Direct3D 7 as well).
+- Texture format lists. The software devices list XP's formats in XP's order: the RGB
+  device of Direct3D 7 and the RGB and MMX devices of Direct3D 3 list 32-bit RGB without and
+  with alpha, 5-6-5, 5-5-5, 4-bit palettized, 8-bit palettized, 1-5-5-5, 4-4-4-4, 8-bit
+  luminance and 16-bit luminance with alpha; Direct3D 2's RGB device the first six; its MMX
+  and ramp devices 8-bit palettized only. They listed the hardware device's formats. A
+  Direct3D 3 hardware device lists 8-bit luminance and 16-bit luminance with alpha (XP's
+  registry list lets those two through), and Direct3D 7's also 8-bit luminance with alpha.
+- A clear of a 16-bit render target leaves what XP leaves. A software device: a channel of
+  5 or 6 bits keeps the colour's high bits, a narrower one (4-4-4-4's, the alpha bit of
+  1-5-5-5) is scaled down and cut. A hardware device: a format without alpha keeps the high
+  bits as well; one with alpha is rounded, as before. Every channel was rounded: 0x40c02010
+  on a 5-6-5 target gave 0xb902, not 0xc102.
+- A clear through a Direct3D 2-6 software device's viewport writes no alpha: the target's
+  alpha bits are left 0, as XP's RGB device leaves them (Direct3D 7's writes the alpha).
+- Read back from the GPU, the top bit of a 5-5-5 render target is clear, as XP's software
+  devices and hardware drivers leave it, and so is the top byte of a 32-bit one without
+  alpha after a software device drew into it; they were set (the byte still is after a
+  hardware device, as drivers leave it).
+- A render target of a format the GPU turns out not to draw into (1-5-5-5 with some drivers)
+  is drawn in 32 bits and converted when read; nothing was drawn into it, and the device
+  said nothing.
+- `fmtprobe` asks more: Direct3D 3's and 2's software devices, plain surfaces and textures of
+  each layout, low-depth surfaces' DCs, palettes and blits, `SetRenderTarget` and the target
+  the device has after it, clears of each target format, and 8-bit surfaces with the display
+  in 256 colours. It runs on Windows 98 with DirectX 6.
+- The version is written once, in `meson.build`.
+
 ## 1.8.0
 - **1-, 2- and 4-bit palettized surfaces** (`DDPF_PALETTEINDEXED1`, `2` and `4`), which
   `CreateSurface` refused. As in `ddraw.dll`: the pixels are packed from each byte's high bits

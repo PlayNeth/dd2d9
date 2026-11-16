@@ -43,13 +43,22 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
     Guard l;
     Surface* s = Surf(surface);
     if (!s) return DDERR_INVALIDOBJECT;
+    // Not a render target, a depth the device doesn't draw in, or too large: DDERR_INVALIDCAPS
+    // (XP SP3 for a 4-bit target on the RGB device; Wine's test_rt_caps for the others).
     if (!(s->desc.ddsCaps.dwCaps & DDSCAPS_3DDEVICE) || !(BitsToDDBD(s->buf->fmt.bpp) & caps_.dwDeviceRenderBitDepth) ||
         s->W() > 2048 || s->H() > 2048)
-        return DDERR_INVALIDPARAMS;
-    // (Below 16 bits, palettized or not, as d3dim700: an 8-bit luminance or alpha-only surface too.)
+        return DDERR_INVALIDCAPS;
+    // Below 16 bits a palette, palettized or not (an 8-bit RGB, luminance or alpha-only surface
+    // too: XP SP3).
     if (s->buf->fmt.bpp < 16 && !s->palette) return DDERR_NOPALETTEATTACHED;
+    // Not a colour format (a Z buffer, a 16-bit luminance surface or bump map): the driver
+    // refuses it, DDERR_INVALIDPIXELFORMAT, but the device has switched to it by then, with
+    // its reference, and GetRenderTarget returns it (Wine's test_rt_caps for a Z buffer; XP
+    // SP3's result for the other two). Nothing is drawn until it is given another.
+    const Format& f = s->buf->fmt;
+    const HRESULT result = f.zbuf || f.fourcc || f.CopyOnly() ? DDERR_INVALIDPIXELFORMAT : D3D_OK;
     Surface* z = AttachedZ(s);
-    if (s == rt_ && z == z_) return D3D_OK;  // the Z buffer is looked up again (S §SetRenderTarget)
+    if (s == rt_ && z == z_) return result;  // the Z buffer is looked up again (S §SetRenderTarget)
     s->AddRef(Surface::kRefV7);
     if (z) z->AddRef(Surface::kRefV1);
     Surface* oldRt = rt_;
@@ -58,7 +67,7 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
     z_ = z;
     {
         GpuGuard g(dd_->GetGpu());
-        ctx_.SetTargets(rt_, z_);  // the viewport stays (S §SetRenderTarget)
+        ctx_.SetTargets(SUCCEEDED(result) ? rt_ : nullptr, z_);  // the viewport stays (S §SetRenderTarget)
     }
     // The colour key's emulation depends on whether the target has alpha (PushKeyAlpha, by
     // COLORKEYENABLE's state at the next draw).
@@ -66,7 +75,7 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
     dirty_ = true;
     oldRt->Release(Surface::kRefV7);
     if (oldZ) oldZ->Release(Surface::kRefV1);
-    return D3D_OK;
+    return result;
 }
 
 HRESULT Device7::Clear(DWORD count, D3DRECT* rects, DWORD flags, D3DCOLOR color, D3DVALUE z, DWORD stencil) try {

@@ -161,9 +161,10 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         }
     } else if (key == "desktopbpp" || key == "desktopdepth") {
         // Games that check the desktop is 16-bit before switching to their own mode (Moto
-        // Racer: GetDisplayMode before SetCooperativeLevel, "16 bit screen mode required").
+        // Racer: GetDisplayMode before SetCooperativeLevel, "16 bit screen mode required"), or
+        // that it has 256 colours.
         const long x = strtol(v.c_str(), nullptr, 10);
-        if (v == "16" || v == "24" || v == "32") g_config.desktopBpp = int(x);
+        if (v == "8" || v == "16" || v == "24" || v == "32") g_config.desktopBpp = int(x);
         else ok = false;
     } else if (key == "fpslimit" || key == "fps") {
         char* end = nullptr;

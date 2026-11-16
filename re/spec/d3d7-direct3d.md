@@ -241,14 +241,11 @@ Order of checks and effects (`CreateDevice(rclsid, lpDDS7, lplpD3DDevice)`):
          **D3DERR_ZBUFF_NEEDS_SYSTEMMEMORY** (7391abb3); Ramp with a stencil Z → DDERR_INVALIDPARAMS (7391abd1);
          DDPF_ZBUFFER with an unsupported depth → DDERR_INVALIDPIXELFORMAT (7391abd8-7391abed).
        - A software device accepts a video-memory render target here (no check).
-       - A render target whose format has no DDPF_RGB (luminance, alpha-only, bump map) skips the format check
-         altogether (line 39). The software rasterizer then takes whatever `FindOutSurfFormat_7392e363.c` makes of
-         it (8-bit luminance 0xb, 16-bit luminance with alpha 0xc, the bump formats 0xd-0xf; it never fails) in
-         `FillContext_7392c438.c:31`. So only the rules before it apply: below 16 bits → DDERR_NOPALETTEATTACHED
-         (6.), and for a hardware device whatever the driver's context creation says (not determined; a driver
-         would as a rule have refused to create such a surface in video memory in the first place). What the
-         software rasterizer draws into such a target was not decoded. dd2d9 accepts it as XP's code does and keeps
-         the red (and the alpha) of what is drawn as the luminance (and alpha).
+       - A render target whose format has no DDPF_RGB (luminance, alpha-only, bump map) skips this format check
+         (line 39), but is refused all the same. Measured on XP SP3 (RGB device, system-memory
+         TEXTURE|3DDEVICE targets): 8-bit ones (L8, A8, A4L4, R3G3B2, palettized 4 and 8 without a palette) →
+         DDERR_NOPALETTEATTACHED (6.); 16-bit luminance with alpha and 16-bit bump maps →
+         **DDERR_INVALIDPIXELFORMAT**. dd2d9 returns the same for any device.
    11. `D3DFE_Create` (`D3DFE_Create_7391eaa5.c`): **QI the render target for IDirectDrawSurface7 and keep it**
        (25-29) — the reference the device holds on its render target; QI the Z buffer for IDirectDrawSurface7 and
        release it at once (30-37); a guard band in the extended caps enables guard-band clipping (47-57); hardware

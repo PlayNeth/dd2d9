@@ -49,8 +49,9 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         if ((pf.dwFlags & DDPF_STENCILBUFFER) && pf.dwStencilBitMask) f.a = pf.dwStencilBitMask;
         if (pf.dwZBitMask && (pf.dwZBitMask != all || f.a)) f.r = pf.dwZBitMask;
     } else if (pf.dwFlags & DDPF_BUMPDUDV) {
-        // The layouts Direct3D 9 has for fixed-function bump mapping (U8V8L8 widened on the
-        // way to the GPU).
+        // With DDPF_BUMPLUMINANCE at most, as ddraw.dll takes it; the layouts Direct3D 9 has
+        // for fixed-function bump mapping (U8V8L8 widened on the way to the GPU).
+        if (pf.dwFlags & ~DWORD(DDPF_BUMPDUDV | DDPF_BUMPLUMINANCE)) return false;
         f.bump = true;
         f.bpp = pf.dwBumpBitCount;
         f.r = pf.dwBumpDuBitMask;
@@ -76,12 +77,16 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         f.bpp = 8;
         f.a = 0xFF;
     } else if (pf.dwFlags & DDPF_PALETTEINDEXED8) {
+        // With DDPF_RGB, as the palettized formats below (XP SP3 refuses it without, at a
+        // 16-bit display and at a 256-colour one).
+        if (!(pf.dwFlags & DDPF_RGB)) return false;
         f.pal8 = true;
         f.bpp = 8;
     } else if (pf.dwFlags & (DDPF_PALETTEINDEXED1 | DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4)) {
         const DWORD which = pf.dwFlags & (DDPF_PALETTEINDEXED1 | DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4);
         f.bpp = which == DDPF_PALETTEINDEXED1 ? 1 : which == DDPF_PALETTEINDEXED2 ? 2 : which == DDPF_PALETTEINDEXED4 ? 4 : 0;
-        if (!f.bpp || pf.dwRGBBitCount != f.bpp) return false;  // one of them, with its bit count
+        // One of them, with its bit count and DDPF_RGB (ddraw.dll refuses it without: XP SP3).
+        if (!f.bpp || pf.dwRGBBitCount != f.bpp || !(pf.dwFlags & DDPF_RGB)) return false;
         f.palLow = true;
     } else if (pf.dwFlags & DDPF_RGB) {
         f.bpp = pf.dwRGBBitCount;
@@ -90,7 +95,8 @@ bool Format::FromDDPF(const DDPIXELFORMAT& pf, Format* out) {
         f.b = pf.dwBBitMask;
         if (pf.dwFlags & DDPF_ALPHAPIXELS) f.a = pf.dwRGBAlphaBitMask;
         if (f.bpp != 8 && f.bpp != 16 && f.bpp != 24 && f.bpp != 32) return false;
-        if (f.bpp == 8 && !f.r) f.pal8 = true;  // some games omit PALETTEINDEXED8
+        // (8 bits without masks is no format: XP SP3 refuses it; palettized needs its flag.)
+        if (f.bpp == 8 && !f.r && !f.g && !f.b) return false;
     } else {
         return false;
     }

@@ -223,6 +223,20 @@ Entry:
    - DXT1-5 with a width or height not a multiple of 4 → INVALIDPARAMS;
    - other formats go through `FUN_73736ead`: bad bit counts or flag combinations → INVALIDPIXELFORMAT
      (some → INVALIDPARAMS or UNSUPPORTED).
+   - Measured on XP SP3 (system memory): luminance (8 bits, 8 and 16 with alpha), alpha-only and bump-map
+     formats are made as DDSCAPS_TEXTURE surfaces only; as plain surfaces (OFFSCREENPLAIN, with 3DDEVICE or
+     without) → **DDERR_INVALIDPIXELFORMAT**. A 1-, 2- or 4-bit palettized format needs DDPF_RGB beside its
+     DDPF_PALETTEINDEXEDn flag, else DDERR_INVALIDPIXELFORMAT. An 8-bit palettized format without
+     DDPF_RGB, and 8-bit DDPF_RGB with no masks, are refused too (DDERR_INVALIDPIXELFORMAT), at a 16-bit display
+     and in a 256-colour mode alike. A plain 8-bit RGB 3-3-2 surface is refused as well (DDERR_INVALIDPIXELFORMAT; at 8-, 16-
+     and 32-bit displays); a texture of it is made.
+   - The flag rules, in `FUN_73736cad_73736cad.c` (the description's validation; flags = ddpfPixelFormat.dwFlags,
+     applied when any of 0xe2463 is set), in order: a bit count that isn't 1, 2, 4, 8, 16, 24 or 32, or
+     DDPF_RGB with DDPF_YUV → DDERR_INVALIDPIXELFORMAT; **DDPF_ALPHA with any of 0x27e6d** (ALPHAPIXELS, FOURCC,
+     PALETTEINDEXED1/2/4/8, RGB, YUV, ZBUFFER, ZPIXELS, STENCILBUFFER, LUMINANCE) → **DDERR_INVALIDPARAMS**
+     (measured too); DDPF_LUMINANCE with anything but ALPHAPIXELS → DDERR_INVALIDPIXELFORMAT; DDPF_BUMPDUDV with
+     anything but BUMPLUMINANCE → DDERR_INVALIDPIXELFORMAT; PALETTEINDEXED8 with PALETTEINDEXED1/2/4 or
+     COMPRESSED → DDERR_INVALIDPIXELFORMAT (its masks are zeroed).
 10. Color keys **validated** with SetColorKey's checker `FUN_7373e021` in the order DESTOVERLAY, DESTBLT, SRCOVERLAY,
     SRCBLT. Its error is returned (311-326). With dd2d9's caps, overlay keys and ranges fail there
     (NOCOLORKEYHW / NOOVERLAYHW, see surface-flip-key-palette.md §3).
