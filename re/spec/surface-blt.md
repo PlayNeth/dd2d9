@@ -52,7 +52,8 @@ surfaces, surface-lock-dc.md §9).
     i.e. X/alpha ignored at 32 bpp but **bit 15 of a 16-bit X1R5G5B5 pixel is compared**.
   * Dest keys (KEYDESTOVERRIDE) are ignored by the HEL entirely (it has no code for them).
   * Mirroring: MIRRORLEFTRIGHT/UPDOWN swap the dest rect's edges and the core blitter mirrors
-    (319–330). The stretch sampling of the core blitters (FUN_737567de etc.) was not decoded.
+    (319–330). The stretch sampling of the core blitters (FUN_737567de etc.) was measured
+    instead: see "Stretch sampling" below.
 
 With dd2d9's reported driver caps (D:ddraw.cpp:987–996: BLT, BLTCOLORFILL, BLTSTRETCH,
 COLORKEY, CANBLTSYSMEM, BLTDEPTHFILL, CANCLIP, CANCLIPSTRETCHED; CKey SRCBLT|DESTBLT; FX
@@ -132,7 +133,7 @@ KEYSRCOVERRIDE 0x10000):
 | COLORFILL 0x400 | src non-NULL → DDERR_INVALIDPARAMS; dest is DDSCAPS_ZBUFFER → DDERR_INVALIDPARAMS; caps BLTCOLORFILL → DDERR_UNSUPPORTED (A:73748532). Then **writes back into the caller's DDBLTFX**: `dwFillColor &= 0xFF` at ≤8 bpp, high word cleared at 16 bpp, top byte cleared at 24 bpp (dest's own pixel format if HASPIXELFORMAT, else the display mode's) (815–832) | fill |
 | DEPTHFILL 0x2000000 | src non-NULL → DDERR_INVALIDPARAMS; dest **not** ZBUFFER → DDERR_INVALIDPARAMS; caps BLTDEPTHFILL → DDERR_UNSUPPORTED | fill with dwFillDepth |
 | DDROPS 0x1000 | also DEPTHFILL/ROTATIONANGLE/DDFX/COLORFILL → INVALIDPARAMS; else **DDERR_NODDROPSHW** always | |
-| DDFX 0x800 | also DEPTHFILL/ROTATIONANGLE/COLORFILL → INVALIDPARAMS; dwDDFX & ARITHSTRETCHY → **DDERR_NOSTRETCHHW** always; MIRRORLEFTRIGHT / MIRRORUPDOWN: caps BLTMIRRORLEFTRIGHT / BLTMIRRORUPDOWN → DDERR_NOMIRRORHW; ROTATE90/180/270 (0x70): caps BLTROTATION90 → **DDERR_NOROTATIONHW**; other dwDDFX bits (NOTEARING, ZBUFFERRANGE, …) not checked. Then ROP SRCCOPY. **No source check** (a NULL source reaches the HEL, which faults → DDERR_EXCEPTION; not verified at run time) | copy |
+| DDFX 0x800 | also DEPTHFILL/ROTATIONANGLE/COLORFILL → INVALIDPARAMS; dwDDFX & ARITHSTRETCHY → **DDERR_NOSTRETCHHW** always; MIRRORLEFTRIGHT / MIRRORUPDOWN: caps BLTMIRRORLEFTRIGHT / BLTMIRRORUPDOWN → DDERR_NOMIRRORHW; ROTATE90/180/270 (0x70): caps BLTROTATION90 → **DDERR_NOROTATIONHW**; other dwDDFX bits (NOTEARING, ZBUFFERRANGE, …) not checked. Then ROP SRCCOPY. **No source check** (a NULL source reaches the HEL, which faults → DDERR_EXCEPTION, as measured on XP) | copy |
 | ROTATIONANGLE 0x40000 | also DEPTHFILL/COLORFILL → INVALIDPARAMS; else **DDERR_NOROTATIONHW** | |
 | none of these | src NULL → DDERR_INVALIDPARAMS; ROP SRCCOPY | copy |
 
@@ -340,13 +341,13 @@ is DDERR_UNSUPPORTED when emulated); dd2d9 converting is a superset and needs no
 
 11. **BltFast validation order and dwTrans** — edge case.
     XP: dwTrans bits outside 0x33 → INVALIDPARAMS before any rectangle (X:…BltFast.c:100);
-    SRCCOLORKEY|DESTCOLORKEY (3) is accepted (passed on with no operation flag; outcome not
-    determined); the clipper test is the **last** check (435). dd2d9: clipper first
+    SRCCOLORKEY|DESTCOLORKEY (3) is accepted (passed on with no operation flag: a plain
+    copy, measured); the clipper test is the **last** check (435). dd2d9: clipper first
     (D:blit.cpp:383), rects, then `switch (trans & 0xF)` — higher bits ignored, 3 →
     INVALIDPARAMS (D:blit.cpp:393–406). E.g. a clipper plus an out-of-bounds rect: XP
     INVALIDRECT, dd2d9 BLTFASTCANTCLIP. Fix: `if (trans & ~0x33u) return DDERR_INVALIDPARAMS;`
-    right after the lost check; move the clipper test to just before the blit; for 3, leave
-    INVALIDPARAMS unless a game is found that uses it (XP's result is undetermined).
+    right after the lost check; move the clipper test to just before the blit; 3 copies
+    without a key.
 
 12. **GetBltStatus does no validation** — edge case.
     XP: flags not exactly 1 or 2 → INVALIDPARAMS; lost → SURFACELOST; else DD_OK (§4). dd2d9:
@@ -396,11 +397,31 @@ is DDERR_UNSUPPORTED when emulated); dd2d9 converting is a superset and needs no
 * Bad interface pointers → DDERR_INVALIDPARAMS (XP via SEH; dd2d9 via Surface::From). BltFast
   with a NULL source crashes on XP; dd2d9's DDERR_INVALIDPARAMS is fine.
 
+### Stretch sampling (measured with fmtprobe on XP SP3, two drivers; system-memory surfaces)
+For `n` destination pixels taking from `w` source pixels (indices from 0), along one axis:
+* `n == w`: pixel i takes source i.
+* A shrink (`n < w`), across and down alike: whole-pixel steps with the remainder carried.
+  `v = (w / n) / 2`, `sum = n / 2`; each pixel takes `v`, then `v += w / n`,
+  `sum += w % n`, and when `sum ≥ n`: `v++`, `sum −= n`. (8→3: 1 4 6; 16→5: 1 4 7 11 14;
+  7→4: 0 2 4 5; 9→4: 1 3 6 8; 8→4: 1 3 5 7; 16→3: 2 7 13; 32→5: 3 9 16 22 29.) 44 ratios
+  measured, across and down.
+* A stretch across (`n > w`): 16.16 fixed point, `step = (w << 16) / n`, pixel i takes
+  `((step >> 1) + i·step) >> 16` (4→7: 0 0 1 1 2 3 3; 2→5: 0 0 0 1 1).
+* A stretch down: exact pixel centres, `(2i + 1)·w / (2n)` (4→7: 0 0 1 2 2 3 3; 2→5:
+  0 0 1 1 1).
+* Mirrored left-right: `(n − 1 − i)·w / n`, the far end first (4→7: 3 2 2 1 1 0 0).
+* A source or destination rectangle changes nothing: the rule applies inside them.
+* Through a clip list each clip rectangle [lo, hi) of the destination rectangle is a blit of
+  its own: with `f = (w << 16) / n`, its source part is from `(lo·f + 0x8000) >> 16` to
+  `(hi·f + 0x8000) >> 16` (if both are equal the part is one pixel: the one before when
+  that is the source's end, else the one after), and that part is stretched onto the clip
+  rectangle by the rules above (5→16 clipped to [3, 9) and [11, 14): 1 1 1 2 2 2 and 3 3 3).
+* Onto itself the source is read as it was before the blit, and when the rectangles overlap
+  the sampling is at the destination pixels' near edges, `i·w / n`: the one such shrink
+  measured, 8 pixels onto the surface's pixels 2-5, took 0 2 4 6 where two surfaces take
+  1 3 5 7 (the stretch measured, 4→8, is the same by either rule).
+dd2d9: `BuildMap` (blitcore.cpp).
+
 ### Not determined
-* Stretch sampling of the HEL core blitters (FUN_737567de, FUN_7375816b, …) — dd2d9's
-  `s0 + rx*sw/dw` nearest-neighbour was not compared pixel for pixel; nor the per-clip-rect
-  source edges of clipped stretches (XP: 16.16 factors, FUN_73762b4c).
-* Overlapping source/dest in the HEL (dd2d9 copies the source first, which Wine's
-  test_blit_to_self confirms is the right visible result on modern Windows).
-* BltFast with dwTrans = 3, and Blt with DDBLT_DDFX and a NULL source (both reach the HEL
-  with inputs it doesn't expect).
+* Which overlapping self-blits take the edge rule (dd2d9: all whose rectangles intersect; one
+  measured), and video-memory blits, which are the driver's.

@@ -104,8 +104,8 @@ float ZToFloat(const Format& f, DWORD v) {
 // 24 bits for a 16-bit one too (less z-fighting in the distance).
 D3DFORMAT DepthFormat(const Format& f) {
     // (wbuffer=force: 24 bits too, the emulation's depths are 1/w, crowded near 1 in the distance.)
+    if (f.a) return D3DFMT_D24S8;  // Format keeps a Z buffer's stencil mask in `a` (15 bits with 1 of stencil too)
     if (f.bpp == 16) return g_config.depth24 || g_config.wbuffer == 2 ? D3DFMT_D24X8 : D3DFMT_D16;
-    if (f.a) return D3DFMT_D24S8;  // Format keeps a Z buffer's stencil mask in `a`
     return D3DFMT_D24X8;
 }
 

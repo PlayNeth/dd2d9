@@ -188,6 +188,10 @@ public:
         return version == 1 ? kRefV1 : version == 2 ? kRefV2 : version == 3 ? kRefV3 : version == 4 ? kRefV4 : kRefV7;
     }
     ULONG AddRef(int slot = kRefInternal);
+    // The interface versions that are referenced, each as the moment it was first handed out
+    // (a number that only grows); a surface nobody holds counts through the interface it was
+    // created with. What ddraw.dll's EnumSurfaces walks. Returns how many.
+    int InterfacesHeld(LONG when[kRefV7 + 1]) const;
     ULONG Release(int slot = kRefInternal);
     void TraceRef(const char* what, int slot, LONG r) const;  // log=2, primary chain only
 
@@ -367,6 +371,7 @@ private:
     void LeaveFlipRing(std::vector<Surface*>* drop);
     LONG refs_[kRefSlots] = {};
     LONG total_ = 0;  // sum of refs_
+    LONG handedOut_[kRefV7 + 1] = {};  // when each interface version got its first reference (InterfacesHeld)
     void* wraps_[5] = {};
     void FreeWraps();
     std::vector<PrivateData> priv_;

@@ -490,6 +490,7 @@ public:
     bool inScene = false, lostInScene = false;
     // Begin/End (B §8.5)
     bool inBegin = false;
+    bool batchMade = false;  // a Begin has succeeded on this device (XP makes its vertex batch then)
     D3DPRIMITIVETYPE beginType = D3DPT_POINTLIST;
     DWORD beginFvf = 0, beginFlags = 0;
     bool beginIndexed = false;

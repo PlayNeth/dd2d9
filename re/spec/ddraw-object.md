@@ -215,7 +215,11 @@ Entry:
 7. Size (186-216):
    - **a primary with DDSD_HEIGHT or DDSD_WIDTH → INVALIDPARAMS**;
    - not a primary: height and width both required and non-zero (INVALIDPARAMS). A width above the driver's
-     limit (`FUN_7375b6a5`), unless the device has DDCAPS2_WIDESURFACES → INVALIDPARAMS.
+     limit (`FUN_7375b6a5`), unless the device has DDCAPS2_WIDESURFACES → INVALIDPARAMS. At creation a width or
+     height above 0xFFFF → INVALIDPARAMS (the surface keeps them in 16 bits; `FUN_73737235`:689-703; measured:
+     70000x1 in system memory). 65535x1, 1x65535 and 32768x1 are made in system memory (measured); in video
+     memory the driver decides. dd2d9 makes surfaces up to 65535 a side with at most 16384x16384 pixels
+     (`SizeFits`, buffer.cpp); with more, DDERR_OUTOFMEMORY.
 8. MIPMAP (217-237): MIPMAPCOUNT of 0, **a non-power-of-two width or height, or more levels than
    log2(max side)+1 → INVALIDPARAMS**.
 9. DDSD_PIXELFORMAT (238-310):
@@ -339,8 +343,10 @@ Flags: ALL 1, MATCH 2, NOMATCH 4, CANBECREATED 8, DOESEXIST 0x10.
 10. Returns DD_OK (0x737641c6).
 
 dd2d9 (`DDraw::EnumSurfaces`, ddraw.cpp:1295, `DescMatches` 1271): CANBECREATED needs exactly MATCH and a filter
-(matches 4). A primary is faked. DOESEXIST enumerates `surfaces` in creation order. The filter can be either size,
-and a missing filter with no ALL enumerates everything. See difference 23.
+(matches 4). A primary is faked. DOESEXIST lists each surface once for each of its interface versions that is
+referenced (through the interface it was created with when none is), the one first referenced last coming first;
+measured on XP: a surface held as IDirectDrawSurface, 2 and 3 is listed three times, and once again after the last
+two are released. See difference 23.
 
 ## EvaluateMode / StartModeTest — `IDirectDraw7_EvaluateMode.c`, `IDirectDraw7_StartModeTest.c`
 
@@ -376,11 +382,23 @@ dd2d9 (`DDraw::GetAvailableVidMem`, ddraw.cpp:1153): ignores caps, and both NULL
    (DX1, DX3, DX5, DX6), checked for both **before** either is written (39-48).
 2. Driver caps: the structure is zeroed to its size, then that many bytes are copied. DDSCAPS 0x00800000 is
    cleared. `dwVidMemTotal`/`dwVidMemFree` come from GetAvailableVidMem(VIDEOMEMORY) (50-82).
-3. HEL caps: copied the same way, with **`dwVidMemFree = 0`** (83-113).
+3. HEL caps: copied the same way, with **`dwVidMemFree = 0`** (83-113). Their contents are ddraw.dll's own.
+   Measured on XP SP3, the same 380 bytes on two machines with different drivers: dwCaps 0xF4C08241 (3D, BLT,
+   BLTSTRETCH, PALETTE, COLORKEY, ALPHA, BLTCOLORFILL, CANCLIP, CANCLIPSTRETCHED, BLTDEPTHFILL, CANBLTSYSMEM),
+   dwCaps2 1 (CERTIFIED), dwCKeyCaps 0x200 (SRCBLT), dwFXCaps 0x3FCE3, dwPalCaps 0x347 (1, 2, 4 and 8 bits,
+   8BITENTRIES, ALLOW256), dwZBufferBitDepths DDBD_16, dwRops BLACKNESS, SRCCOPY and WHITENESS, ddsCaps and
+   ddsOldCaps 0x421350 (FLIP, OFFSCREENPLAIN, PALETTE, PRIMARYSURFACE, TEXTURE, ZBUFFER, MIPMAP), ddsCaps.dwCaps2
+   0x200 (CUBEMAP); the SVB, VSB and SSB caps, colour-key caps, effects and rops repeat the main ones; everything
+   else 0. dd2d9 returns these.
+4. A DDCREATE_EMULATIONONLY object (measured on XP; it is made whether or not another object exists, as is a
+   DDCREATE_HARDWAREONLY one): driver caps dwCaps 0x02000000 (NOHARDWARE), dwCaps2 0x80001 (CERTIFIED,
+   CANRENDERWINDOWED), no Z depths (dd2d9 leaves the rest 0, unmeasured); the HEL caps as above; IDirect3D7 lists
+   the RGB device only; a video-memory surface → DDERR_NODIRECTDRAWHW; one with no memory type is made in
+   system memory.
 
 dd2d9 (`DDraw::GetCaps`, ddraw.cpp:1053-1115): accepts any size from 4 to sizeof(DDCAPS), checks each structure as
 it copies it (so `drv` is already written when `hel` turns out bad), and the HEL gets the driver's memory figures.
-The caps contents are dd2d9's own (deliberate). See difference 25.
+The driver caps' contents are dd2d9's own (deliberate). See difference 25.
 
 ## GetDeviceIdentifier — `IDirectDraw7_GetDeviceIdentifier.c` (v7), `IDirectDraw4_GetDeviceIdentifier.c` (v4) → `FUN_737655bf`
 
@@ -652,8 +670,12 @@ shows up with invalid parameters, unusual sequences or exact-return-code checks.
    - dd2d9 (ddraw.cpp:954-959): DD_OK. A windowed game polling it after the user changes the desktop resolution never
      sees WRONGMODE, though its surfaces are lost (`PollDisplayChange`).
    - Fix: for a non-exclusive object, return EXCLUSIVEMODEALREADYSET if `OtherExclusive()`. Otherwise remember the
-     display mode at creation and at each successful SetDisplayMode/RestoreDisplayMode, and return WRONGMODE when the
-     current mode differs (see Not determined for the initial value).
+     display mode at creation and at each successful SetDisplayMode, and return WRONGMODE when the current mode
+     differs. Only SetDisplayMode stores it (SetDisplayMode.c:51-65: width, height, depth and rate, 8 bytes at lcl+0x60;
+     TestCooperativeLevel compares them with the device's). RestoreDisplayMode and leaving exclusive mode don't, so an
+     object that set a mode other than the desktop's answers WRONGMODE from then on in normal mode. Measured on XP:
+     exclusive, SetDisplayMode(640, 480, 8), RestoreDisplayMode, SetCooperativeLevel(NORMAL) → WRONGMODE, and it stays;
+     a new object in normal mode → DD_OK (the mode at creation).
 6. **The cursor isn't confined in exclusive mode** (game-visible on multi-monitor systems only).
    - XP: `ClipCursor(device rectangle)` when exclusive mode is taken and on reactivation. It is undone on deactivation
      and on leaving (`FUN_7375d3c8`, SetCooperativeLevel.c:241, FUN_7375aa94:67).
@@ -929,12 +951,18 @@ shows up with invalid parameters, unusual sequences or exact-return-code checks.
   `FUN_7373cc84` doesn't set `DDRAWISURF_INVALID` in the code read. The only setter found is `FUN_73760541`, reached
   from activation and primary creation. The kernel-side loss may be what games see. So whether leaving exclusive mode
   loses surfaces on XP (dd2d9: only after a background spell, ddraw.cpp:768) wasn't settled.
-- The initial value of the object's "expected mode" (lcl+0x60) before any SetDisplayMode, which decides when
-  TestCooperativeLevel first says WRONGMODE (difference 5).
+- The object's "expected mode" (lcl+0x60) after another object's SetDisplayMode, and after its own SetDisplayMode
+  in normal mode followed by RestoreDisplayMode (difference 5 has what was measured).
 - What the Uninit vtables hold in the IDirectDraw2/4/7-only slots (no `UninitX_GetAvailableVidMem` etc. is named).
 - The driver width limit `FUN_7375b6a5` in CreateSurface, and the refresh-rate pick for an explicit rate
   (`FUN_7376198b` lost its return value).
-- Whether an interface pointer whose count reached 0 stays in `dsList` (and so is still enumerated by EnumSurfaces).
+- Whether the interface pointer a surface was created through stays in `dsList` once its count reached 0 while
+  others are held (measured: one made by QueryInterface leaves the list when it is released).
 - The meaning of DDSCL flag 0x20 (internal; refused with EXCLUSIVE, skips the window hook).
-- Z depths the XP HEL accepts (dd2d9 allows 16/24/32; XP's validator allows any depth ≥ 8 and leaves the rest to the
-  driver/HEL).
+- Z depths: XP's validator allows any depth ≥ 8 and leaves the rest to the driver or the HEL. Measured in system
+  memory (the HEL): 16 bits, 15 bits with 1 of stencil, and 32-bit layouts (24 or 32 bits of depth, 24 with 8 of
+  stencil either way round) are made; 8, 12 and 24 bits in 24 are DDERR_INVALIDPIXELFORMAT. dd2d9 makes the same,
+  and in video memory, the driver's business, also 24 bits in 24. 15 with 1 of stencil: in system memory only
+  (also when no memory type is asked for); in video memory DDERR_INVALIDPIXELFORMAT, as VMware's driver answered
+  (the Voodoo3's made it). With a device it is a 24-bit depth buffer with 8 bits of stencil on the GPU, the depth
+  read back into its 15 bits (what XP's devices do with one wasn't measured: none lists it).

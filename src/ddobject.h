@@ -229,7 +229,8 @@ private:
     bool taskbarExChanged_ = false;  // given a taskbar button in the background (MinimizeGameWindow)
     LONG taskbarEx_ = 0;             // ...its own WS_EX_TOOLWINDOW / NOACTIVATE / APPWINDOW bits
     HWND coverHwnd_ = nullptr;   // window CoverMonitor grew past the screen (and gave a region)
-    ULONG expectedMode_ = 0;  // NoteDisplayMode
+    ULONG expectedMode_ = 0;  // NoteDisplayMode: Windows' mode, and DirectDraw's
+    DWORD expectedW_ = 0, expectedH_ = 0, expectedBpp_ = 0;
     // The display settings uniqueness this object has accounted for, and when it last looked
     // (PollDisplayChange; g_lock).
     LONG seenUniqueness_ = 0;

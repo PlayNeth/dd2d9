@@ -175,22 +175,36 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     for (int i = 0; i < DD_ROP_SPACE; i++) c.dwSVBRops[i] = c.dwVSBRops[i] = c.dwSSBRops[i] = c.dwRops[i];
     DD2D9_TRACE("GetCaps(%p, %p) -> dwCaps 0x%08lx, ddsCaps 0x%08lx%s", static_cast<void*>(drv),
                static_cast<void*>(hel), c.dwCaps, c.ddsCaps.dwCaps, (c.dwCaps & DDCAPS_3D) ? " (3D)" : "");
-    // The emulation layer's (HEL) surface caps are a fixed set in ddraw.dll.
-    DDCAPS helCaps = c;
+    // The emulation layer's (HEL) caps are a fixed set in ddraw.dll: these, the same 380
+    // bytes on two Windows XP machines with different display drivers.
+    DDCAPS helCaps = {};
+    helCaps.dwSize = sizeof(helCaps);
+    helCaps.dwCaps = (c.dwCaps & DDCAPS_3D) | DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_PALETTE | DDCAPS_COLORKEY |
+                     DDCAPS_ALPHA | DDCAPS_BLTCOLORFILL | DDCAPS_CANCLIP | DDCAPS_CANCLIPSTRETCHED | DDCAPS_BLTDEPTHFILL |
+                     DDCAPS_CANBLTSYSMEM;  // (3D: the software devices; none with d3d=off)
+    helCaps.dwCaps2 = DDCAPS2_CERTIFIED;
+    helCaps.dwCKeyCaps = DDCKEYCAPS_SRCBLT;
+    helCaps.dwFXCaps = 0x3FCE3;  // every stretch, shrink and mirror of Blt's, arithmetic stretching down, alpha
+    helCaps.dwPalCaps = DDPCAPS_1BIT | DDPCAPS_2BIT | DDPCAPS_4BIT | DDPCAPS_8BIT | DDPCAPS_8BITENTRIES | DDPCAPS_ALLOW256;
+    helCaps.dwZBufferBitDepths = DDBD_16;
     helCaps.ddsCaps.dwCaps = DDSCAPS_FLIP | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE | DDSCAPS_PRIMARYSURFACE |
                              DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
+    helCaps.ddsCaps.dwCaps2 = DDSCAPS2_CUBEMAP;
     helCaps.ddsOldCaps.dwCaps = helCaps.ddsCaps.dwCaps;
-    helCaps.dwZBufferBitDepths = DDBD_16;
-    // No overlays in the emulation layer.
-    helCaps.dwCaps &= ~DWORD(DDCAPS_OVERLAY | DDCAPS_OVERLAYSTRETCH | DDCAPS_OVERLAYFOURCC);
-    helCaps.dwCKeyCaps &= ~DWORD(DDCKEYCAPS_DESTOVERLAY | DDCKEYCAPS_SRCOVERLAY);
-    helCaps.dwFXCaps &= ~kOverlayFxCaps;
-    helCaps.dwMaxVisibleOverlays = helCaps.dwCurrVisibleOverlays = 0;
-    helCaps.dwMinOverlayStretch = helCaps.dwMaxOverlayStretch = 0;
-    helCaps.dwVidMemFree = 0;  // as ddraw.dll
-    // An object limited to one side reports no surface caps for the other.
+    helCaps.dwSVBCaps = helCaps.dwVSBCaps = helCaps.dwSSBCaps = helCaps.dwCaps;
+    helCaps.dwSVBCKeyCaps = helCaps.dwVSBCKeyCaps = helCaps.dwSSBCKeyCaps = helCaps.dwCKeyCaps;
+    helCaps.dwSVBFXCaps = helCaps.dwVSBFXCaps = helCaps.dwSSBFXCaps = helCaps.dwFXCaps;
+    for (int i = 0; i < DD_ROP_SPACE; i++)
+        helCaps.dwRops[i] = helCaps.dwSVBRops[i] = helCaps.dwVSBRops[i] = helCaps.dwSSBRops[i] = c.dwRops[i];
+    // An object limited to one side: a hardware-only one reports no surface caps for the
+    // emulation; an emulation-only one has no driver, and says so.
     if (capsSide == kHardwareOnly) helCaps.ddsCaps.dwCaps = helCaps.ddsOldCaps.dwCaps = 0;
-    if (capsSide == kEmulationOnly) c.ddsCaps.dwCaps = c.ddsOldCaps.dwCaps = 0;
+    if (capsSide == kEmulationOnly) {
+        c = {};
+        c.dwSize = sizeof(c);
+        c.dwCaps = DDCAPS_NOHARDWARE;
+        c.dwCaps2 = DDCAPS2_CERTIFIED | DDCAPS2_CANRENDERWINDOWED;
+    }
     for (DDCAPS* out : {drv, hel}) {
         if (!out) continue;
         const DDCAPS& src = out == hel ? helCaps : c;
@@ -348,20 +362,28 @@ HRESULT DDraw::EnumSurfaces(DWORD flags, const void* filter, void* ctx, void* ca
         }
         return DD_OK;
     }
-    // The surfaces that exist, newest first.
+    // The surfaces that exist, as ddraw.dll lists them: once for each interface version of
+    // theirs that is held, the one handed out last first.
+    std::vector<std::pair<LONG, Surface*>> held;
     std::vector<Surface*> list;
     std::vector<DDSURFACEDESC2> descs;
     {
         Guard l;
         try {  // (before any is referenced)
-            list.reserve(surfaces.size());
-            descs.reserve(surfaces.size());
+            for (Surface* s : surfaces) {
+                if (!all && nomatch == DescMatches(want, s)) continue;
+                LONG when[Surface::kRefV7 + 1];
+                const int n = s->InterfacesHeld(when);
+                for (int k = 0; k < n; k++) held.emplace_back(when[k], s);
+            }
+            list.reserve(held.size());
+            descs.reserve(held.size());
         } catch (const std::bad_alloc&) {
             return DDERR_OUTOFMEMORY;
         }
-        for (size_t k = surfaces.size(); k-- > 0;) {
-            Surface* s = surfaces[k];
-            if (!all && nomatch == DescMatches(want, s)) continue;
+        std::sort(held.begin(), held.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (const auto& h : held) {
+            Surface* s = h.second;
             DDSURFACEDESC2 d;
             s->GetSurfaceDesc(&d);
             s->AddRef(Surface::SlotFor(version));  // the callback releases it

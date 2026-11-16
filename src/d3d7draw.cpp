@@ -124,7 +124,7 @@ const WORD* Device7::SafeIndices(const WORD* idx, DWORD ni, DWORD n) {
 // fromVB: the vertices are a vertex buffer's (a transformed one's leave the clip status alone).
 HRESULT Device7::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const void* v, UINT stride, DWORD n, const WORD* idx,
                             DWORD ni, bool fromVB) try {
-    if (!ValidPrim(t)) return DDERR_INVALIDPARAMS;  // undefined on XP (V §5.3)
+    if (!ValidPrim(t)) return D3D_OK;  // no such primitive: XP returns D3D_OK too (what it draws is undefined, V §5.3)
     const UINT prims = PrimCount(t, idx ? ni : n);
     if (!prims || !n) return D3D_OK;
     if (!v || (idx == nullptr && ni)) return DDERR_INVALIDPARAMS;

@@ -63,6 +63,7 @@ struct BlitJob {
     RECT s0;  // source rectangle
     RECT dc;  // destination rectangle clipped to the surface
     bool mirrorX, mirrorY;
+    bool overlapped = false;  // the source was copied aside: it overlapped the destination in the same memory
     bool srcKey;
     uint32_t skLo, skHi, skMask;
     bool dstKey;
@@ -114,29 +115,80 @@ std::vector<int> g_xmap, g_ymap;
 std::vector<uint8_t> g_temp;
 std::vector<uint8_t> g_keyRow;  // a stretched / mirrored keyed row's source pixels, gathered
 
-// Maps the clipped destination columns (or rows) lo..hi-1 to source ones: column x of a
-// destination d0..d0+dw-1 takes source column s0 + (x - d0) * sw / dw (from the other end
-// when mirrored). Stepped from the first one's quotient and remainder, which gives the same
-// numbers as dividing for each (a 64-bit division a column, a call in 32-bit code, took as
-// long as a small stretch's pixels).
-// Destination rectangles can be huge when a clipper is attached (only the
-// clipped part is drawn), so the mapping is done in 64-bit arithmetic.
-static void BuildMap(std::vector<int>& map, int64_t d0, int64_t dw, int64_t s0, int64_t sw, bool mirror, int lo, int hi) {
+// Maps the clipped destination columns (or rows) lo..hi-1 of a destination d0..d0+dw-1 to
+// source ones of s0..s0+sw-1, as ddraw.dll's emulation samples them (measured on XP SP3, the
+// same on two display drivers; the clip rule read from FUN_73762b4c):
+//   - Clipped (not the whole destination): the part of the source is found first, each edge
+//     (edge - d0) * f + 0x8000 >> 16 with f = (sw << 16) / dw, and widened by one pixel if
+//     that leaves none; that part is then mapped onto lo..hi-1 as a blit of its own.
+//   - Shrunk: the first column is (sw / dw) / 2, and each next one sw / dw further, one more
+//     whenever the remainders sum past the destination width (the sum started at half of
+//     it). (With the source pixels numbered from 1, 8 to 3 take 2 5 7; 9 to 4: 2 4 7 9;
+//     8 to 4: 2 4 6 8; 16 to 3: 3 8 14.)
+//   - Stretched: the source column under the destination pixel's centre. Across, in 16.16
+//     steps of (sw << 16) / dw from half a step; down, exactly: (2i + 1) * sh / (2 * dh).
+//     (4 to 7 pixels: 1 1 2 2 3 4 4 across, 1 1 2 3 3 4 4 down.)
+//   - Mirrored: the source column at the destination pixel's near edge, from the other end
+//     (as measured too); a clipped part takes the columns it would in the whole blit.
+//   - `edges`, a surface onto an overlapping part of itself: the column at the destination
+//     pixel's near edge, i * sw / dw (the one such shrink measured: 8 to 4 take 1 3 5 7).
+// Destination rectangles can be huge when a clipper is attached (only the clipped part is
+// drawn), so the arithmetic is 64-bit; stepped, not divided for each (a 64-bit division a
+// column, a call in 32-bit code, took as long as a small stretch's pixels).
+static void BuildMap(std::vector<int>& map, int64_t d0, int64_t dw, int64_t s0, int64_t sw, bool mirror, bool edges, int lo,
+                     int hi, bool vertical) {
     map.resize(size_t(hi - lo));
-    if (hi <= lo || dw <= 0) return;
-    int64_t rx = int64_t(lo) - d0;
-    if (mirror) rx = dw - 1 - rx;
-    int64_t v = s0 + rx * sw / dw, rem = rx * sw % dw;
-    const int64_t q = sw / dw, r = sw % dw;
+    if (hi <= lo || dw <= 0 || sw <= 0) return;
     int* out = map.data();
-    for (int n = hi - lo; n > 0; n--) {
-        *out++ = int(v);
-        if (!mirror) {
-            v += q, rem += r;
-            if (rem >= dw) v++, rem -= dw;
-        } else {
-            v -= q, rem -= r;
+    if (mirror || edges) {
+        // rx * sw / dw, rx counted from the far end when mirrored: quotient and remainder stepped.
+        const int64_t rx = mirror ? dw - 1 - (int64_t(lo) - d0) : int64_t(lo) - d0;
+        const int64_t q = sw / dw, r = sw % dw, dir = mirror ? -1 : 1;
+        int64_t v = s0 + rx * sw / dw, rem = rx * sw % dw;
+        for (int n = hi - lo; n > 0; n--) {
+            *out++ = int(v);
+            v += dir * q, rem += dir * r;
             if (rem < 0) v--, rem += dw;
+            else if (rem >= dw) v++, rem -= dw;
+        }
+        return;
+    }
+    int64_t first = 0, w = sw;  // the source part, from s0
+    const int64_t n = int64_t(hi) - lo;
+    if (lo > d0 || n < dw) {
+        const int64_t f = (sw << 16) / dw;
+        first = ((int64_t(lo) - d0) * f + 0x8000) >> 16;
+        int64_t end = ((int64_t(hi) - d0) * f + 0x8000) >> 16;
+        if (first == end) {
+            if (end == sw) first--;
+            else end++;
+        }
+        first = std::max<int64_t>(0, std::min(first, sw - 1));
+        w = std::max<int64_t>(1, std::min(end, sw) - first);
+    }
+    const int64_t base = s0 + first, last = w - 1;
+    if (w == n) {
+        for (int64_t i = 0; i < n; i++) *out++ = int(base + i);
+    } else if (n < w) {
+        const int64_t q = w / n, r = w % n;
+        int64_t v = q / 2, sum = n / 2;
+        for (int64_t i = 0; i < n; i++) {
+            *out++ = int(base + std::min(v, last));
+            v += q, sum += r;
+            if (sum >= n) v++, sum -= n;
+        }
+    } else if (!vertical) {
+        const int64_t step = (w << 16) / n;
+        int64_t pos = step >> 1;
+        for (int64_t i = 0; i < n; i++, pos += step) *out++ = int(base + std::min(pos >> 16, last));
+    } else {
+        // (2i + 1) * w / (2n): quotient and remainder stepped by 2w.
+        const int64_t d = 2 * n, q = 2 * w / d, r = 2 * w % d;
+        int64_t v = w / d, rem = w % d;
+        for (int64_t i = 0; i < n; i++) {
+            *out++ = int(base + std::min(v, last));
+            v += q, rem += r;
+            if (rem >= d) v++, rem -= d;
         }
     }
 }
@@ -144,15 +196,15 @@ static void BuildMap(std::vector<int>& map, int64_t d0, int64_t dw, int64_t s0, 
 // Maps each clipped destination column to a source column.
 static const int* BuildXMap(const BlitJob& j) {
     BuildMap(g_xmap, j.d0.left, int64_t(j.d0.right) - j.d0.left, j.s0.left, int64_t(j.s0.right) - j.s0.left, j.mirrorX,
-             j.dc.left, j.dc.right);
+             j.overlapped, j.dc.left, j.dc.right, false);
     return g_xmap.data();
 }
 
-static inline int MapY(const BlitJob& j, int y) {
-    const int64_t dh = int64_t(j.d0.bottom) - j.d0.top, sh = int64_t(j.s0.bottom) - j.s0.top;
-    int64_t ry = int64_t(y) - j.d0.top;
-    if (j.mirrorY) ry = dh - 1 - ry;
-    return int(j.s0.top + ry * sh / dh);
+// Maps each clipped destination row to a source row.
+static const int* BuildYMap(const BlitJob& j) {
+    BuildMap(g_ymap, j.d0.top, int64_t(j.d0.bottom) - j.d0.top, j.s0.top, int64_t(j.s0.bottom) - j.s0.top, j.mirrorY,
+             j.overlapped, j.dc.top, j.dc.bottom, true);
+    return g_ymap.data();
 }
 
 // In-range test for color keys: lo <= k <= hi in one unsigned comparison.
@@ -266,9 +318,10 @@ __attribute__((noinline)) static void KeyRows(const BlitJob& j, const int* xmap)
         gathered = reinterpret_cast<T*>(g_keyRow.data());
     }
     int lastSy = -1;
+    const int* const ymap = BuildYMap(j);
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
-        const int sy = MapY(j, y);
+        const int sy = ymap[y - j.dc.top];
         if (!SrcKey && !DstKey && sy == lastSy) {  // stretched taller: the row above again
             memcpy(drow, reinterpret_cast<const uint8_t*>(drow) - j.dpitch, size_t(n) * sizeof(T));
             continue;
@@ -321,9 +374,7 @@ __attribute__((noinline)) static void StretchRows(const BlitJob& j, const int* _
     }
     const StretchRun* const runs = g_runs.data();
     const size_t runCount = safe ? g_runs.size() : 0;
-    BuildMap(g_ymap, j.d0.top, int64_t(j.d0.bottom) - j.d0.top, j.s0.top, int64_t(j.s0.bottom) - j.s0.top, j.mirrorY, j.dc.top,
-             j.dc.bottom);
-    const int* const ymap = g_ymap.data();
+    const int* const ymap = BuildYMap(j);
     int lastSy = -1;
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         T* __restrict drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
@@ -372,9 +423,10 @@ static void BlitSameFormat(const BlitJob& j) {
     const int n = j.dc.right - j.dc.left;
     if (direct && !j.dstKey && (!j.srcKey || j.skLo == j.skHi) && !j.orMask) {
         const int sx = j.s0.left + (j.dc.left - j.d0.left);
+        const int* const ymap = BuildYMap(j);
         for (int y = j.dc.top; y < j.dc.bottom; y++) {
             T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
-            const T* srow = reinterpret_cast<const T*>(j.src + MapY(j, y) * j.spitch) + sx;
+            const T* srow = reinterpret_cast<const T*>(j.src + ymap[y - j.dc.top] * j.spitch) + sx;
             if (j.srcKey) KeyRow(drow, srow, n, j.skMask, j.skLo);
             else memcpy(drow, srow, size_t(n) * sizeof(T));
         }
@@ -435,9 +487,10 @@ static void BlitGeneric(const BlitJob& j) {
     const bool direct = !j.mirrorX && j.d0.right - j.d0.left == j.s0.right - j.s0.left;
     if (rows && !direct) g_gathered.resize(size_t(n));
     int lastSy = -1;
+    const int* const ymap = BuildYMap(j);
     for (int y = j.dc.top; y < j.dc.bottom; y++) {
         uint8_t* drow = j.dst + y * j.dpitch + j.dc.left * j.dbytes;
-        const int sy = MapY(j, y);
+        const int sy = ymap[y - j.dc.top];
         if (!keys && sy == lastSy) {  // stretched taller: the row above again
             memcpy(drow, drow - j.dpitch, size_t(n) * j.dbytes);
             continue;
@@ -535,6 +588,7 @@ void DrawBlit(Buffer* db, const RECT& d, const Buffer* sb, const RECT& s, const 
             j.src = temp.data();
             j.spitch = LONG(row);
             j.s0 = {0, 0, sw, sh};
+            j.overlapped = true;
         }
     }
 

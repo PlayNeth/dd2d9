@@ -298,7 +298,8 @@ Order of checks and effects (`CreateDevice(rclsid, lpDDS7, lplpD3DDevice)`):
 2. Allocation → E_OUTOFMEMORY (22). The constructor links the VB into the Direct3D object's list and increments
    its VB count; **it does not AddRef the Direct3D object** (`hookVertexBufferToD3D_73929713.c:7-19`).
 3. `Init` (`Init_73929b01.c`), reading desc+4 dwCaps, +8 dwFVF, +0xC dwNumVertices; **`dwSize` is not checked**:
-   1. dwNumVertices > 0xFFFF → **D3DERR_TOOMANYVERTICES** (33, 94).
+   1. dwNumVertices > 0xFFFF → **D3DERR_TOOMANYVERTICES** (33, 94). 0 vertices: DDERR_INVALIDPARAMS, measured on
+      XP (presumably step 5: a buffer surface of no size).
    2. dwCaps has D3DVBCAPS_OPTIMIZED → DDERR_INVALIDPARAMS (34, 90).
    3. Vertex size (position + normal/size/colours + texture coordinates, `GetVertexSizeFVF_7391f626.c`,
       `ComputeTextureCoordSize_7391f6e1.c`) of 0 → **D3DERR_INVALIDVERTEXFORMAT** (36-42). No other FVF validation

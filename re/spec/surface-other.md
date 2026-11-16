@@ -299,7 +299,10 @@ They are forwarded to Direct3D texture-manager callbacks stored after the Direct
     → DDERR_INVALIDPARAMS;
   - no texture handle (any non-texture) → DDERR_INVALIDOBJECT;
   - no callback → DDERR_D3DNOTINITIALIZED;
-  - otherwise the callback's result.
+  - otherwise the callback's result. Measured on XP: a texture that isn't managed (system or video memory) →
+    DDERR_INVALIDPARAMS from all four; a managed texture that isn't a mipmap: SetLOD of any value, 0 too →
+    DDERR_INVALIDPARAMS, GetLOD 0; a managed mipmap of 3 or 6 levels: 0 to levels − 1 DD_OK and read back, levels
+    and above DDERR_INVALIDPARAMS; SetPriority(5) DD_OK and read back.
 - SetPriority (7_SetPriority.c:15/25) has no checks and calls the callback directly (Windows crashes for
   non-textures and sublevels).
 - Wine tests (ddraw7.c test_resource_priority) on real Windows: a managed texture → DD_OK (priority
@@ -329,7 +332,7 @@ They are forwarded to Direct3D texture-manager callbacks stored after the Direct
 
 | Method | XP checks in order (non-overlay surface) | Result |
 |---|---|---|
-| AddOverlayDirtyRect (7_AddOverlayDirtyRect.c) | execute buffer → INVALIDSURFACETYPE (90). Rect NULL/`left<0`/`top<0`/`left>right`/`top>bottom`/`bottom>height`/`right>width` → INVALIDPARAMS (47-50, 87) | **not system memory → DD_OK** (55). System memory → the HEL callback's result, or INVALIDPARAMS (81) |
+| AddOverlayDirtyRect (7_AddOverlayDirtyRect.c) | execute buffer → INVALIDSURFACETYPE (90). Rect NULL/`left<0`/`top<0`/`left>right`/`top>bottom`/`bottom>height`/`right>width` → INVALIDPARAMS (47-50, 87) | **not system memory → DD_OK** (55). System memory → the HEL callback's result: there is none, **E_NOTIMPL** (measured; managed textures too) |
 | GetOverlayPosition (7_GetOverlayPosition.c) | `*x = *y = 0` first (25-26, NULL → INVALIDPARAMS). Lost → SURFACELOST (52) | DDERR_NOTAOVERLAYSURFACE (48) |
 | SetOverlayPosition (7_SetOverlayPosition.c) | lost → SURFACELOST (133) | DDERR_NOTAOVERLAYSURFACE (129) |
 | UpdateOverlay (7_UpdateOverlay.c) | This lost → SURFACELOST (331). Dest NULL → INVALIDPARAMS (SEH). Dest lost → SURFACELOST. `flags & 0xF8000000`, or fx NULL with DDOVER_DDFX, or `fx->dwSize != 0x38` → INVALIDPARAMS (88-95, 327) | DDERR_NOTAOVERLAYSURFACE (99) |
@@ -496,7 +499,10 @@ it only shows up with invalid parameters, unusual sequences or exact-return-code
     - Fix: start OWNDC surfaces at 0, use a helper `BumpUniqueness()` (`if (u && !++u) u = 1;`), and set 0 in SetSurfaceDesc.
 15. **QueryInterface details** (edge case).
     - XP: a bad `riid` → INVALIDPARAMS (QI.c:42). D3D texture/device IIDs → E_NOINTERFACE on surfaces of a DirectDraw7
-      object (233). A second QI for the same D3D IID returns the same object (214-232).
+      object (233). A second QI for the same D3D IID returns the same object (214-232). A device IID asked through
+      IDirectDrawSurface4 → DDERR_INVALIDPARAMS (measured, and through IDirectDrawSurface7 of such a surface): the new device asks the interface it was given for a
+      description of the old size (d3dim `Init_6dea5b06.c`:131-134), which that interface refuses. A texture IID
+      through it works.
     - dd2d9 (surface.cpp:292-316, d3dproxy.cpp:563-585): no riid check, and texture QIs allowed on DD7 surfaces.
       Each device QI creates a new device.
     - Fix: check `s->dd`'s DirectDraw-7-ness (an object made by DirectDrawCreateEx, not the IDirectDraw7 QI) before
@@ -563,6 +569,4 @@ used, and detaching only through the attaching interface (SURFACENOTATTACHED).
 
 ### Not determined
 
-- What d3dim700's texture-manager callbacks return for Set/GetLOD and SetPriority on non-managed textures (see 18).
-- The HEL overlay callback's result for AddOverlayDirtyRect/UpdateOverlayDisplay on system-memory non-overlay surfaces.
 - The attach-list order of complex surfaces as CreateSurface builds them. It affects difference 9, and belongs to the creation audit.

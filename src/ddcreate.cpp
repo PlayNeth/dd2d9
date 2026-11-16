@@ -209,11 +209,14 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
                 !(pf.dwFlags & DDPF_ZBUFFER) || !pf.dwZBitMask)
                 return DDERR_INVALIDPARAMS;
             // With stencil: the 24+8 layouts Direct3D enumerates (EnumZBufferFormats), as
-            // ddraw.dll takes only those its driver lists.
-            if ((pf.dwFlags & DDPF_STENCILBUFFER) &&
-                (pf.dwZBufferBitDepth != 32 || pf.dwStencilBitDepth != 8 || __builtin_popcount(pf.dwStencilBitMask) != 8 ||
-                 __builtin_popcount(pf.dwZBitMask) != 24 || (pf.dwZBitMask & pf.dwStencilBitMask)))
-                return DDERR_UNSUPPORTED;
+            // ddraw.dll takes only those its driver lists; and 15 bits with 1 of stencil, which
+            // its emulation layer makes (in system memory: CreateSurface).
+            if (pf.dwFlags & DDPF_STENCILBUFFER) {
+                const int zBits = __builtin_popcount(pf.dwZBitMask), sBits = __builtin_popcount(pf.dwStencilBitMask);
+                const bool z24s8 = pf.dwZBufferBitDepth == 32 && pf.dwStencilBitDepth == 8 && sBits == 8 && zBits == 24;
+                const bool z15s1 = pf.dwZBufferBitDepth == 16 && pf.dwStencilBitDepth == 1 && sBits == 1 && zBits == 15;
+                if ((!z24s8 && !z15s1) || (pf.dwZBitMask & pf.dwStencilBitMask)) return DDERR_UNSUPPORTED;
+            }
             depth = pf.dwZBufferBitDepth;
         }
         if (depth < 8) return DDERR_INVALIDPARAMS;
@@ -307,11 +310,11 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
     // surface, whose caps still say nothing but where its memory is.
     const DWORD asked = in.ddsCaps.dwCaps;
     const DWORD caps2 = in.ddsCaps.dwCaps2;
-    // DDCREATE_EMULATIONONLY: the emulation layer's surfaces, all in system memory unless
-    // video memory is asked for (Wine's test_caps, confirmed on Windows).
-    const bool emulated = capsSide == kEmulationOnly && !(asked & DDSCAPS_VIDEOMEMORY) &&
-                          !(caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE));
-    const DWORD caps = emulated ? asked | DDSCAPS_SYSTEMMEMORY : asked;
+    // DDCREATE_EMULATIONONLY: the emulation layer's surfaces, all in system memory; video
+    // memory there is none of (measured on XP).
+    if (capsSide == kEmulationOnly && (asked & DDSCAPS_VIDEOMEMORY)) return DDERR_NODIRECTDRAWHW;
+    const bool emulated = capsSide == kEmulationOnly && !(caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE));
+    DWORD caps = emulated ? asked | DDSCAPS_SYSTEMMEMORY : asked;
     if ((caps & DDSCAPS_OVERLAY) && (caps & DDSCAPS_SYSTEMMEMORY)) return DDERR_NOOVERLAYHW;
     const bool flip = (caps & DDSCAPS_FLIP) != 0;
     const bool complex = (caps & DDSCAPS_COMPLEX) != 0;
@@ -332,7 +335,9 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         h = int(displayH);
         fmt = Format::ForDisplayBpp(displayBpp);
     } else {
-        // CheckSurfaceDesc has seen the size, and the format or Z depth.
+        // CheckSurfaceDesc has seen the size, and the format or Z depth. ddraw.dll keeps
+        // a surface's size in 16 bits and refuses what doesn't fit.
+        if (in.dwWidth > 0xFFFF || in.dwHeight > 0xFFFF) return DDERR_INVALIDPARAMS;
         w = int(in.dwWidth);
         h = int(in.dwHeight);
         if (in.dwFlags & DDSD_PIXELFORMAT) {
@@ -351,8 +356,16 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         }
     }
 
-    // The emulation layer's Z buffers: 16 and 32 bits only (Wine's test_caps).
-    if (emulated && fmt.zbuf && fmt.bpp != 16 && fmt.bpp != 32) return DDERR_INVALIDPIXELFORMAT;
+    // A Z buffer of 15 bits with 1 of stencil is the emulation layer's alone (no device of
+    // dd2d9's lists it): in system memory, and refused in video memory (measured on XP with
+    // VMware's driver, which doesn't list it either).
+    if (fmt.zbuf && fmt.bpp == 16 && fmt.a) {
+        if (asked & DDSCAPS_VIDEOMEMORY) return DDERR_INVALIDPIXELFORMAT;
+        caps |= DDSCAPS_SYSTEMMEMORY;
+    }
+    // The emulation layer's Z buffers, which those in system memory are: 16 and 32 bits only
+    // (Wine's test_caps; measured on XP).
+    if ((caps & DDSCAPS_SYSTEMMEMORY) && fmt.zbuf && fmt.bpp != 16 && fmt.bpp != 32) return DDERR_INVALIDPIXELFORMAT;
     DDSURFACEDESC2 base = in;
     base.dwFlags &= ~(DDSD_LPSURFACE | DDSD_PITCH | DDSD_ZBUFFERBITDEPTH | DDSD_LINEARSIZE);
     // Fields the game didn't flag hold whatever its structure did: not taken over.

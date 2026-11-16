@@ -221,8 +221,9 @@ driver unchanged; otherwise per-type clippers (points, lines, line strips, lists
 An invalid primitive type that reaches the clipper returns E_FAIL (DoDrawPrimitive_73928981.c:28–29);
 indexed point lists or invalid types return garbage (in_ECX, DoDrawIndexedPrimitive_73928a03.c:8,
 31). An invalid type that does not need clipping is sent to the driver with an opcode read past
-the end of a 7-entry table (DrawPrim_73924d9d.c:21, 28). **Undefined; dd2d9 should return
-DDERR_INVALIDPARAMS for type ∉ 1..6 (the debug runtime's behaviour) rather than emulate this.**
+the end of a 7-entry table (DrawPrim_73924d9d.c:21, 28). Measured on XP's software device:
+types 0 and 7 with three transformed vertices return **D3D_OK**. What is drawn is undefined;
+dd2d9 returns D3D_OK for type ∉ 1..6 and draws nothing.
 
 ## 6. ProcessPrimitive on the T&L HAL (DDI 5)
 

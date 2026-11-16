@@ -553,7 +553,7 @@ HRESULT Device::DrawCommon(D3DPRIMITIVETYPE t, DWORD fvf, const uint8_t* v, UINT
         return D3D_OK;
     }
     fvf &= 0xFFF;  // no texture coordinate sizes in DX6
-    if (!(fvf & 0x0E)) return DDERR_INVALIDPARAMS;  // no position (XP reads past the vertices)
+    if (!(fvf & 0x0E)) return D3D_OK;  // no position: XP draws what it reads past the vertices; nothing here
     if ((fvf & 0x0E) == D3DFVF_XYZRHW && vbClip) {
         // A processed vertex buffer drawn with clipping (B §8.4): outside vertices hold clip
         // coordinates, so those primitives go through the clipper.

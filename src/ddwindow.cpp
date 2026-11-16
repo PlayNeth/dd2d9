@@ -619,14 +619,19 @@ void DDraw::ApplyWindow() {
 // Leaving exclusive mode: the window gets its style back, keeping WS_VISIBLE and
 // WS_EX_TOPMOST as they are now; then (unless DDSCL_NOWINDOWCHANGES) it stops being
 // topmost. ddraw.dll leaves it the size it had; window mode, which moved it, puts it back.
+// A style dd2d9 didn't change isn't set again: ddraw.dll never touches it, and the window
+// would be told of a change (WM_STYLECHANGING, WM_STYLECHANGED) that didn't happen.
 void DDraw::RestoreSavedWindow(bool windowChanges) {
     Uncover();
     if (windowSaved_ && IsWindow(savedHwnd_)) {
         const LONG keep = WS_VISIBLE | WS_MINIMIZE | WS_MAXIMIZE;
         const LONG style = GetWindowLongW(savedHwnd_, GWL_STYLE), exStyle = GetWindowLongW(savedHwnd_, GWL_EXSTYLE);
-        SetWindowLongW(savedHwnd_, GWL_STYLE, (savedStyle_ & ~keep) | (style & keep));
-        SetWindowLongW(savedHwnd_, GWL_EXSTYLE, (savedExStyle_ & ~WS_EX_TOPMOST) | (exStyle & WS_EX_TOPMOST));
-        UINT flags = SWP_FRAMECHANGED | SWP_NOACTIVATE | (windowChanges ? 0 : SWP_NOZORDER);
+        const LONG wantStyle = (savedStyle_ & ~keep) | (style & keep);
+        const LONG wantExStyle = (savedExStyle_ & ~WS_EX_TOPMOST) | (exStyle & WS_EX_TOPMOST);
+        if (style != wantStyle) SetWindowLongW(savedHwnd_, GWL_STYLE, wantStyle);
+        if (exStyle != wantExStyle) SetWindowLongW(savedHwnd_, GWL_EXSTYLE, wantExStyle);
+        const bool changed = style != wantStyle || exStyle != wantExStyle;
+        UINT flags = (changed ? SWP_FRAMECHANGED : 0) | SWP_NOACTIVATE | (windowChanges ? 0 : SWP_NOZORDER);
         const RECT& r = savedRect_;
         if (activeDisplay_ != kDisplayWindow) flags |= SWP_NOMOVE | SWP_NOSIZE;
         SetWindowPos(savedHwnd_, windowChanges ? HWND_NOTOPMOST : nullptr, r.left, r.top, r.right - r.left,

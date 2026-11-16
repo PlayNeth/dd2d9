@@ -337,7 +337,9 @@ InvalidateSurface = X:FUN_73760541_73760541.c (only if not already lost):
   PARTOFPRIMARYCHAIN) and not a sysmem execute buffer` (17–29). So: every surface not
   explicitly created in system memory, plus every member of a primary flip chain even in
   system memory. Explicit system-memory surfaces (textures, offscreen, Z buffers) are never
-  lost.
+  lost. Nor are managed textures (measured on XP through exclusive mode, display modes and a
+  minimized window: `IsLost` stays DD_OK): to ddraw.dll they are system-memory surfaces, the
+  video-memory copy being Direct3D's.
 
 Callers: InvalidateAllSurfaces (FUN_73760648: every surface of the DirectDraw global object)
 from the display-data refresh after a mode/uniqueness change (FUN_737391bd ← FUN_7373c175, run

@@ -184,10 +184,9 @@ HRESULT DDraw::CreatePalette(DWORD flags, PALETTEENTRY* entries, IDirectDrawPale
     *out = nullptr;
     if (flags & ~0x7FFu) return DDERR_INVALIDPARAMS;
     if (!coop_) return DDERR_NOCOOPERATIVELEVELSET;
-    // ddraw.dll refuses DDPCAPS_PRIMARYSURFACE too; dd2d9 lets it through, for games
-    // made on Windows 9x that pass it.
-    if (flags & DDPCAPS_PRIMARYSURFACE) DD2D9_LOG("CreatePalette: DDPCAPS_PRIMARYSURFACE (ddraw.dll refuses it)");
-    if (flags & (DDPCAPS_PRIMARYSURFACELEFT | DDPCAPS_VSYNC)) return DDERR_INVALIDPARAMS;
+    // (Flags a palette shows, not ones it is made with: refused by Windows 98's ddraw.dll
+    // of DirectX 6.1 and 7 as by XP's.)
+    if (flags & (DDPCAPS_PRIMARYSURFACE | DDPCAPS_PRIMARYSURFACELEFT | DDPCAPS_VSYNC)) return DDERR_INVALIDPARAMS;
     const DWORD size = flags & (DDPCAPS_1BIT | DDPCAPS_2BIT | DDPCAPS_4BIT | DDPCAPS_8BIT);
     if (!size || (size & (size - 1))) return DDERR_INVALIDPARAMS;  // exactly one size
     if ((flags & DDPCAPS_8BITENTRIES) && (flags & (DDPCAPS_ALPHA | DDPCAPS_8BIT))) return DDERR_INVALIDPARAMS;

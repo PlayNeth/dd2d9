@@ -68,7 +68,7 @@ HRESULT Direct3D7::EnumDevices(LPD3DENUMDEVICESCALLBACK7 cb, void* ctx) {
     if (!cb || IsBadCodePtr(reinterpret_cast<FARPROC>(reinterpret_cast<void*>(cb)))) return DDERR_INVALIDPARAMS;
     const GpuCaps c = GpuGetCaps();
     for (int i = 0; i < 3; i++) {
-        if (i > 0 && !c.valid) break;
+        if (i > 0 && (!c.valid || dd_->capsSide == DDraw::kEmulationOnly)) break;  // (no hardware device on such an object)
         if (i == 2 && !c.hwTnL) break;
         D3DDEVICEDESC7 caps = i == 0 ? RgbDesc() : HalDesc(i == 2);
         if (cb(g_devDesc[i], g_devName[i], &caps, ctx) != D3DENUMRET_OK) break;
@@ -118,6 +118,7 @@ HRESULT Direct3D7::CreateVertexBuffer(D3DVERTEXBUFFERDESC* desc, IDirect3DVertex
     *out = nullptr;
     if (desc->dwNumVertices > 0xFFFF) return D3DERR_TOOMANYVERTICES;
     if (desc->dwCaps & D3DVBCAPS_OPTIMIZED) return DDERR_INVALIDPARAMS;
+    if (!desc->dwNumVertices) return DDERR_INVALIDPARAMS;  // (XP: no memory of no size)
     auto* vb = new (std::nothrow) VertexBuffer7(this, *desc);
     if (!vb) return E_OUTOFMEMORY;
     *out = vb;

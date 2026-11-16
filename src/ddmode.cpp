@@ -319,7 +319,6 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
                       GetForegroundWindow() == hwnd ? "done" : "refused");
         }
     }
-    NoteDisplayMode();  // leaving exclusive mode may have put the desktop's back
     MarkDirty();
     return DD_OK;
 }
@@ -465,8 +464,15 @@ bool DDraw::AnyLocked() const {
     return false;
 }
 
-// The display mode this object takes as its own (TestCooperativeLevel out of exclusive mode).
-void DDraw::NoteDisplayMode() { expectedMode_ = ModeHash(); }
+// The display mode this object takes as its own (TestCooperativeLevel out of exclusive
+// mode): Windows', and the one DirectDraw shows the game. As ddraw.dll, at creation and
+// after each SetDisplayMode of its own; not after RestoreDisplayMode or on leaving exclusive
+// mode, so an object that set a mode other than the desktop's has the wrong one from then on.
+void DDraw::NoteDisplayMode() {
+    Guard l;
+    expectedMode_ = ModeHash();
+    DisplayMode(&expectedW_, &expectedH_, &expectedBpp_);
+}
 
 // g_lock held (the other object's primary is read).
 bool DDraw::Superseded() const {
@@ -528,7 +534,6 @@ HRESULT DDraw::RestoreDisplayMode() {
     // them sees it (DisplayMode), is another one now, whether it was switched or not.
     InvalidateSurfaces();
     InvalidateOtherObjects(this);
-    NoteDisplayMode();
     MarkDirty();
     return DD_OK;
 }
@@ -565,10 +570,13 @@ void DDraw::UpdateLostSurfaces() {
 HRESULT DDraw::TestCooperativeLevel() {
     if (!Exclusive()) {
         // As ddraw.dll: another object's exclusive mode, or a display mode other than the
-        // one this object last saw set (at creation, or by its own Set/RestoreDisplayMode).
+        // one this object takes as its own (NoteDisplayMode).
         {
             Guard l;
             if (OtherExclusive()) return DDERR_EXCLUSIVEMODEALREADYSET;
+            DWORD w, h, bpp;
+            DisplayMode(&w, &h, &bpp);
+            if (w != expectedW_ || h != expectedH_ || bpp != expectedBpp_) return DDERR_WRONGMODE;
         }
         const ULONG m = ModeHash();
         return m && expectedMode_ && m != expectedMode_ ? DDERR_WRONGMODE : DD_OK;

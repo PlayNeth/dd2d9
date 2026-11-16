@@ -447,8 +447,9 @@ it only shows up with invalid parameters, unusual sequences or exact-return-code
      (`Count()`, surface.cpp:1360-1365). `*out` isn't cleared on failure, and the cooperative level is checked before the flags.
    - Fix: copy XP's sequence: `*out = NULL` after the outer check, then `if (flags & ~0x7FF) INVALIDPARAMS; if (!coop_) NOCOOPERATIVELEVELSET;
      if (flags & 0xB0) INVALIDPARAMS;` then the bit-count and combination rules, then `if (!entries) INVALIDPARAMS`.
-     **Caution:** XP refusing DDPCAPS_PRIMARYSURFACE could break Win9x-era games that pass it and never ran on NT. If such a
-     game turns up, keep accepting it (log it) as a deliberate difference.
+     Windows 98's ddraw.dll refuses DDPCAPS_PRIMARYSURFACE the same way: the same `flags & 0xB0` test is in
+     DirectX 6.1a's (4.06.03.0518) and DirectX 7.0's (4.07.00.0700) CreatePalette. Measured on XP on IDirectDraw
+     and IDirectDraw7: DDERR_INVALIDPARAMS.
 2. **GetCaps returns the creation flags instead of rebuilding them** (edge case).
    - XP (GetCaps.c:25-51) reports only the size bit, 8BITENTRIES, ALLOW256 and the dynamic PRIMARYSURFACE. **DDPCAPS_ALPHA is never
      reported**, nor INITIALIZE.

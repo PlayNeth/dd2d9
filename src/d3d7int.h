@@ -294,8 +294,9 @@ public:
     STDMETHOD(GetInfo)(DWORD id, void* info, DWORD size) override {
         if (!info || !size) return DDERR_INVALIDOBJECT;
         memset(info, 0, size);
-        (void)id;
-        return S_FALSE;  // no driver to ask (S §GetInfo)
+        // Ids 1 to 3 are Direct3D's own, and a retail build has nothing for them; any
+        // other is the driver's, and there is none to ask (S §GetInfo).
+        return id >= 1 && id <= 3 ? S_FALSE : E_FAIL;
     }
 
     // For VertexBuffer7::ProcessVertices.

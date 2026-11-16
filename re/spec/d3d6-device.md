@@ -675,6 +675,9 @@ the whole buffer** (`DrawIndexedPrimitiveVB_6dea9edb.c:28-31`; mingw `d3d.h:1194
 - Vertex(lpVertex) / Index(wIndex): copy into a 32 KB batch (vertex size from the FVF); full → the batch is
   drawn (keeping the strip/fan continuity), an error ends the Begin/End (**no "in Begin" check**: called
   outside a Begin they write through the stale batch pointer) (`Vertex_6deb4610.c:16-47`, `Index_6deb46a6.c:16-38`).
+  Before the device's first Begin the batch's size is 0, so the first Vertex finds it "full", draws nothing and
+  fails: DDERR_INVALIDPARAMS (measured on XP, Index too). After a Begin and its End both return D3D_OK; Index
+  inside a Begin that isn't indexed → DDERR_INVALIDPARAMS (measured).
 - End(flags): the rest is drawn; **0 primitives (too few vertices, or an invalid type) → DDERR_INVALIDPARAMS**
   (`FlushBeginEndBatch_6deb3ef5.c:23-25`); the Begin state is cleared in every case (`End_6deb4725.c:16-27`,
   `CleanupBeginEnd_6deb3dbf.c:7-11`). **D3DERR_NOTINBEGIN is never returned by d3dim.dll** (grep).
@@ -831,7 +834,8 @@ Version-dependent behaviour (creation version `dev+4`, whatever interface is cal
     start vertex; transformed VBs clipped unless DONOTCLIP. Device2's ≥ 65536-vertex split need not be copied
     (D3D9 takes the batch whole), except that XP's strip/fan remainder bug is not worth reproducing.
 17. **Begin/Vertex/Index/End**: batch to D3D9 DrawPrimitiveUP; End with 0 primitives → DDERR_INVALIDPARAMS;
-    no NOTINBEGIN; Vertex/Index outside Begin: ignore with D3D_OK (XP writes through a stale pointer).
+    no NOTINBEGIN; Vertex/Index outside Begin: DDERR_INVALIDPARAMS before the device's first Begin, then ignored
+    with D3D_OK (XP writes through a stale pointer).
 18. **Clip status**: EXTENTS3 refused only on version 3 devices; GetClipStatus as DX7.
 19. **ValidateDevice, ComputeSphereVisibility**: share dd2d9's Device7 code (S items 17, 19).
 20. **Execute/Pick/GetPickRecords/CreateExecuteBuffer** per §9 (NULL viewport = current; the viewport

@@ -157,10 +157,20 @@ HRESULT Surface::QueryInterface(REFIID r, void** out, int version) {
 // interface it was created with, as ddraw.dll counts it), and lives until the root is
 // destroyed.
 ULONG Surface::AddRef(int slot) {
+    static LONG handOuts;  // first references so far, of any surface: their order (InterfacesHeld)
     InterlockedIncrement(&total_);
     const LONG r = InterlockedIncrement(&refs_[slot]);
+    if (r == 1 && slot <= kRefV7) handedOut_[slot] = InterlockedIncrement(&handOuts);
     TraceRef("AddRef", slot, r);
     return ULONG(r);
+}
+
+int Surface::InterfacesHeld(LONG when[kRefV7 + 1]) const {
+    int n = 0;
+    for (int slot = kRefV1; slot <= kRefV7; slot++)
+        if (refs_[slot] > 0) when[n++] = handedOut_[slot];
+    if (!n) when[n++] = handedOut_[SlotFor(version)];
+    return n;
 }
 
 // log=2: reference changes on the primary's flip chain (when a game lets go of its old
@@ -241,9 +251,11 @@ void Surface::Detach(const Surface* oldRoot) {
 // Testing ddraw.dll with DDCREATE_EMULATIONONLY showed the primary and Z buffers can be
 // lost even in system memory.
 // As ddraw.dll (spec: re/spec/surface-lock-dc.md, section 9): every surface but those
-// created in system memory on request; the primary's flip chain always.
+// created in system memory on request and managed textures (system memory to ddraw.dll,
+// the video-memory copy being Direct3D's); the primary's flip chain always.
 bool Surface::CanBeLost() const {
-    return !sysmemRequested || isPrimary || (root && root->isPrimary);
+    const bool managed = (desc.ddsCaps.dwCaps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) != 0;
+    return !(sysmemRequested || managed) || isPrimary || (root && root->isPrimary);
 }
 
 bool Surface::IsLost(bool poll) const {

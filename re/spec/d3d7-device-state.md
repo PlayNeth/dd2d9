@@ -135,10 +135,14 @@ On a non-T&L device (`0x31ac = 0x88`) states ≥ 136 in this mask never reach th
 2. Retired state → **DDERR_INVALIDPARAMS** (lines 29-35), recording or not.
 3. WRAP0-7 while texture-coordinate remapping is active: returns the value the application set, from
    the remap table (lines 37-50).
-4. Otherwise `*pValue = array[state]` (line 51-53), **D3D_OK**. No range check; NULL pValue faults.
+4. Otherwise `*pValue = array[state]` (line 51-53), **D3D_OK**. No range check; NULL pValue faults. A state of 256
+   or more reads the retired-state table and the array past their ends: on XP 256, 287 and 288 gave D3D_OK, 300
+   and 1000 DDERR_INVALIDPARAMS (SetRenderState(256), (300) and (1000) D3D_OK). dd2d9 answers D3D_OK with 0.
 - Values never set read back as their initial value. The array starts as **0xFFFFFFFF** everywhere
   (`stateInitialize_7391a31b.c:29-33`), so on a DDI ≥ 4 device (every DX7 HAL/TL device) ANTIALIAS (2),
-  EDGEANTIALIAS (40), 42, 50, 61-63, 96-127, 149, 150 and 153-255 read **0xFFFFFFFF** (see defaults).
+  EDGEANTIALIAS (40), 42, 50, 61-63, 96-127, 149, 150 and 153-255 read **0xFFFFFFFF** (see defaults). The
+  software (RGB) device is below DDI 4: measured on XP, its ANTIALIAS and EDGEANTIALIAS read 0, and every other
+  state reads as the hardware device's.
 
 ## Render-state defaults — `DIRECT3DDEVICEI::stateInitialize` (`stateInitialize_7391a31b.c`)
 
@@ -494,7 +498,7 @@ ddrval is returned (e.g. D3DERR_UNSUPPORTEDCOLOROPERATION...). NULL pdwPasses fa
    catch at `@739270fb-7392711a`; the catch-object slot is inferred).
 4. Any other ID: flush (error returned), then the driver's GetDriverState callback: handled with ddrval 0 →
    D3D_OK; handled with an error → data zeroed, **E_FAIL**; not handled → data zeroed, **S_FALSE** (231-262).
-   No size check against the ID.
+   No size check against the ID. Measured on XP: IDs 0, 4 and 9 → E_FAIL.
 
 ## SetRenderTarget / GetRenderTarget — `SetRenderTarget_7391feea.c` (codes `@7391feea-739201f2`), `SetRenderTargetI_73926b99.c`, `GetRenderTarget_739201fa.c`
 
@@ -573,7 +577,8 @@ The behaviours dd2d9's Direct3D 7 (`src/d3d7*.cpp`) implements, and how.
 2. **SetRenderState**: no validation; recording rejects retired states with DDERR_INVALIDPARAMS; otherwise store and
    return D3D_OK even for retired states. Ignore (do not forward) states ≥ 256 rather than reproduce XP's memory
    corruption; still return D3D_OK.
-3. **GetRenderState**: DDERR_INVALIDPARAMS for retired states, stored value otherwise (0xFFFFFFFF for never-set).
+3. **GetRenderState**: DDERR_INVALIDPARAMS for retired states, stored value otherwise (0xFFFFFFFF for
+   never-set; ANTIALIAS and EDGEANTIALIAS 0 on the software device).
 4. **SetTextureStageState/GetTextureStageState**: no validation in XP; dd2d9 should store stages 0-7 and silently
    ignore stage ≥ 8 (D3D_OK) instead of corrupting memory. Keep ADDRESS separate from ADDRESSU/ADDRESSV in storage.
 5. **SetTexture**: AddRef new/Release old (real surface references); stage ≥ 8 ignored; a surface that is not a texture
@@ -600,7 +605,7 @@ The behaviours dd2d9's Direct3D 7 (`src/d3d7*.cpp`) implements, and how.
 14. **Load**: the rect rules above (including the source-size bound on the destination rect and NULL rect with a dest
     point → DDERR_INVALIDPARAMS), palette and colour-key copying, mip-level matching, cube faces selected by flags.
 15. **SetRenderTarget**: NULL → DDERR_INVALIDOBJECT; 3DDEVICE/bit depth/2048 checks; palette rule; keep the viewport.
-16. **GetInfo**: zero the buffer; S_FALSE for IDs 1-3 and for anything else (no driver).
+16. **GetInfo**: zero the buffer; S_FALSE for IDs 1-3, E_FAIL for anything else (no driver to answer).
 17. **ValidateDevice**: dd2d9 has no driver callback; XP returns E_NOTIMPL in that case, but games treat that as
     failure. Return D3D_OK with 1 pass unless the stage setup is something D3D9 cannot do (then the matching
     D3DERR_UNSUPPORTED* code). This is a deliberate difference.

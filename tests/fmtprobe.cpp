@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "fmtprobe.h"
+
 static FILE* g_out;
 
 static void Describe(const DDPIXELFORMAT& f, char* out, size_t n) {
@@ -616,21 +618,26 @@ static void EightBitMode(IDirectDraw4* dd) {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
+    // (DirectDrawCreateEx by name: DirectX 6's ddraw.dll doesn't have it.)
+    const auto found =
+        reinterpret_cast<CreateExFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ddraw.dll"), "DirectDrawCreateEx")));
+    if (!strncmp(cmd, "try ", 4)) return FmtprobeTry(cmd + 4, found);
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* name = strrchr(path, '\\') + 1;
     CharLowerA(name);
     const bool asked6 = strstr(cmd, "dx6") || strstr(name, "dx6");
     strcpy(name, asked6 ? "fmtprobe-dx6.txt" : "fmtprobe.txt");
+    if (!strncmp(cmd, "section ", 8)) return FmtprobeSection(cmd + 8, path, found);
+    char file[MAX_PATH];
+    strcpy(file, path);
     g_out = fopen(path, "w");
     if (!g_out) return 1;
-    // (DirectDrawCreateEx by name: DirectX 6's ddraw.dll doesn't have it.)
+    setvbuf(g_out, nullptr, _IONBF, 0);  // (each line in the file at once: what was asked last, if it ends early)
     const HMODULE ddraw = GetModuleHandleA("ddraw.dll");
     GetModuleFileNameA(ddraw, path, MAX_PATH);
     fprintf(g_out, "ddraw.dll: %s\n", path);
-    using CreateEx = HRESULT(WINAPI*)(GUID*, void**, REFIID, IUnknown*);
-    const auto createEx =
-        asked6 ? nullptr : reinterpret_cast<CreateEx>(reinterpret_cast<void*>(GetProcAddress(ddraw, "DirectDrawCreateEx")));
+    const CreateExFn createEx = asked6 ? nullptr : found;
     IDirectDraw* dd1 = nullptr;
     HRESULT hr = DirectDrawCreate(nullptr, &dd1, nullptr);
     if (!dd1) {
@@ -732,5 +739,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     if (dd4) dd4->Release();
     dd1->Release();
     fclose(g_out);
+    if (createEx) FmtprobeMore(file);
     return 0;
 }

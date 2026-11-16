@@ -57,8 +57,13 @@ LONG Buffer::PitchFor(int w, const Format& f) {
     return LONG((f.RowBytes(DWORD(w)) + 7) & ~7u);
 }
 
+// The sizes a surface can have: each side up to 65535 (ddraw.dll keeps them in 16 bits, and
+// makes a 65535x1 surface in system memory), and no more pixels than 16384x16384, so that
+// every size in bytes (4 a pixel, rows and slack included) fits 32 bits with room.
+static bool SizeFits(int w, int h) { return w > 0 && h > 0 && w <= 0xFFFF && h <= 0xFFFF && int64_t(w) * h <= 16384 * 16384; }
+
 Buffer* Buffer::Create(int w, int h, const Format& f) {
-    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return nullptr;
+    if (!SizeFits(w, h)) return nullptr;
     auto* b = new (std::nothrow) Buffer();
     if (!b) return nullptr;
     b->w = w;
@@ -87,7 +92,7 @@ Buffer* Buffer::Create(int w, int h, const Format& f) {
 }
 
 Buffer* Buffer::CreateLayout(int w, int h, const Format& f) {
-    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return nullptr;  // (as Create)
+    if (!SizeFits(w, h)) return nullptr;
     auto* b = new (std::nothrow) Buffer();
     if (!b) return nullptr;
     b->w = w;
@@ -99,7 +104,7 @@ Buffer* Buffer::CreateLayout(int w, int h, const Format& f) {
 }
 
 Buffer* Buffer::CreateExternal(void* mem, int w, int h, LONG pitch, const Format& f) {
-    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return nullptr;  // (as Create: sizes the blitter can take)
+    if (!SizeFits(w, h)) return nullptr;
     auto* b = new (std::nothrow) Buffer();
     if (!b) return nullptr;
     b->w = w;

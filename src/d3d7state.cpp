@@ -54,6 +54,9 @@ Device7::Device7(Direct3D7* d3d, DevKind kind, Surface* rt, Surface* z, Palette*
                         {144, FALSE}, {148, D3DMCS_MATERIAL}, {147, D3DMCS_MATERIAL}, {145, D3DMCS_COLOR1},
                         {146, D3DMCS_COLOR2}, {151, D3DVBLEND_DISABLE}, {152, 0}};
     for (const Def& d : defs) rs_[d.s] = d.v;
+    // The software device is below DDI 4 (S §Render-state defaults): of the states such a
+    // device starts at 0, these two can be read.
+    if (kind == kRGB) rs_[D3DRENDERSTATE_ANTIALIAS] = rs_[D3DRENDERSTATE_EDGEANTIALIAS] = 0;
     for (auto& st : tss_) std::fill(std::begin(st), std::end(st), 0xFFFFFFFFu);
     for (DWORD i = 0; i < 8; i++) {
         DWORD* t = tss_[i];
@@ -345,7 +348,7 @@ HRESULT Device7::GetRenderState(D3DRENDERSTATETYPE s, DWORD* v) {
     if (!v) return DDERR_INVALIDPARAMS;
     if (Retired(s)) return DDERR_INVALIDPARAMS;
     Guard l;
-    *v = DWORD(s) < 256 ? rs_[s] : 0;
+    *v = DWORD(s) < 256 ? rs_[s] : 0;  // (past its tables XP reads what lies behind them)
     return D3D_OK;
 }
 

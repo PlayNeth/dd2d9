@@ -151,11 +151,12 @@ const DevKind kTableKind[4] = {kRamp, kRGB, kHAL, kMMX};
 
 // The devices a version lists, in order (A: IDirect3D Ramp, RGB, HAL; IDirect3D2 also MMX,
 // as XP's Drivers registry key exists there (Wine's test_find_device); IDirect3D3 RGB, HAL).
-std::vector<int> DeviceList(int version) {
+// A DDCREATE_EMULATIONONLY object has no hardware device.
+std::vector<int> DeviceList(int version, bool hardware) {
     std::vector<int> l;
     if (version < 3) l.push_back(0);
     l.push_back(1);
-    if (GpuGetCaps().valid) l.push_back(2);
+    if (hardware && GpuGetCaps().valid) l.push_back(2);
     if (version == 2) l.push_back(3);
     return l;
 }
@@ -202,7 +203,7 @@ HRESULT D3D::InnerQuery(REFIID r, void** out) {
 
 HRESULT D3D::EnumDevices(LPD3DENUMDEVICESCALLBACK cb, void* ctx, int version) try {
     if (!CodeOk(reinterpret_cast<void*>(cb))) return DDERR_INVALIDPARAMS;
-    for (int i : DeviceList(version)) {
+    for (int i : DeviceList(version, dd->capsSide != DDraw::kEmulationOnly)) {
         D3DDEVICEDESC hal, hel;
         DescsFor(i, version, &hal, &hel);
         if (cb(&g_guids[i], g_descs[i], g_names[i], &hal, &hel, ctx) != D3DENUMRET_OK) break;
@@ -221,7 +222,7 @@ HRESULT D3D::FindDevice(D3DFINDDEVICESEARCH* s, D3DFINDDEVICERESULT* r, int vers
     int found = -1;
     bool foundHw = false;
     D3DDEVICEDESC fh = {}, fs = {};
-    for (int i : DeviceList(version)) {
+    for (int i : DeviceList(version, dd->capsSide != DDraw::kEmulationOnly)) {
         D3DDEVICEDESC hal, hel;
         DescsFor(i, version, &hal, &hel);
         const bool hw = hal.dcmColorModel != 0;
@@ -446,6 +447,7 @@ HRESULT D3D::F3::CreateVertexBuffer(D3DVERTEXBUFFERDESC* desc, IDirect3DVertexBu
     if (desc->dwNumVertices >= 0x10000) return D3DERR_TOOMANYVERTICES;
     if (desc->dwCaps & D3DVBCAPS_OPTIMIZED) return DDERR_INVALIDPARAMS;
     if ((desc->dwFVF & 0xFFFFF000) || !FvfSize6(desc->dwFVF)) return D3DERR_INVALIDVERTEXFORMAT;
+    if (!desc->dwNumVertices) return DDERR_INVALIDPARAMS;  // (XP: no memory of no size)
     VBuf* vb = nullptr;
     try {
         vb = new VBuf(o, *desc, flags);
@@ -938,6 +940,9 @@ HRESULT D3DLegacyQuerySurface(Surface* s, REFIID riid, void** out, int version) 
         if (!obj) return E_OUTOFMEMORY;
     } else {
         if (KindOf(riid) == kBadGuid) return E_INVALIDARG;  // Direct3DCreateDevice's answer
+        // The device asks the interface it is given for an old-size description, which
+        // IDirectDrawSurface4 and 7 refuse: no device through those.
+        if (version >= 4) return DDERR_INVALIDPARAMS;
         Device* d;
         const HRESULT hr = d3d->CreateDeviceI(riid, s, version, 1, &d);
         if (FAILED(hr)) return hr;

@@ -994,6 +994,7 @@ HRESULT Device::BeginI(D3DPRIMITIVETYPE t, DWORD fvf, const void* verts, DWORD n
     const HRESULT hr = CheckViewport();
     if (FAILED(hr)) return hr;
     inBegin = true;  // no check that one is open already
+    batchMade = true;
     beginType = t;
     beginFvf = fvf;
     beginFlags = flags;
@@ -1007,7 +1008,10 @@ HRESULT Device::BeginI(D3DPRIMITIVETYPE t, DWORD fvf, const void* verts, DWORD n
 
 HRESULT Device::VertexI(const void* v) {
     Guard l;
-    if (!inBegin || beginIndexed || !v) return D3D_OK;  // XP writes through a stale pointer
+    // Outside a Begin XP writes through a stale pointer into its batch, and before the
+    // device's first Begin there is no batch: that fails.
+    if (!batchMade) return DDERR_INVALIDPARAMS;
+    if (!inBegin || beginIndexed || !v) return D3D_OK;
     const UINT size = FvfSize6(beginFvf);
     const auto* p = static_cast<const uint8_t*>(v);
     try {
@@ -1020,7 +1024,8 @@ HRESULT Device::VertexI(const void* v) {
 
 HRESULT Device::IndexI(WORD i) {
     Guard l;
-    if (!inBegin || !beginIndexed) return D3D_OK;
+    if (!batchMade || (inBegin && !beginIndexed)) return DDERR_INVALIDPARAMS;  // as Vertex; no indices in a plain Begin
+    if (!inBegin) return D3D_OK;
     try {
         batchI.push_back(i);
     } catch (const std::bad_alloc&) {

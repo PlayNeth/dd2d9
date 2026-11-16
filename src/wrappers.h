@@ -66,7 +66,7 @@ public:
         if (!r || r->left < 0 || r->top < 0 || r->left > r->right || r->top > r->bottom || r->bottom > s->H() ||
             r->right > s->W())
             return DDERR_INVALIDPARAMS;
-        return (s->desc.ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ? DDERR_INVALIDPARAMS : DD_OK;
+        return (s->desc.ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ? DDERR_UNSUPPORTED : DD_OK;
     }
     STDMETHOD(Blt)(LPRECT d, I* src, LPRECT sr, DWORD f, LPDDBLTFX fx) {
         Surface* ss = S(src);
@@ -214,18 +214,26 @@ public:
     // IDirectDrawSurface7
     // Managed textures only. The checks come before the pointer is used, as in ddraw.dll
     // (where a NULL one faults into DDERR_INVALIDPARAMS).
-    STDMETHOD(SetPriority)(DWORD p) { return SetManaged(&s->priority, p); }
+    STDMETHOD(SetPriority)(DWORD p) {
+        Guard l;
+        const HRESULT hr = s->ManagedTextureCheck();
+        if (SUCCEEDED(hr)) s->priority = p;
+        return hr;
+    }
     STDMETHOD(GetPriority)(LPDWORD p) { return GetManaged(s->priority, p); }
-    STDMETHOD(SetLOD)(DWORD v) { return SetManaged(&s->lod, v); }
+    // One of a mipmap's levels; a texture that isn't a mipmap takes none, not even 0.
+    STDMETHOD(SetLOD)(DWORD v) {
+        Guard l;
+        const HRESULT hr = s->ManagedTextureCheck();
+        if (FAILED(hr)) return hr;
+        const DDSURFACEDESC2& d = s->desc;
+        if (!(d.ddsCaps.dwCaps & DDSCAPS_MIPMAP) || v >= d.dwMipMapCount) return DDERR_INVALIDPARAMS;
+        s->lod = v;
+        return DD_OK;
+    }
     STDMETHOD(GetLOD)(LPDWORD v) { return GetManaged(s->lod, v); }
 
 private:
-    HRESULT SetManaged(DWORD* field, DWORD v) {
-        Guard l;
-        const HRESULT hr = s->ManagedTextureCheck();
-        if (SUCCEEDED(hr)) *field = v;
-        return hr;
-    }
     HRESULT GetManaged(const DWORD& field, DWORD* out) {
         Guard l;
         const HRESULT hr = s->ManagedTextureCheck();

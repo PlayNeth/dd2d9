@@ -106,7 +106,7 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
         if (flags & DDBLT_ROTATIONANGLE) return DDERR_INVALIDPARAMS;
         if (fx->dwDDFX & DDBLTFX_ARITHSTRETCHY) return DDERR_NOSTRETCHHW;
         if (fx->dwDDFX & (DDBLTFX_ROTATE90 | DDBLTFX_ROTATE180 | DDBLTFX_ROTATE270)) return DDERR_NOROTATIONHW;
-        if (!src) return DDERR_INVALIDPARAMS;  // ddraw.dll's blitter faults on it
+        if (!src) return DDERR_EXCEPTION;  // ddraw.dll's blitter faults on it, and that is what it returns
     } else if (flags & DDBLT_ROTATIONANGLE) {
         return DDERR_NOROTATIONHW;
     } else if (!src) {
@@ -266,8 +266,8 @@ HRESULT Surface::BltFast(DWORD x, DWORD y, Surface* src, RECT* srcRect, DWORD tr
         if (!hasCk[kCkDestBlt]) return DDERR_INVALIDPARAMS;
         flags = DDBLT_KEYDEST;
         break;
-    default:  // both keys: what ddraw.dll's blitter makes of it wasn't determined
-        return DDERR_INVALIDPARAMS;
+    default:  // both at once: ddraw.dll sets up neither key and copies
+        break;
     }
     if (clipper) return DDERR_BLTFASTCANTCLIP;
     RECT d = {LONG(x), LONG(y), LONG(int64_t(x) + w), LONG(int64_t(y) + h)};

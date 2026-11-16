@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.8.1',
+  version : '1.8.2',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -79,11 +79,12 @@ executable('d3d7test', 'tests/d3d7test.cpp',
   link_args : static_link + ['-mwindows'],
   install : false)
 
-# What a ddraw.dll and its driver list as texture formats (see the file's comment). Built
+# What a ddraw.dll and its driver answer (see the two files' comments). Built
 # without SSE (the project's -msse2 undone): it is run on machines of the time, a Pentium II
 # among them, where dd2d9 itself doesn't run.
-executable('fmtprobe', 'tests/fmtprobe.cpp',
-  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32')],
+executable('fmtprobe', 'tests/fmtprobe.cpp', 'tests/fmtprobe2.cpp',
+  dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
+                  cpp.find_library('advapi32')],
   cpp_args : ['-march=pentium', '-mno-sse2', '-mno-sse', '-mno-mmx', '-mfpmath=387'],
   link_args : static_link + ['-mwindows'],
   install : false)

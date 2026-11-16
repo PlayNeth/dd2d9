@@ -3,6 +3,72 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.2
+`fmtprobe` asks much more (below), and was run again on Windows XP SP3 with two display
+drivers and with dd2d9; where dd2d9 1.8.1 answered otherwise than XP it now answers the same.
+Windows 98's `ddraw.dll` (DirectX 6.1a and 7.0) was read for the checks named below.
+- **A stretched `Blt` takes the pixels XP takes.** dd2d9 sampled at each destination pixel's
+  left edge; XP's blitter samples at its centre when it enlarges (in 16.16 steps across,
+  exactly down) and steps through the source in whole pixels, carrying the remainder, when it
+  shrinks: 4 pixels to 7 take source pixels 1 1 2 2 3 4 4 across and 1 1 2 3 3 4 4 down
+  (dd2d9 took 1 1 2 2 3 3 4), 8 to 3 take 2 5 7 (1 3 6). Through a clip list each clip
+  rectangle is a stretch of its own part of the source, with XP's rounding of that part's
+  edges. Mirrored blits were XP's already, and a surface stretched onto an overlapping part of
+  itself keeps the left-edge sampling, as XP does there. Blits the GPU does (Direct3D
+  targets) are as before.
+- `BltFast` with both `DDBLTFAST_SRCCOLORKEY` and `DDBLTFAST_DESTCOLORKEY` copies without a
+  key (it was `DDERR_INVALIDPARAMS`); `Blt` with `DDBLT_DDFX` and no source is
+  `DDERR_EXCEPTION`, as XP's blitter faults there.
+- Managed textures are never lost: not by exclusive mode, not by a display mode change. They
+  were, like video-memory surfaces. `SetLOD` on one takes the levels a mipmap has, and none on
+  a texture that isn't a mipmap (`DDERR_INVALIDPARAMS`; any value was stored).
+- `TestCooperativeLevel` out of exclusive mode returns `DDERR_WRONGMODE` when the display
+  isn't in the mode the object set last: only `SetDisplayMode` moves that mode, as in XP, not
+  `RestoreDisplayMode` or leaving exclusive mode. A game that went exclusive, set 640x480 and
+  came back to normal mode got `DD_OK`.
+- Leaving exclusive mode no longer sets a window's style again when dd2d9 hadn't changed it:
+  the window got two `WM_STYLECHANGED` for a style that stayed the same; XP sends none.
+- `EnumSurfaces` lists a surface once for each interface version of it that is held
+  (`IDirectDrawSurface`, 2, 3, ...), the one handed out last first, as XP walks its list.
+- **The emulation layer's caps** (`GetCaps`' second structure) are `ddraw.dll`'s own: the same
+  380 bytes on both XP machines, and now dd2d9's. They were the driver's caps with a few
+  fields changed: no destination colour key and no FourCC blits in XP's, alpha and
+  1-, 2- and 4-bit palettes that dd2d9's didn't list.
+- **A `DDCREATE_EMULATIONONLY` object has no hardware**: its driver caps are
+  `DDCAPS_NOHARDWARE`, a video-memory surface is `DDERR_NODIRECTDRAWHW`, and Direct3D lists
+  only the software devices. It had the full driver caps, made video-memory surfaces and
+  listed the hardware devices.
+- **`CreatePalette` with `DDPCAPS_PRIMARYSURFACE` is `DDERR_INVALIDPARAMS`.** dd2d9 let it
+  through "for games made on Windows 9x"; Windows 98's `ddraw.dll` refuses it with the same
+  test as XP's, in DirectX 6.1a and in DirectX 7.0.
+- Surfaces: a width or height above 65535 is `DDERR_INVALIDPARAMS` (it was
+  `E_OUTOFMEMORY`), and surfaces up to 65535 wide or tall are made (above 16384 they were
+  `E_OUTOFMEMORY`), as long as they have no more pixels than 16384 by 16384 has;
+  a Z buffer of 24 bits in 24 can't be made in system memory
+  (`DDERR_INVALIDPIXELFORMAT`), as XP's emulation layer has none, and one of 15 bits with 1
+  of stencil can (it was `E_NOTIMPL`; in video memory it is `DDERR_INVALIDPIXELFORMAT`);
+  `AddOverlayDirtyRect` on a system-memory surface returns `E_NOTIMPL` (it was
+  `DDERR_INVALIDPARAMS`); a Direct3D device asked for through `QueryInterface` of a surface's
+  `IDirectDrawSurface4` or `IDirectDrawSurface7` is `DDERR_INVALIDPARAMS` (through the older
+  interfaces it is made, as before).
+- Direct3D 7: the software device's `ANTIALIAS` and `EDGEANTIALIAS` render states start at 0
+  (the hardware devices' at 0xFFFFFFFF, as before); `GetInfo` of an id Direct3D doesn't
+  answer itself is `E_FAIL` (it was `S_FALSE`); `DrawPrimitive` with a primitive type that
+  doesn't exist returns `D3D_OK` and draws nothing (it was `DDERR_INVALIDPARAMS`);
+  `CreateVertexBuffer` with no vertices is `DDERR_INVALIDPARAMS`.
+- Direct3D 3: `Vertex` and `Index` before the device's first `Begin`, and `Index` inside a
+  `Begin` that isn't indexed, are `DDERR_INVALIDPARAMS`; `DrawPrimitive` with a vertex format
+  that has no position returns `D3D_OK` and draws nothing (it was `DDERR_INVALIDPARAMS`);
+  `CreateVertexBuffer` with no vertices is `DDERR_INVALIDPARAMS`.
+- `fmtprobe` has a second part: the registry keys and files Direct3D's device lists depend on,
+  every device list and Z-buffer format, the caps as hex words, reference counts,
+  `EnumSurfaces`, stretched, clipped and overlapping blits, texture-management calls,
+  palettes, clears through Direct3D 1-3's viewports, each device's default states, exclusive
+  mode step by step (`TestCooperativeLevel`, lost surfaces, the window's messages, gamma
+  ramps), emulation-only objects, and some 300 calls with missing or invalid arguments. Each
+  section, and each of those calls, runs in a process of its own, so that a `ddraw.dll` that
+  crashes or hangs in one loses only that one.
+
 ## 1.8.1
 What Windows XP SP3's `ddraw.dll` answers was measured with `fmtprobe` on a machine of the
 time (a Voodoo3 and the software devices); where dd2d9 1.8.0 answered otherwise it now
