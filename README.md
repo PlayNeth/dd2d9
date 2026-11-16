@@ -275,6 +275,10 @@ All checks pass under Wine 11 (wined3d, Xvfb).
 
 ---
 
+## Credits
+
+- **KyoriAsh**, for testing obscure games and helping out in general.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). dd2d9 contains no Microsoft code or binaries.
