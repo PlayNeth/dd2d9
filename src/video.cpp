@@ -153,10 +153,6 @@ std::string Translate(const std::string& cmd, std::string* natural, HWND* natura
         if (Lower(t[3]) == "default") g_devices->erase(alias);
         else if (Number(t[3], &h)) (*g_devices)[alias] = Device{reinterpret_cast<HWND>(intptr_t(h)), false};
         Recount();
-    } else if (verb == "close") {
-        if (alias == "all") g_devices->clear();
-        else g_devices->erase(alias);
-        Recount();
     } else if (verb == "put" && g_devices->count(alias)) {
         Device& d = (*g_devices)[alias];
         // put <alias> destination [at x y w h] [wait|notify...]
@@ -215,9 +211,11 @@ std::string Translate(const std::string& cmd, std::string* natural, HWND* natura
 }
 
 // A device opened with a command string in its own child window of the game's (see
-// "mciSendCommand" below, where it joins the command interface's devices).
-void BeforeStringCommand(const std::string& cmd);
-void AfterStringCommand(const std::string& cmd, MCIERROR e);
+// "mciSendCommand" below, where it joins the command interface's devices), and the devices
+// a "close" makes dd2d9 forget (StringClose: known again if the close fails).
+struct StringClose;
+StringClose* BeforeStringCommand(const std::string& cmd);
+void AfterStringCommand(const std::string& cmd, MCIERROR e, StringClose* closed);
 
 MCIERROR WINAPI HookSendStringA(LPCSTR cmd, LPSTR ret, UINT len, HWND callback) {
     if (!cmd) return DD2D9_NEXT(g_sendStringA)(cmd, ret, len, callback);
@@ -225,9 +223,9 @@ MCIERROR WINAPI HookSendStringA(LPCSTR cmd, LPSTR ret, UINT len, HWND callback) 
     HWND naturalWindow = nullptr;
     const std::string sent = Translate(cmd, &natural, &naturalWindow);
     if (!natural.empty()) PlaceNatural(natural, naturalWindow);
-    BeforeStringCommand(cmd);
+    StringClose* const closed = BeforeStringCommand(cmd);
     const MCIERROR e = DD2D9_NEXT(g_sendStringA)(sent.c_str(), ret, len, callback);
-    AfterStringCommand(cmd, e);
+    AfterStringCommand(cmd, e, closed);
     return e;
 }
 
@@ -244,7 +242,7 @@ MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback
     HWND naturalWindow = nullptr;
     const std::string sent = Translate(a, &natural, &naturalWindow);
     if (!natural.empty()) PlaceNatural(natural, naturalWindow);
-    BeforeStringCommand(a);
+    StringClose* const closed = BeforeStringCommand(a);
     MCIERROR e;
     if (sent == a) {
         e = DD2D9_NEXT(g_sendStringW)(cmd, ret, len, callback);
@@ -252,7 +250,7 @@ MCIERROR WINAPI HookSendStringW(LPCWSTR cmd, LPWSTR ret, UINT len, HWND callback
         const std::wstring w(sent.begin(), sent.end());
         e = DD2D9_NEXT(g_sendStringW)(w.c_str(), ret, len, callback);
     }
-    AfterStringCommand(a, e);
+    AfterStringCommand(a, e, closed);
     return e;
 }
 
@@ -365,6 +363,16 @@ void PlaceNaturalCmd(MCIDEVICEID id, const CmdDevice& d) {  // g_videoLock not h
               r[2], r[3], static_cast<unsigned long>(e));
 }
 
+// Devices forgotten for a close that failed (e): they are still open.
+void KnowAgain(const std::map<MCIDEVICEID, CmdDevice>& closed, MCIERROR e) {
+    EnterCriticalSection(&g_videoLock);
+    for (const auto& d : closed) g_cmdDevices->insert(d);  // (not over one opened meanwhile)
+    RecountAll();
+    LeaveCriticalSection(&g_videoLock);
+    DD2D9_LOG("video: a close that failed (%lu): %u device%s still shown", static_cast<unsigned long>(e),
+              unsigned(closed.size()), closed.size() == 1 ? "" : "s");
+}
+
 MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR flags, DWORD_PTR parms) {
     InitOnce();
     if (msg == MCI_OPEN) {
@@ -383,6 +391,27 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
         }
         return e;
     }
+    if (msg == MCI_CLOSE) {
+        // Forgotten before it closes, and known again if the close fails: the device goes on
+        // playing then. Harukaze closes its CD player, whose ID its intro movie then gets, and
+        // a second thread of its closes that ID once more as the movie starts: Windows
+        // refuses (a device answers only the thread that opened it), but dd2d9 had forgotten
+        // the movie, and the screen's refresh blanked it four times a second.
+        std::map<MCIDEVICEID, CmdDevice> closed;
+        EnterCriticalSection(&g_videoLock);
+        if (g_cmdDevices) {
+            if (id == MCI_ALL_DEVICE_ID) closed.swap(*g_cmdDevices);
+            else if (auto it = g_cmdDevices->find(id); it != g_cmdDevices->end()) {
+                closed.insert(*it);
+                g_cmdDevices->erase(it);
+            }
+            RecountAll();
+        }
+        LeaveCriticalSection(&g_videoLock);
+        const MCIERROR e = real(id, msg, flags, parms);
+        if (e != 0 && !closed.empty()) KnowAgain(closed, e);
+        return e;
+    }
     EnterCriticalSection(&g_videoLock);
     if (!g_cmdDevices) g_cmdDevices = new std::map<MCIDEVICEID, CmdDevice>;
     auto& devs = *g_cmdDevices;
@@ -390,11 +419,7 @@ MCIERROR SendCommand(SendCommandFn real, MCIDEVICEID id, UINT msg, DWORD_PTR fla
     bool translated = false, natural = false, isPut = false;
     long window[4] = {0, 0, 0, 0};  // where to put the child window first (width 0: nowhere)
     CmdDevice dev = {};  // (a copy: translated without the lock)
-    if (msg == MCI_CLOSE) {
-        if (id == MCI_ALL_DEVICE_ID) devs.clear();
-        else devs.erase(id);
-        RecountAll();
-    } else if (msg == MCI_WINDOW && parms && (flags & MCI_DGV_WINDOW_HWND)) {
+    if (msg == MCI_WINDOW && parms && (flags & MCI_DGV_WINDOW_HWND)) {
         const HWND h = reinterpret_cast<const MCI_DGV_WINDOW_PARMSA*>(parms)->hWnd;
         auto it = devs.find(id);
         const HWND parent = it != devs.end() ? it->second.parent : nullptr;
@@ -477,37 +502,66 @@ MCIDEVICEID DeviceId(const std::string& alias) {
 // the game's, as with MCI_DGV_OPEN_PARENT. Rockman X Math opens its movies so, asks for
 // the window ("status ... window handle") and centres it with MoveWindow in its 640x480:
 // the movie played at its size in the corner of the screen. Played without a destination,
-// it gets its natural size, scaled, as through the command interface; closed, forgotten.
-void BeforeStringCommand(const std::string& cmd) {
+// it gets its natural size, scaled, as through the command interface; closed, forgotten
+// (before it closes, and known again if the close fails: see MCI_CLOSE in SendCommand).
+struct StringClose {
+    std::map<std::string, Device> byAlias;
+    std::map<MCIDEVICEID, CmdDevice> byId;
+};
+
+StringClose* BeforeStringCommand(const std::string& cmd) {
     const std::vector<std::string> t = Split(cmd);
-    if (t.size() < 2) return;
+    if (t.size() < 2) return nullptr;
     const std::string verb = Lower(t[0]), alias = Lower(t[1]);
-    if (verb != "play" && verb != "close") return;
+    if (verb != "play" && verb != "close") return nullptr;
+    const bool close = verb == "close", all = alias == "all";
+    StringClose closed;
     InitOnce();
     EnterCriticalSection(&g_videoLock);
-    if (!g_cmdDevices || g_cmdDevices->empty()) {
-        LeaveCriticalSection(&g_videoLock);
-        return;
+    if (close) {
+        if (all) closed.byAlias.swap(*g_devices);
+        else if (auto it = g_devices->find(alias); it != g_devices->end()) {
+            closed.byAlias.insert(*it);
+            g_devices->erase(it);
+        }
+        Recount();
     }
+    const bool anyById = g_cmdDevices && !g_cmdDevices->empty();
     LeaveCriticalSection(&g_videoLock);
-    const MCIDEVICEID id = alias == "all" ? MCI_ALL_DEVICE_ID : DeviceId(alias);  // (not under the lock)
-    if (!id) return;
-    EnterCriticalSection(&g_videoLock);
+    const MCIDEVICEID id = !anyById ? 0 : all ? MCI_ALL_DEVICE_ID : DeviceId(alias);  // (not under the lock)
     bool natural = false;
     CmdDevice dev = {};
-    if (verb == "close") {
-        if (id == MCI_ALL_DEVICE_ID) g_cmdDevices->clear();
-        else g_cmdDevices->erase(id);
-        RecountAll();
-    } else if (g_cmdDevices->count(id)) {
-        dev = (*g_cmdDevices)[id];
-        natural = !dev.placed;
+    if (id) {
+        EnterCriticalSection(&g_videoLock);
+        if (close) {
+            if (id == MCI_ALL_DEVICE_ID) closed.byId.swap(*g_cmdDevices);
+            else if (auto it = g_cmdDevices->find(id); it != g_cmdDevices->end()) {
+                closed.byId.insert(*it);
+                g_cmdDevices->erase(it);
+            }
+            RecountAll();
+        } else if (g_cmdDevices->count(id)) {
+            dev = (*g_cmdDevices)[id];
+            natural = !dev.placed;
+        }
+        LeaveCriticalSection(&g_videoLock);
     }
-    LeaveCriticalSection(&g_videoLock);
     if (natural) PlaceNaturalCmd(id, dev);
+    return closed.byAlias.empty() && closed.byId.empty() ? nullptr : new StringClose(std::move(closed));
 }
 
-void AfterStringCommand(const std::string& cmd, MCIERROR e) {
+void AfterStringCommand(const std::string& cmd, MCIERROR e, StringClose* closed) {
+    if (closed) {
+        if (e != 0) {
+            EnterCriticalSection(&g_videoLock);
+            for (const auto& d : closed->byAlias) g_devices->insert(d);  // (not over one opened meanwhile)
+            Recount();
+            LeaveCriticalSection(&g_videoLock);
+            if (!closed->byId.empty()) KnowAgain(closed->byId, e);
+            else DD2D9_LOG("video: a close that failed (%lu): its device still shown", static_cast<unsigned long>(e));
+        }
+        delete closed;
+    }
     if (e != 0) return;
     const std::vector<std::string> t = Split(cmd);
     if (t.size() < 2 || Lower(t[0]) != "open") return;
@@ -538,6 +592,14 @@ void AfterStringCommand(const std::string& cmd, MCIERROR e) {
               static_cast<void*>(window));
 }
 
+// Whether a handle of the game's names this window: the whole handle, or its low half alone,
+// which Windows takes for the same window (Harukaze keeps the player's window handle in 16
+// bits, as a Windows 95 handle fitted).
+bool SameWindow(HWND window, HWND given) {
+    const uintptr_t w = reinterpret_cast<uintptr_t>(window), g = reinterpret_cast<uintptr_t>(given);
+    return w == g || (g && !HIWORD(g) && LOWORD(g) == LOWORD(w));
+}
+
 // The game moving or sizing a device's own child window (MoveWindow, SetWindowPos): in its
 // mode's coordinates, scaled as an MCIWnd window is; the device then counts as placed by the
 // game (its picture scaled with the window). False: not one.
@@ -548,7 +610,7 @@ bool DeviceWindowToReal(HWND h, long r[4]) {
     EnterCriticalSection(&g_videoLock);
     if (g_cmdDevices)
         for (const auto& d : *g_cmdDevices)
-            if (d.second.child && d.second.own == h) {
+            if (d.second.child && SameWindow(d.second.own, h)) {
                 window = d.second.window;
                 break;
             }
@@ -556,7 +618,7 @@ bool DeviceWindowToReal(HWND h, long r[4]) {
     if (!window || !InWindowToReal(window, r)) return false;
     EnterCriticalSection(&g_videoLock);
     for (auto& d : *g_cmdDevices)
-        if (d.second.child && d.second.own == h) {
+        if (d.second.child && SameWindow(d.second.own, h)) {
             d.second.gameWindow = true;
             break;
         }

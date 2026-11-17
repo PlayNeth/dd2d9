@@ -3560,6 +3560,32 @@ static LRESULT CALLBACK OwnErasePopupProc(HWND h, UINT msg, WPARAM wp, LPARAM lp
     return DefWindowProcA(h, msg, wp, lp);
 }
 
+// MCI commands from a second thread, which Windows refuses (a device answers only the thread
+// that opened it): the commands' answers.
+struct OtherThreadMci {
+    MCIDEVICEID id;      // MCI_STOP and MCI_CLOSE for this device, or
+    const char* string;  // this command string
+    MCIERROR stop, close;
+};
+
+static DWORD WINAPI OtherThreadMciProc(void* p) {
+    auto* m = static_cast<OtherThreadMci*>(p);
+    if (m->string) {
+        m->close = mciSendStringA(m->string, nullptr, 0, nullptr);
+    } else {
+        m->stop = mciSendCommandA(m->id, MCI_STOP, 0, 0);
+        m->close = mciSendCommandA(m->id, MCI_CLOSE, 0, 0);
+    }
+    return 0;
+}
+
+static void RunOnOtherThread(OtherThreadMci* m) {
+    if (HANDLE t = CreateThread(nullptr, 0, OtherThreadMciProc, m, 0, nullptr)) {
+        WaitForSingleObject(t, 5000);
+        CloseHandle(t);
+    }
+}
+
 static int RunMouse() {
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);  // the real screen, before
     HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
@@ -3747,6 +3773,20 @@ static int RunMouse() {
             const long ex = ix + long(160 * scale), ey = iy + long(120 * scale), ew = long(320 * scale), eh = long(240 * scale);
             CHECK(labs(r[0] - ex) <= 1 && labs(r[1] - ey) <= 1 && labs(r[2] - ew) <= 1 && labs(r[3] - eh) <= 1,
                   "MCI video: destination where the image is (%s; want %ld %ld %ld %ld)", out, ex, ey, ew, eh);
+            // A close that fails (from a second thread) leaves the device known: its next
+            // destination is translated too.
+            OtherThreadMci other = {0, "close v", 0, 0};
+            RunOnOtherThread(&other);
+            mciSendStringA("put v destination at 0 0 320 240", nullptr, 0, nullptr);
+            out[0] = 0;
+            mciSendStringA("where v destination", out, sizeof(out), nullptr);
+            sscanf(out, "%ld %ld %ld %ld", &r[0], &r[1], &r[2], &r[3]);
+            if (other.close != 0)
+                CHECK(labs(r[0] - ix) <= 1 && labs(r[1] - iy) <= 1 && labs(r[2] - ew) <= 1 && labs(r[3] - eh) <= 1,
+                      "MCI video after a close that failed (%lu): a destination still where the image is (%s)",
+                      static_cast<unsigned long>(other.close), out);
+            else
+                printf("SKIP MCI video, a close from a second thread: not refused here\n");
             mciSendStringA("close v", nullptr, 0, nullptr);
             mciSendStringA("open dd2d9test.avi type avivideo alias w", nullptr, 0, nullptr);
             snprintf(cmd, sizeof(cmd), "window w handle %lu", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(hwnd)));
@@ -3942,6 +3982,57 @@ static int RunMouse() {
                       "it (%s)",
                       cw.left, cw.top, cw.right, cw.bottom, out);
                 mciSendStringA("close x", nullptr, 0, nullptr);
+            }
+            // Harukaze's way: the same through the command interface, with the player's window
+            // handle kept in 16 bits (Windows takes the low half for the window).
+            MCI_DGV_OPEN_PARMSA ho = {};
+            char aviName3[] = "dd2d9test.avi";
+            ho.lpstrElementName = aviName3;
+            ho.dwStyle = WS_CHILD;
+            ho.hWndParent = hwnd;
+            if (mciSendCommandA(0, MCI_OPEN, MCI_OPEN_ELEMENT | MCI_DGV_OPEN_PARENT | MCI_DGV_OPEN_WS,
+                                reinterpret_cast<DWORD_PTR>(&ho)) == 0) {
+                MCI_DGV_STATUS_PARMSA hs = {};
+                hs.dwItem = MCI_DGV_STATUS_HWND;
+                mciSendCommandA(ho.wDeviceID, MCI_STATUS, MCI_STATUS_ITEM, reinterpret_cast<DWORD_PTR>(&hs));
+                const HWND whole = reinterpret_cast<HWND>(hs.dwReturn);
+                const HWND half = reinterpret_cast<HWND>(uintptr_t(hs.dwReturn & 0xFFFF));
+                if (IsWindow(half)) {
+                    MoveWindow(half, 304, 228, 32, 24, FALSE);
+                    MCI_PLAY_PARMS hp = {};
+                    mciSendCommandA(ho.wDeviceID, MCI_PLAY, MCI_WAIT, reinterpret_cast<DWORD_PTR>(&hp));
+                    using RectFn = BOOL(WINAPI*)(HWND, RECT*);
+                    const auto realWindowRect = reinterpret_cast<RectFn>(
+                        RealExport(GetModuleHandleA("user32.dll"), "GetWindowRect"));
+                    RECT cw = {};
+                    realWindowRect(whole, &cw);
+                    MCI_DGV_RECT_PARMS hw = {};
+                    mciSendCommandA(ho.wDeviceID, MCI_WHERE, MCI_DGV_WHERE_DESTINATION, reinterpret_cast<DWORD_PTR>(&hw));
+                    const long ex = ix + long(304 * scale), ey = iy + long(228 * scale);
+                    CHECK(labs(cw.left - ex) <= 1 && labs(cw.top - ey) <= 1 && labs(cw.right - cw.left - long(32 * scale)) <= 2 &&
+                              labs(cw.bottom - cw.top - long(24 * scale)) <= 2 && hw.rc.left == 0 && hw.rc.top == 0 &&
+                              labs(hw.rc.right - long(32 * scale)) <= 1 && labs(hw.rc.bottom - long(24 * scale)) <= 1,
+                          "MCI command, child window moved by a handle of 16 bits: over the image (%ld,%ld-%ld,%ld), the "
+                          "movie scaled in it (%ld,%ld %ldx%ld)",
+                          cw.left, cw.top, cw.right, cw.bottom, hw.rc.left, hw.rc.top, hw.rc.right, hw.rc.bottom);
+                    // And its second thread's way: the movie's ID, which had been its CD player's,
+                    // closed from there as the movie plays. Windows refuses, and the movie is
+                    // still dd2d9's to place: its window moved again is translated again.
+                    OtherThreadMci other = {ho.wDeviceID, nullptr, 0, 0};
+                    RunOnOtherThread(&other);
+                    MoveWindow(half, 100, 60, 32, 24, FALSE);
+                    realWindowRect(whole, &cw);
+                    if (other.close != 0)
+                        CHECK(labs(cw.left - (ix + long(100 * scale))) <= 1 && labs(cw.top - (iy + long(60 * scale))) <= 1,
+                              "MCI command after a close that failed (stop %lu, close %lu): the window still moved over "
+                              "the image (%ld,%ld)",
+                              static_cast<unsigned long>(other.stop), static_cast<unsigned long>(other.close), cw.left, cw.top);
+                    else
+                        printf("SKIP MCI command, a close from a second thread: not refused here\n");
+                } else {
+                    printf("SKIP MCI command, a window handle of 16 bits: not taken here\n");
+                }
+                mciSendCommandA(ho.wDeviceID, MCI_CLOSE, 0, 0);
             }
         } else {
             printf("SKIP MCI video: no AVI player (%lu)\n", static_cast<unsigned long>(e));

@@ -3,6 +3,23 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.3
+- **A movie's window moved through a window handle kept in 16 bits is scaled.** Harukaze
+  (TGL) opens its intro with `mciSendCommand` in a child window of its own
+  (`MCI_DGV_OPEN_PARENT`), asks the player for that window's handle
+  (`MCI_DGV_STATUS_HWND`), keeps its low 16 bits, as a Windows 95 handle fitted, and centres
+  the window with `MoveWindow`. Windows takes the low half for the window; dd2d9 compared
+  whole handles, didn't know the window as the movie's, and left the move in the game's
+  640x480 coordinates, then placed the movie itself: scaled, but at the image's top left
+  corner instead of its middle. Such a handle is now known as the window's.
+- **A movie whose close fails is still a movie playing.** Harukaze plays a CD track first:
+  its player gets MCI device 1 and is closed, and the intro movie, opened next, gets the same
+  number. As the movie starts, a second thread of the game stops and closes device 1 once
+  more. Windows refuses (a device answers only the thread that opened it, error 263) and
+  the movie plays on, but dd2d9 forgot it at the close, and its refresh of the unchanged
+  screen, which a movie in the window holds back, blanked the movie four times a second.
+  A close, by command or by command string, now forgets the device only if it succeeds.
+
 ## 1.8.2
 `fmtprobe` asks much more (below), and was run again on Windows XP SP3 with two display
 drivers and with dd2d9; where dd2d9 1.8.1 answered otherwise than XP it now answers the same.
