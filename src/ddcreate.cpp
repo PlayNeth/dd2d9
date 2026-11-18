@@ -208,14 +208,12 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
             if (complex || (F & DDSD_ZBUFFERBITDEPTH) || !(F & DDSD_PIXELFORMAT) || pf.dwSize != sizeof(DDPIXELFORMAT) ||
                 !(pf.dwFlags & DDPF_ZBUFFER) || !pf.dwZBitMask)
                 return DDERR_INVALIDPARAMS;
-            // With stencil: the 24+8 layouts Direct3D enumerates (EnumZBufferFormats), as
-            // ddraw.dll takes only those its driver lists; and 15 bits with 1 of stencil, which
-            // its emulation layer makes (in system memory: CreateSurface).
+            // With stencil: its depth and mask given, and then any layout (which memory takes
+            // it is CreateSurface's business), but for depth and stencil sharing bits, which
+            // dd2d9 can't keep apart.
             if (pf.dwFlags & DDPF_STENCILBUFFER) {
-                const int zBits = __builtin_popcount(pf.dwZBitMask), sBits = __builtin_popcount(pf.dwStencilBitMask);
-                const bool z24s8 = pf.dwZBufferBitDepth == 32 && pf.dwStencilBitDepth == 8 && sBits == 8 && zBits == 24;
-                const bool z15s1 = pf.dwZBufferBitDepth == 16 && pf.dwStencilBitDepth == 1 && sBits == 1 && zBits == 15;
-                if ((!z24s8 && !z15s1) || (pf.dwZBitMask & pf.dwStencilBitMask)) return DDERR_UNSUPPORTED;
+                if (!pf.dwStencilBitDepth || !pf.dwStencilBitMask) return DDERR_INVALIDPARAMS;
+                if (pf.dwZBitMask & pf.dwStencilBitMask) return DDERR_UNSUPPORTED;
             }
             depth = pf.dwZBufferBitDepth;
         }
@@ -356,10 +354,12 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         }
     }
 
-    // A Z buffer of 15 bits with 1 of stencil is the emulation layer's alone (no device of
-    // dd2d9's lists it): in system memory, and refused in video memory (measured on XP with
-    // VMware's driver, which doesn't list it either).
-    if (fmt.zbuf && fmt.bpp == 16 && fmt.a) {
+    // A Z buffer with stencil: in video memory the layouts Direct3D enumerates (24 bits with
+    // 8 of stencil: EnumZBufferFormats), as ddraw.dll's driver takes those it lists. Any other
+    // is the emulation layer's: in system memory, there too when no memory is named (ddraw.dll
+    // tries the driver first), and refused in video memory. Measured on XP: 15+1 either way
+    // round, 8+8, 12+4 and 16+16 are made in system memory; VMware's driver refused 15+1.
+    if (fmt.zbuf && fmt.a && !(fmt.bpp == 32 && __builtin_popcount(fmt.a) == 8 && __builtin_popcount(fmt.r) == 24)) {
         if (asked & DDSCAPS_VIDEOMEMORY) return DDERR_INVALIDPIXELFORMAT;
         caps |= DDSCAPS_SYSTEMMEMORY;
     }

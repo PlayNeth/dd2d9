@@ -412,6 +412,20 @@ static DWORD ClearColor16(const Format& f, DWORD color, bool software) {
     return out;
 }
 
+// A depth as the Z buffer's word: z * maxv rounded to nearest, a half to even (what
+// ddraw.dll's Clear leaves in the buffer). In integers: exact whatever the FPU's precision.
+static DWORD DepthWord(float z, DWORD maxv) {
+    if (!(z > 0.0f)) return 0;
+    if (z >= 1.0f) return maxv;
+    int e;
+    const uint64_t m = uint64_t(std::ldexp(std::frexp(z, &e), 24));  // z = m / 2^s
+    const int s = 24 - e;
+    if (s >= 64) return 0;
+    const uint64_t p = m * maxv, half = uint64_t(1) << (s - 1), rest = p & (2 * half - 1);
+    const uint64_t q = p >> s;
+    return DWORD(q + (rest > half || (rest == half && (q & 1))));
+}
+
 void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, float z, DWORD stencil) {
     Impl& p = *p_;
     if (!p.dev) return;
@@ -431,6 +445,42 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     // and the one read back are the 16-bit target's.)
     const Format& tf = p.rt->buf->fmt;
     if ((flags & D3DCLEAR_TARGET) && tf.bpp == 16 && !tf.CopyOnly()) color = ClearColor16(tf, color, p.software);
+    // The stencil value in as many bits as the buffer has (ddraw.dll's Clear: 3 clears a
+    // buffer of 1 stencil bit to 1, 2 to 0), and into the CPU copy too, which the depth read
+    // back later leaves alone: locked after a clear, the buffer shows its stencil.
+    if ((flags & D3DCLEAR_STENCIL) && p.z->buf->fmt.a) {
+        const Format& zf = p.z->buf->fmt;
+        const DWORD shift = DWORD(__builtin_ctz(zf.a));
+        stencil &= zf.a >> shift;
+        const RECT view = {LONG(p.vp.X), LONG(p.vp.Y), LONG(p.vp.X + p.vp.Width), LONG(p.vp.Y + p.vp.Height)};
+        const RECT all = {0, 0, p.z->buf->w, p.z->buf->h};
+        const DWORD bytes = zf.Bytes();
+        for (DWORD i = 0; i < std::max<DWORD>(n, 1); i++) {
+            RECT r;
+            if (!IntersectRect(&r, n ? &rects[i] : &view, &all)) continue;
+            const DWORD keep = ~zf.a, bits = stencil << shift;
+            const size_t count = size_t(r.right - r.left);
+            for (LONG y = r.top; y < r.bottom; y++) {
+                uint8_t* px = p.z->buf->Row(y) + size_t(r.left) * bytes;
+                if (bytes == 4) {  // (the usual buffers, 24 bits with 8 of stencil, every frame)
+                    auto* q = reinterpret_cast<uint32_t*>(px);
+                    for (size_t x = 0; x < count; x++) q[x] = (q[x] & keep) | bits;
+                } else {
+                    for (size_t x = 0; x < count; x++, px += bytes) WritePixel(px, bytes, (ReadPixel(px, bytes) & keep) | bits);
+                }
+            }
+        }
+        stencil &= 0xFF;  // (the GPU's has 8 bits)
+    }
+    // The depth the buffer's own word holds, as ddraw.dll's buffer does after a clear (0.9
+    // in 16 bits is 0xe665, less than 0.9): what the buffer shows locked, and what the
+    // depths drawn next are compared with. (A buffer of fewer bits than the GPU's 24: the
+    // GPU rounds a wider one's itself.)
+    if (flags & D3DCLEAR_ZBUFFER) {
+        DWORD mask, shift, maxv;
+        ZBits(p.z->buf->fmt, &mask, &shift, &maxv);
+        if (maxv && maxv < 0xFFFFFF) z = float(double(DepthWord(z, maxv)) / maxv);
+    }
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
     // Emulated W buffering's scale starts again with each whole depth clear (a frame): one
     // stray near vertex shrinks it for that frame only, not for good.

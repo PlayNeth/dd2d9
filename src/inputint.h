@@ -12,7 +12,7 @@ bool IsGameWindow(HWND h, SIZE* mode = nullptr);
 void RectFromGame(RECT* rc, const RECT& r, SIZE m);
 void RectToGame(RECT* rc, const RECT& r, SIZE m);
 
-// inputpaint.cpp's hooks, installed with input.cpp's.
+// inputpaint.cpp's hooks, installed with input.cpp's (InstallCompatHooks).
 extern ImportHook kPaintHooks[];
 extern const size_t kPaintHookCount;
 

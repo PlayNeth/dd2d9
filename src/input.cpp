@@ -228,10 +228,9 @@ ImportHook kHooks[] = {
 
 }  // namespace
 
-void InstallMouseHooks() {
-    const unsigned n =
-        PatchGameModules(kHooks, sizeof(kHooks) / sizeof(kHooks[0])) + PatchGameModules(kPaintHooks, kPaintHookCount);
-    if (n) DD2D9_LOG("mouse: %u cursor and paint imports translated for the game's display mode", n);
+ImportHook* MouseHooks(size_t* n) {
+    *n = sizeof(kHooks) / sizeof(kHooks[0]);
+    return kHooks;
 }
 
 }  // namespace dd2d9

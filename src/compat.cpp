@@ -9,6 +9,7 @@
 // The imports are patched in the game's modules (hooks.cpp): from DllMain, before the game's
 // own code runs, and in each DLL loaded later as it loads.
 #include "compatint.h"
+#include "inputint.h"
 
 #include <mmsystem.h>
 
@@ -704,7 +705,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[11];
+HookTable g_tables[14];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
@@ -761,6 +762,14 @@ void InstallCompatHooks(bool inLoaderLock) {
                    !g_config.selfSuspend && g_getThreadId && g_soundTls != TLS_OUT_OF_INDEXES &&
                        dd2d9_timerTls != TLS_OUT_OF_INDEXES};
     g_tables[10] = {kFileHooks, sizeof(kFileHooks) / sizeof(kFileHooks[0]), !g_config.noBuffering};
+    // The cursor, paint and video functions (input.cpp, inputpaint.cpp, video.cpp): always,
+    // they translate only while a display mode of dd2d9's own is shown.
+    size_t mouse, video;
+    ImportHook* const mouseHooks = MouseHooks(&mouse);
+    ImportHook* const videoHooks = VideoHooks(&video);
+    g_tables[11] = {mouseHooks, mouse, true};
+    g_tables[12] = {kPaintHooks, kPaintHookCount, true};
+    g_tables[13] = {videoHooks, video, true};
     // The tables switched on, and GetProcAddress with them, patched together (the modules
     // listed once): made once, the setting fixed for the process.
     static std::vector<ImportHook> all;
@@ -769,18 +778,15 @@ void InstallCompatHooks(bool inLoaderLock) {
         made = true;
         for (const HookTable& t : g_tables)
             if (t.on) all.insert(all.end(), t.hooks, t.hooks + t.n);
-        if (!all.empty()) {
-            all.insert(all.end(), std::begin(kProcHooks), std::end(kProcHooks));
-            // GetProcAddress hands out dd2d9's functions, which a game may keep calling after
-            // a FreeLibrary of ddraw.dll: dd2d9 stays loaded.
-            HMODULE self;
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                               reinterpret_cast<LPCWSTR>(&InstallCompatHooks), &self);
-        }
+        all.insert(all.end(), std::begin(kProcHooks), std::end(kProcHooks));
+        // GetProcAddress hands out dd2d9's functions, which a game may keep calling after
+        // a FreeLibrary of ddraw.dll: dd2d9 stays loaded.
+        HMODULE self;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           reinterpret_cast<LPCWSTR>(&InstallCompatHooks), &self);
     }
-    if (all.empty()) return;
     if (const unsigned n = PatchGameModules(all.data(), all.size(), inLoaderLock))
-        DD2D9_LOG("compat: %u imports patched (ram=%d cpu=%d cpus=%d desktopbpp=%d)", n, g_config.ramMB, g_config.cpuMHz,
+        DD2D9_LOG("hooks: %u imports patched (ram=%d cpu=%d cpus=%d desktopbpp=%d)", n, g_config.ramMB, g_config.cpuMHz,
                   g_config.cpus, g_config.desktopBpp);
 }
 

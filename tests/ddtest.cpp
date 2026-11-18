@@ -3587,6 +3587,10 @@ static void RunOnOtherThread(OtherThreadMci* m) {
 }
 
 static int RunMouse() {
+    // The address the program's GetWindowRect import holds before any DirectDraw object: a
+    // function that read it this early and calls through it after the mode is set (a
+    // compiler keeps it in a register over several calls) must get dd2d9's function too.
+    BOOL(WINAPI* volatile earlyWindowRect)(HWND, LPRECT) = GetWindowRect;
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);  // the real screen, before
     HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
     CHECK(hwnd != nullptr, "test window created");
@@ -3628,6 +3632,11 @@ static int RunMouse() {
     RECT wr = {};
     GetWindowRect(hwnd, &wr);
     CHECK(wr.left == 0 && wr.top == 0 && wr.right == 640 && wr.bottom == 480, "the window is the game's screen");
+    RECT er = {};
+    earlyWindowRect(hwnd, &er);
+    CHECK(er.left == 0 && er.top == 0 && er.right == 640 && er.bottom == 480,
+          "GetWindowRect through the import's address read before the first object: the game's screen too (%ld,%ld %ldx%ld)", er.left,
+          er.top, er.right - er.left, er.bottom - er.top);
     POINT pt = {100, 50};
     ScreenToClient(hwnd, &pt);
     CHECK(pt.x == 100 && pt.y == 50, "client and screen coordinates are the same (%ld,%ld)", pt.x, pt.y);
@@ -4779,6 +4788,64 @@ static HRESULT WINAPI CountDevices(LPSTR, LPSTR, LPD3DDEVICEDESC7, void* n) {
 
 // What fmtprobe's second part measured on Windows XP SP3 (dd2d9 1.8.2): the pixels a stretched
 // Blt takes, and the answers to calls dd2d9 answered otherwise.
+// A 64x64 target and a 16-bit Z buffer of the given masks, both in system memory, the buffer
+// attached and the RGB device made on them with the whole target as its viewport (what the
+// Z buffer checks measured on XP share). Any member may be null; FreeZRig releases them.
+struct ZRig {
+    IDirectDrawSurface7 *rt = nullptr, *z = nullptr;
+    IDirect3D7* d3d = nullptr;
+    IDirect3DDevice7* dev = nullptr;
+    HRESULT attach = E_FAIL, made = E_FAIL;
+};
+
+static ZRig MakeZRig(IDirectDraw7* dd, DWORD zmask, DWORD stencilBits, DWORD stencilMask) {
+    ZRig r;
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY;
+    d.dwWidth = d.dwHeight = 64;
+    dd->CreateSurface(&d, &r.rt, nullptr);
+    d.dwFlags |= DDSD_PIXELFORMAT;
+    d.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY;
+    d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    d.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER | (stencilBits ? DDPF_STENCILBUFFER : 0);
+    d.ddpfPixelFormat.dwZBufferBitDepth = 16;
+    d.ddpfPixelFormat.dwStencilBitDepth = stencilBits;
+    d.ddpfPixelFormat.dwZBitMask = zmask;
+    d.ddpfPixelFormat.dwStencilBitMask = stencilMask;
+    dd->CreateSurface(&d, &r.z, nullptr);
+    dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&r.d3d));
+    if (r.rt && r.z && r.d3d) {
+        r.attach = r.rt->AddAttachedSurface(r.z);
+        r.made = r.d3d->CreateDevice(IID_IDirect3DRGBDevice, r.rt, &r.dev);
+    }
+    if (r.dev) {
+        D3DVIEWPORT7 vp = {0, 0, 64, 64, 0.0f, 1.0f};
+        r.dev->SetViewport(&vp);
+    }
+    return r;
+}
+
+// The Z buffer's word at 32,32, locked for it (0xDEAD: not locked).
+static DWORD ZRigWord(const ZRig& r) {
+    DDSURFACEDESC2 l = {};
+    l.dwSize = sizeof(l);
+    if (FAILED(r.z->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return 0xDEAD;
+    const DWORD v = *reinterpret_cast<const WORD*>(static_cast<const BYTE*>(l.lpSurface) + 32 * l.lPitch + 32 * 2);
+    r.z->Unlock(nullptr);
+    return v;
+}
+
+static void FreeZRig(ZRig* r) {
+    if (r->dev) r->dev->Release();
+    if (r->d3d) r->d3d->Release();
+    if (r->rt && r->z) r->rt->DeleteAttachedSurface(0, r->z);
+    if (r->z) r->z->Release();
+    if (r->rt) r->rt->Release();
+    *r = ZRig();
+}
+
 static int RunMeasured() {
     IDirectDraw7* dd = nullptr;
     if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
@@ -5025,6 +5092,39 @@ static int RunMeasured() {
             {32768, 1, DDSCAPS_SYSTEMMEMORY, DD_OK},
             {32768, 1, DDSCAPS_VIDEOMEMORY, DD_OK},
         };
+        // And as many pixels as memory has room for (measured on XP in 8 bits, with their
+        // pitches: 16385x16384 16392, 65535x4097 65536, 20000x20000 20000).
+        const struct {
+            DWORD w, h;
+            LONG pitch;
+        } many[] = {{16385, 16384, 16392}, {65535, 4097, 65536}, {20000, 20000, 20000}};
+        for (const auto& z : many) {
+            DDSURFACEDESC2 m = {};
+            m.dwSize = sizeof(m);
+            m.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            m.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+            m.dwWidth = z.w;
+            m.dwHeight = z.h;
+            m.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            m.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+            m.ddpfPixelFormat.dwRGBBitCount = 8;
+            s = nullptr;
+            hr = dd->CreateSurface(&m, &s, nullptr);
+            DDSURFACEDESC2 l = {};
+            l.dwSize = sizeof(l);
+            BYTE last = 0;
+            HRESULT lh = E_FAIL;
+            if (s && SUCCEEDED(lh = s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) {
+                BYTE* p = static_cast<BYTE*>(l.lpSurface) + size_t(z.h - 1) * size_t(l.lPitch) + (z.w - 1);
+                *p = 0x5A;
+                last = *p;
+                s->Unlock(nullptr);
+            }
+            CHECK(hr == DD_OK && lh == DD_OK && l.lPitch == z.pitch && last == 0x5A,
+                  "CreateSurface %lux%lu in 8 bits in system memory: 0x%08lx, Lock 0x%08lx, pitch %ld (%ld), its last pixel written",
+                  z.w, z.h, hr, lh, l.lPitch, z.pitch);
+            if (s) s->Release();
+        }
         for (const auto& z : sized) {
             d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | z.caps;
             d.dwWidth = z.w;
@@ -5086,6 +5186,102 @@ static int RunMeasured() {
                       hr, got.lPitch, pf.dwFlags, pf.dwZBufferBitDepth, pf.dwZBitMask, pf.dwStencilBitMask);
             if (s) s->Release();
         }
+        // The emulation layer makes any stencil layout in 16 or 32 bits; one no driver takes
+        // is its also when no memory is named (measured on XP with the Voodoo3: 16+16).
+        const struct {
+            DWORD memory, bits, zmask, stencilBits, stencilMask;
+            LONG pitch;
+        } layouts[] = {
+            {DDSCAPS_SYSTEMMEMORY, 16, 0x7FFF, 1, 0x8000, 128}, {DDSCAPS_SYSTEMMEMORY, 16, 0xFF00, 8, 0xFF, 128},
+            {DDSCAPS_SYSTEMMEMORY, 16, 0xFFF0, 4, 0xF, 128},    {DDSCAPS_SYSTEMMEMORY, 32, 0xFFFF0000, 16, 0xFFFF, 256},
+            {0, 32, 0xFFFF0000, 16, 0xFFFF, 256},
+        };
+        for (const auto& k : layouts) {
+            d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | k.memory;
+            d.dwWidth = d.dwHeight = 64;
+            d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            d.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER | DDPF_STENCILBUFFER;
+            d.ddpfPixelFormat.dwZBufferBitDepth = k.bits;
+            d.ddpfPixelFormat.dwStencilBitDepth = k.stencilBits;
+            d.ddpfPixelFormat.dwZBitMask = k.zmask;
+            d.ddpfPixelFormat.dwStencilBitMask = k.stencilMask;
+            s = nullptr;
+            hr = dd->CreateSurface(&d, &s, nullptr);
+            DDSURFACEDESC2 got = {};
+            got.dwSize = sizeof(got);
+            if (s) s->GetSurfaceDesc(&got);
+            const DDPIXELFORMAT& pf = got.ddpfPixelFormat;
+            CHECK(hr == DD_OK && got.ddsCaps.dwCaps == (DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY) && got.lPitch == k.pitch &&
+                      pf.dwFlags == (DDPF_ZBUFFER | DDPF_STENCILBUFFER) && pf.dwZBufferBitDepth == k.bits &&
+                      pf.dwZBitMask == k.zmask && pf.dwStencilBitDepth == k.stencilBits && pf.dwStencilBitMask == k.stencilMask,
+                  "a Z buffer of %lu bits, Z mask 0x%lx and stencil mask 0x%lx, %s: 0x%08lx, caps 0x%lx, pitch %ld, flags 0x%lx, "
+                  "%lu bits, Z mask 0x%lx, %lu stencil bits, stencil mask 0x%lx (made in system memory as asked)",
+                  k.bits, k.zmask, k.stencilMask, k.memory ? "in system memory" : "no memory named", hr, got.ddsCaps.dwCaps,
+                  got.lPitch, pf.dwFlags, pf.dwZBufferBitDepth, pf.dwZBitMask, pf.dwStencilBitDepth, pf.dwStencilBitMask);
+            if (s) s->Release();
+        }
+    }
+
+    {  // A Z buffer of 15 bits with 1 of stencil under the RGB device: Clear takes the stencil
+       // value in the buffer's one bit, and the buffer locked shows it (measured on XP, the
+       // RGB and MMX devices alike; what they draw with it isn't checked: see the spec).
+        ZRig r = MakeZRig(dd, 0xFFFE, 1, 1);
+        CHECK(r.attach == DD_OK && r.made == D3D_OK, "a Z buffer of 15 bits and 1 of stencil: attached 0x%08lx, the RGB device 0x%08lx",
+              r.attach, r.made);
+        if (r.dev) {
+            const struct {
+                DWORD flags;
+                float depth;
+                DWORD stencil, want;
+            } clears[] = {
+                {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 0, 0xFFFE},    {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 1, 0xFFFF},
+                {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0.0f, 0, 0x0000},    {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0.0f, 1, 0x0001},
+                {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0.5f, 0, 0x8000},    {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0.5f, 1, 0x8001},
+                {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 2, 0xFFFE},    {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 3, 0xFFFF},
+                {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 0xFF, 0xFFFF}, {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 0xFFFFFFFF, 0xFFFF},
+                {D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 1.0f, 1, 0xFFFF},    {D3DCLEAR_ZBUFFER, 0.5f, 0, 0x8001},
+                {D3DCLEAR_STENCIL, 1.0f, 0, 0x8000},                       {D3DCLEAR_STENCIL, 1.0f, 1, 0x8001},
+            };
+            int wrong = 0;
+            char first[96] = "";
+            for (const auto& k : clears) {
+                const HRESULT ch = r.dev->Clear(0, nullptr, k.flags, 0, k.depth, k.stencil);
+                const DWORD got = ZRigWord(r);
+                if ((ch != D3D_OK || got != k.want) && !wrong++)
+                    snprintf(first, sizeof(first), "; first: flags %lu, depth %.1f, stencil 0x%lx: 0x%08lx, word 0x%04lx, want 0x%04lx",
+                             k.flags, double(k.depth), k.stencil, ch, got, k.want);
+            }
+            CHECK(wrong == 0, "a Z buffer of 15 bits and 1 of stencil cleared 14 ways and locked: %d words not XP's%s", wrong, first);
+        }
+        FreeZRig(&r);
+    }
+
+    {  // A 16-bit Z buffer under the RGB device, cleared and locked: the depth rounded to the
+       // nearest word (0.9, a float just under it, is 0xe665). Measured on XP, the RGB and
+       // MMX devices alike.
+        ZRig r = MakeZRig(dd, 0xFFFF, 0, 0);
+        CHECK(r.dev != nullptr, "a 16-bit Z buffer in system memory: the RGB device made");
+        if (r.dev) {
+            const struct {
+                float depth;
+                DWORD want;
+            } clears[] = {{0.0f, 0x0000}, {0.1f, 0x199A},  {0.25f, 0x4000}, {1.0f / 3, 0x5555}, {0.5f, 0x8000},
+                          {0.6f, 0x9999}, {0.75f, 0xBFFF}, {0.9f, 0xE665},  {0.999f, 0xFFBD},   {1.0f, 0xFFFF}};
+            int wrong = 0;
+            char first[96] = "";
+            for (const auto& k : clears) {
+                const HRESULT ch = r.dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER, 0, k.depth, 0);
+                const DWORD got = ZRigWord(r);
+                if ((ch != D3D_OK || got != k.want) && !wrong++)
+                    snprintf(first, sizeof(first), "; first: depth %.3f: 0x%08lx, word 0x%04lx, want 0x%04lx", double(k.depth), ch, got,
+                             k.want);
+            }
+            CHECK(wrong == 0, "a 16-bit Z buffer cleared to 10 depths and locked: %d words not XP's%s", wrong, first);
+        }
+        FreeZRig(&r);
     }
 
     {  // TestCooperativeLevel out of exclusive mode: the mode the object set itself is the one it expects.

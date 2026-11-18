@@ -3,6 +3,38 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.4
+What 1.8.2 left unmeasured, asked of Windows XP with new sections of `fmtprobe` and matched.
+- **Z buffers with stencil are made in any layout** the emulation layer of `ddraw.dll`
+  makes: 15 bits with 1 of stencil either way round, 8 with 8, 12 with 4, 16 with 16, in
+  system memory (all but the first were `E_NOTIMPL`). One no device lists goes to system
+  memory when no memory is named, and is `DDERR_INVALIDPIXELFORMAT` in video memory.
+- **`Clear` takes the stencil value in as many bits as the Z buffer has**, and the buffer
+  locked afterwards shows it: with 1 bit of stencil, clearing to 3 leaves 1 and clearing to 2
+  leaves 0, as XP's RGB and MMX devices do. dd2d9 passed the value on whole and showed no
+  stencil in the locked buffer.
+- **`Clear` leaves the depth a 16-bit Z buffer's word holds**: the depth times 65535,
+  rounded to the nearest word, so 0.9 (as a float, just under it) is 0xe665 in the locked
+  buffer, as on XP, and that is the depth the next draws are compared with. dd2d9 gave the
+  GPU the float and read back 0xe666.
+- **The cursor, window and video functions are dd2d9's from the moment it is loaded**, not
+  from the first display mode. They change nothing until a mode is shown scaled or in a
+  window, but a function that had read an import's address before the mode was set (a
+  compiler keeps it in a register across several calls, a `WinMain` with its message loop
+  for one) went on calling Windows' `GetCursorPos`, `GetWindowRect` and the rest, and got
+  the real screen's coordinates. `fmtprobe`'s "exclusive mode" section showed it: built with
+  1.8.4's other changes, four of its lines gave the real window's size.
+- **Surfaces of very many pixels are made**, as long as memory has room: XP made
+  16385x16384, 65535x4097 and 20000x20000 (400 MB) in 8 bits; dd2d9 stopped at the pixels of
+  16384x16384. Its limits are now 2^30 pixels and 2 GB.
+- A Z buffer's depths read back for a lock are converted a third faster (0.58 to 0.37 ms
+  for 640x480, the same words), and all of dd2d9's import hooks are patched in one pass
+  over the game's modules.
+- `fmtprobe` asks all of that: where each stencil layout is made, what each device does
+  with a Z buffer of 15 bits and 1 of stencil (clears, the depth test, every stencil
+  operation, the stencil test), surfaces up to 65535x65535, and the words each device
+  leaves in Z buffers of 16, 24 and 32 bits after clears and draws at ten depths.
+
 ## 1.8.3
 - **A movie's window moved through a window handle kept in 16 bits is scaled.** Harukaze
   (TGL) opens its intro with `mciSendCommand` in a child window of its own

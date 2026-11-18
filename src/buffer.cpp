@@ -58,9 +58,11 @@ LONG Buffer::PitchFor(int w, const Format& f) {
 }
 
 // The sizes a surface can have: each side up to 65535 (ddraw.dll keeps them in 16 bits, and
-// makes a 65535x1 surface in system memory), and no more pixels than 16384x16384, so that
-// every size in bytes (4 a pixel, rows and slack included) fits 32 bits with room.
-static bool SizeFits(int w, int h) { return w > 0 && h > 0 && w <= 0xFFFF && h <= 0xFFFF && int64_t(w) * h <= 16384 * 16384; }
+// makes a 65535x1 surface in system memory), and fewer than 2^30 pixels, so that a count of
+// its pixels' bytes in any format (4 a pixel at most) fits 32 bits. ddraw.dll has no such
+// limit but its memory (XP made 20000x20000 in 8 bits, 400 MB; 32768x32768 it had not made
+// ten minutes later). Create holds the memory itself under 2 GB.
+static bool SizeFits(int w, int h) { return w > 0 && h > 0 && w <= 0xFFFF && h <= 0xFFFF && int64_t(w) * h < (int64_t(1) << 30); }
 
 Buffer* Buffer::Create(int w, int h, const Format& f) {
     if (!SizeFits(w, h)) return nullptr;
@@ -70,10 +72,15 @@ Buffer* Buffer::Create(int w, int h, const Format& f) {
     b->h = h;
     b->fmt = f;
     b->pitch = PitchFor(w, f);
-    size_t size;
-    if (f.BlockCompressed()) size = size_t(b->pitch) * size_t((h + 3) & ~3);
-    else if (f.Planar()) size = size_t(b->pitch) * h + size_t(b->pitch / 2) * ((h + 1) / 2) * 2;
-    else size = size_t(b->pitch) * h;
+    uint64_t bytes;
+    if (f.BlockCompressed()) bytes = uint64_t(b->pitch) * uint64_t((h + 3) & ~3);
+    else if (f.Planar()) bytes = uint64_t(b->pitch) * h + uint64_t(b->pitch / 2) * ((h + 1) / 2) * 2;
+    else bytes = uint64_t(b->pitch) * h;
+    if (bytes > 0x7E000000) {  // (with the slack below, under 2 GB: offsets into it are kept in 32 bits, signed)
+        delete b;
+        return nullptr;
+    }
+    const size_t size = size_t(bytes);
     // Slack around the pixels: games clip sprites loosely and write a few rows past
     // the bottom (Xuan-Yuan Sword 3 EX, 6 rows of its 640x480 back buffer) or above the
     // top, which the video memory or heap slack of XP's drivers took without a crash.

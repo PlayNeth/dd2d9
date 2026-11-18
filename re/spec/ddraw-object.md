@@ -218,8 +218,10 @@ Entry:
      limit (`FUN_7375b6a5`), unless the device has DDCAPS2_WIDESURFACES → INVALIDPARAMS. At creation a width or
      height above 0xFFFF → INVALIDPARAMS (the surface keeps them in 16 bits; `FUN_73737235`:689-703; measured:
      70000x1 in system memory). 65535x1, 1x65535 and 32768x1 are made in system memory (measured); in video
-     memory the driver decides. dd2d9 makes surfaces up to 65535 a side with at most 16384x16384 pixels
-     (`SizeFits`, buffer.cpp); with more, DDERR_OUTOFMEMORY.
+     memory the driver decides. With many pixels, in 8 bits: 16385x16384 (pitch 16392), 65535x4097 and 20000x20000
+     (400 MB) are made too; 32768x32768 (1 GB) had not been ten minutes later on a machine with 1 GB (measured).
+     dd2d9 makes surfaces up to 65535 a side with fewer than 2^30 pixels and under 2 GB (`SizeFits` and
+     `Buffer::Create`, buffer.cpp); with more, DDERR_OUTOFMEMORY.
 8. MIPMAP (217-237): MIPMAPCOUNT of 0, **a non-power-of-two width or height, or more levels than
    log2(max side)+1 → INVALIDPARAMS**.
 9. DDSD_PIXELFORMAT (238-310):
@@ -962,7 +964,19 @@ shows up with invalid parameters, unusual sequences or exact-return-code checks.
 - Z depths: XP's validator allows any depth ≥ 8 and leaves the rest to the driver or the HEL. Measured in system
   memory (the HEL): 16 bits, 15 bits with 1 of stencil, and 32-bit layouts (24 or 32 bits of depth, 24 with 8 of
   stencil either way round) are made; 8, 12 and 24 bits in 24 are DDERR_INVALIDPIXELFORMAT. dd2d9 makes the same,
-  and in video memory, the driver's business, also 24 bits in 24. 15 with 1 of stencil: in system memory only
-  (also when no memory type is asked for); in video memory DDERR_INVALIDPIXELFORMAT, as VMware's driver answered
-  (the Voodoo3's made it). With a device it is a 24-bit depth buffer with 8 bits of stencil on the GPU, the depth
-  read back into its 15 bits (what XP's devices do with one wasn't measured: none lists it).
+  and in video memory, the driver's business, also 24 bits in 24.
+- Z buffers with stencil (measured, XP with the Voodoo3): the HEL makes any layout in 16 or 32 bits (15+1 with the
+  stencil bit low or high, 8+8, 12+4, 16+16, 24+8); with no memory named the driver is tried first and the HEL
+  makes what it refuses (the Voodoo3 took every 16-bit layout and no 32-bit one; VMware's driver refused 15+1).
+  dd2d9: its devices list 24+8, which goes where it is asked; any other layout is made in system memory, there too
+  when no memory is named, and is DDERR_INVALIDPIXELFORMAT in video memory. Depth and stencil masks sharing bits:
+  E_NOTIMPL (not measured).
+- A 15+1 Z buffer with a device (measured, XP): the RGB and MMX devices are created with it (the HAL with one in
+  video memory on the Voodoo3). Clear writes depth into the 15 bits and the stencil value's low bit into the 1
+  (stencil 2 → 0; 3, 0xff → 1), each alone when asked alone; dd2d9 does the same, the stencil also into the CPU
+  copy. The software rasterizer doesn't know the layout: with the stencil disabled it reads and writes the word
+  as 16 bits of depth (a quad at 0.25 leaves 0x3fff), and with it enabled the rows read as 32-bit 24+8 values
+  read and written at each 16-bit word, every pixel taking its stencil from the low byte of the depth its left
+  neighbour wrote (a quad at 0.5 over a buffer cleared to 1.0: KEEP 0xffff, ZERO 0xff00, REPLACE with n 0xff00 | n, INCR
+  0xff00, DECR 0xfffe, INVERT 0xff00, whatever the stencil cleared to). dd2d9 doesn't copy that: its GPU buffer
+  has 24 bits of depth and 8 of stencil, the depth read back into the 15 bits.

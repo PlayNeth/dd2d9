@@ -391,6 +391,21 @@ Arguments: `(count, pRects, flags, color, z, stencil)`; flags TARGET 1, ZBUFFER 
 2. Unless the driver reports D3DPRASTERCAPS_ZBUFFERLESSHSR, if `flags & (ZBUFFER|STENCIL)`:
    - no Z buffer attached → **D3DERR_ZBUFFER_NOTPRESENT** (0x88760816);
    - STENCIL requested and the Z format lacks DDPF_STENCILBUFFER → **D3DERR_STENCILBUFFER_NOTPRESENT** (0x88760817).
+   The stencil value is taken in the buffer's stencil bits (measured with 1 bit: 2 clears to 0, 3 and 0xff to 1).
+   The depth in the buffer is z·max rounded to the nearest word, a half to even (measured, XP SP3's RGB and MMX
+   devices, at 0, 0.1, 0.25, 1/3, 0.5, 0.6, 0.75, 0.9, 0.999, 1: 16 bits 0x0 0x199a 0x4000 0x5555 0x8000 0x9999
+   0xbfff 0xe665 0xffbd 0xffff; 24 bits 0x0 0x19999a 0x400000 0x555555 0x800000 0x999999 0xbfffff 0xe66665 0xffbe76
+   0xffffff, placed by the Z mask, high or low, with stencil or without; 32 bits 0x0 0x199999a0 0x40000000
+   0x55555580 0x80000000 0x999999ff 0xbfffffff 0xe66665ff 0xffbe76ff 0xffffffff). dd2d9 clears a 16-bit buffer to
+   that word's depth; a 24-bit one gets the GPU's own rounding (0xe66666, 0xffbe77 there) and a 32-bit one the
+   GPU's 24 bits widened.
+   What those rasterizers then draw (Z test ALWAYS, a quad at each of those depths over a buffer cleared to 0):
+   z·0xffffff00 cut to an integer, of which a 16-bit buffer takes the high word (0x0 0x1999 0x3fff 0x5555 0x7fff
+   0x9999 0xbfff 0xe666 0xffbe) and **every 32-bit buffer the whole 32 bits, whatever its masks** (0x0 0x19999980
+   0x3fffffc0 0x55555500 0x7fffff80 0x99999900 0xbfffff00 0xe6666500 0xffbe7600: a buffer with its Z mask low, or
+   with stencil, gets the same word). A quad at exactly 1.0 leaves the buffer as it was. dd2d9 doesn't follow any
+   of this: its depths are the GPU's, read back rounded (0x4000 and 0x8000 at 0.25 and 0.5, 0xffff at 1.0).
+   A Voodoo3's HAL: clears cut (0x1999 0x3fff 0x5555 0x7fff 0x9999 0xbfff 0xe665 0xffbd 0xffff), draws its own.
 3. `(flags & 7) == 0` → **DDERR_INVALIDPARAMS**. Other flag bits are ignored, not rejected.
 4. Rectangles (`ProcessRects`): `pRects == NULL` (whatever `count`) → one rectangle = the whole viewport;
    otherwise each rectangle is intersected with the viewport and empty results dropped, so **`count = 0` with a

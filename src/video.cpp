@@ -742,10 +742,10 @@ bool VideoOnWindow(HWND hwnd) {
     return on;
 }
 
-void InstallVideoHooks() {
-    InitOnce();
-    if (const unsigned n = PatchGameModules(kHooks, sizeof(kHooks) / sizeof(kHooks[0])))
-        DD2D9_LOG("video: %u MCI imports translated for the game's display mode", n);
+ImportHook* VideoHooks(size_t* n) {
+    InitOnce();  // (before any of them can be called)
+    *n = sizeof(kHooks) / sizeof(kHooks[0]);
+    return kHooks;
 }
 
 }  // namespace dd2d9

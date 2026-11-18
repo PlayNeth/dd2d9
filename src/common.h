@@ -257,12 +257,15 @@ void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interfac
 // ---------------------------------------------------------------- mouse (input.cpp)
 // The game's user32 imports of the cursor functions point at dd2d9's, which translate
 // between the real screen and the game's display mode while it is shown scaled or in a
-// window. Installed in every module loaded so far (each time exclusive mode starts), and in
-// those loaded later.
-void InstallMouseHooks();
+// window, and pass everything on otherwise. Installed with the compatibility hooks (see
+// InstallCompatHooks) when dd2d9 is loaded, not when the mode is set: a function that reads
+// an import's address before the mode is set and calls through it afterwards (compilers
+// keep it in a register over several calls) would go on calling Windows' function.
+struct ImportHook;
+ImportHook* MouseHooks(size_t* n);
 // Videos that Windows' player (MCI) draws into the game's window, placed where the image is
-// (video.cpp): installed with the mouse's, in a display mode of dd2d9's own.
-void InstallVideoHooks();
+// (video.cpp): installed with the mouse's.
+ImportHook* VideoHooks(size_t* n);
 // Whether such a video draws into `hwnd` now (an MCI device "window ... handle" of it).
 bool VideoOnWindow(HWND hwnd);
 // A top-level window the game made in its mode's coordinates (a popup over its screen), shown
@@ -270,9 +273,10 @@ bool VideoOnWindow(HWND hwnd);
 bool ScaledPopup(HWND h, double* sx, double* sy);
 
 // ---------------------------------------------------------------- compatibility (compat.cpp)
-// ram=, cpu=, cpus=: what the game is told about the machine. From DllMain (inLoaderLock:
-// sets the affinity too) and again for each new DirectDraw object (DLLs loaded since, where
-// the loader doesn't announce them: see PatchGameModules).
+// Every import hook of dd2d9's: ram=, cpu=, cpus= (what the game is told about the machine)
+// and the other compatibility settings', the mouse's and the videos'. From DllMain
+// (inLoaderLock: sets the affinity too) and again for each new DirectDraw object and display
+// mode (DLLs loaded since, where the loader doesn't announce them: see PatchGameModules).
 void InstallCompatHooks(bool inLoaderLock);
 // Whether a DirectDraw object's primary is shown in `hwnd` (ddgdi.cpp). Any thread.
 bool PresentsOnWindow(HWND hwnd);

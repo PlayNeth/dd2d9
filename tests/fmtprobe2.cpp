@@ -1090,6 +1090,17 @@ static LRESULT CALLBACK ProbeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
+// The window's rectangle, through the program's import each time it is asked: a wrapper
+// that points the import at its own function while the program runs (dd2d9 did, up to
+// 1.8.3, at the first SetDisplayMode) is then asked every time. Called inline, the compiler
+// loads the import's address once for several calls, and those after the first went on to
+// Windows' GetWindowRect: which ones depended on the build.
+[[gnu::noinline]] static RECT WindowRect(HWND hwnd) {
+    RECT r = {};
+    GetWindowRect(hwnd, &r);
+    return r;
+}
+
 static void Pump(int ms) {
     const DWORD until = GetTickCount() + DWORD(ms);
     do {
@@ -1147,8 +1158,7 @@ static void Exclusive(IDirectDraw7* dd) {
         DDSURFACEDESC2 m = {};
         m.dwSize = sizeof(m);
         dd->GetDisplayMode(&m);
-        RECT wr = {};
-        GetWindowRect(hwnd, &wr);
+        const RECT wr = WindowRect(hwnd);
         P("    mode %lux%lu, %lu bits; window at %ld,%ld %ldx%ld, style 0x%lx, ex style 0x%lx, %s%s\n", m.dwWidth, m.dwHeight,
           m.ddpfPixelFormat.dwRGBBitCount, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top, DWORD(GetWindowLongA(hwnd, GWL_STYLE)),
           DWORD(GetWindowLongA(hwnd, GWL_EXSTYLE)), IsIconic(hwnd) ? "minimized" : "not minimized",
@@ -3299,6 +3309,381 @@ static void MoreSurfaces(IDirectDraw7* dd7, IDirectDraw* dd1) {
 
 // The sections, each run in a process of its own ("fmtprobe section N") that appends to the
 // file: one that crashes or hangs on some ddraw.dll costs that section only.
+// ---------------------------------------------------------------- a 15+1 Z buffer, large surfaces
+// What 1.8.2 left unmeasured. A Z buffer of 15 bits with 1 of stencil: where it is made when
+// no memory is named, and what each device does with it (its clears, its depth test, each
+// stencil operation and the stencil test, read back from the buffer's words and the
+// target's pixels). Surfaces of very many pixels in system memory.
+static IDirectDrawSurface7* MakeZ(IDirectDraw7* dd, DWORD memory, DWORD bits, DWORD zmask, DWORD stencilBits, DWORD stencilMask,
+                                  HRESULT* hr) {
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | memory;
+    d.dwWidth = d.dwHeight = 64;
+    d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    d.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER | (stencilBits ? DDPF_STENCILBUFFER : 0);
+    d.ddpfPixelFormat.dwZBufferBitDepth = bits;
+    d.ddpfPixelFormat.dwZBitMask = zmask;
+    d.ddpfPixelFormat.dwStencilBitDepth = stencilBits;
+    d.ddpfPixelFormat.dwStencilBitMask = stencilMask;
+    IDirectDrawSurface7* s = nullptr;
+    *hr = dd->CreateSurface(&d, &s, nullptr);
+    return s;
+}
+
+static void StencilZCreation(IDirectDraw7* dd) {
+    P("\nZ buffers through CreateSurface (64x64) with no memory named, beside each memory named:\n");
+    struct Z {
+        const char* name;
+        DWORD bits, zmask, stencilBits, stencilMask;
+    };
+    static const Z kZ[] = {{"15 bits and 1 of stencil", 16, 0xFFFE, 1, 0x0001},
+                           {"15 bits and 1 of stencil, stencil high", 16, 0x7FFF, 1, 0x8000},
+                           {"16 bits", 16, 0xFFFF, 0, 0},
+                           {"24 bits and 8 of stencil", 32, 0xFFFFFF00, 8, 0xFF},
+                           {"8 bits and 8 of stencil", 16, 0xFF00, 8, 0xFF},
+                           {"12 bits and 4 of stencil", 16, 0xFFF0, 4, 0xF},
+                           {"16 bits and 16 of stencil", 32, 0xFFFF0000, 16, 0xFFFF}};
+    for (const Z& k : kZ) {
+        P("  %s:\n", k.name);
+        for (DWORD memory : {DWORD(0), DWORD(DDSCAPS_SYSTEMMEMORY), DWORD(DDSCAPS_VIDEOMEMORY)}) {
+            HRESULT hr;
+            IDirectDrawSurface7* s = MakeZ(dd, memory, k.bits, k.zmask, k.stencilBits, k.stencilMask, &hr);
+            P("    %s: 0x%08lx", memory == 0 ? "no memory named" : memory == DDSCAPS_SYSTEMMEMORY ? "system memory" : "video memory", hr);
+            if (s) {
+                DDSURFACEDESC2 got = {};
+                got.dwSize = sizeof(got);
+                s->GetSurfaceDesc(&got);
+                P(", caps 0x%08lx, pitch %ld, flags 0x%lx, %lu bits, Z mask 0x%lx, %lu stencil bits, stencil mask 0x%lx",
+                  got.ddsCaps.dwCaps, got.lPitch, got.ddpfPixelFormat.dwFlags, got.ddpfPixelFormat.dwZBufferBitDepth,
+                  got.ddpfPixelFormat.dwZBitMask, got.ddpfPixelFormat.dwStencilBitDepth, got.ddpfPixelFormat.dwStencilBitMask);
+                s->Release();
+            }
+            P("\n");
+        }
+    }
+}
+
+// The Z buffer's word and the target's pixel at 32,32 (0xdead, 0xdeadbeef: not locked).
+static DWORD ZWord(IDirectDrawSurface7* z) {
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    if (FAILED(z->Lock(nullptr, &d, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return 0xDEAD;
+    const DWORD v = *reinterpret_cast<const WORD*>(static_cast<const BYTE*>(d.lpSurface) + 32 * d.lPitch + 32 * 2);
+    z->Unlock(nullptr);
+    return v;
+}
+static DWORD TargetPixel(IDirectDrawSurface7* s) {
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    if (FAILED(s->Lock(nullptr, &d, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return 0xDEADBEEF;
+    const DWORD bytes = d.ddpfPixelFormat.dwRGBBitCount / 8;
+    DWORD v = 0;
+    memcpy(&v, static_cast<const BYTE*>(d.lpSurface) + 32 * d.lPitch + 32 * bytes, bytes > 4 ? 4 : bytes);
+    s->Unlock(nullptr);
+    return v;
+}
+// A quad over the whole target at depth z.
+static HRESULT Quad(IDirect3DDevice7* dev, float z, D3DCOLOR color) {
+    D3DTLVERTEX v[4] = {};
+    const float xy[4][2] = {{0, 0}, {64, 0}, {0, 64}, {64, 64}};
+    for (int i = 0; i < 4; i++) {
+        v[i].sx = xy[i][0];
+        v[i].sy = xy[i][1];
+        v[i].sz = z;
+        v[i].rhw = 1.0f;
+        v[i].color = color;
+    }
+    HRESULT hr = dev->BeginScene();
+    if (FAILED(hr)) return hr;
+    hr = dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_TLVERTEX, v, 4, 0);
+    dev->EndScene();
+    return hr;
+}
+
+static void StencilZDevice(IDirectDraw7* dd, const char* name, const GUID& guid, bool hardware) {
+    P("\nA Z buffer of 15 bits and 1 of stencil (Z mask 0xfffe, stencil mask 0x1) with the %s device:\n", name);
+    IDirect3D7* d3d = nullptr;
+    dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d));
+    if (!d3d) {
+        P("  (no IDirect3D7)\n");
+        return;
+    }
+    const DWORD memory = hardware ? DDSCAPS_VIDEOMEMORY : DDSCAPS_SYSTEMMEMORY;
+    HRESULT hr;
+    IDirectDrawSurface7* rt = Make(dd, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | memory, 64, 64, nullptr, &hr);
+    P("  target in %s memory: 0x%08lx\n", hardware ? "video" : "system", hr);
+    IDirectDrawSurface7* z = MakeZ(dd, memory, 16, 0xFFFE, 1, 1, &hr);
+    P("  Z buffer in %s memory: 0x%08lx\n", hardware ? "video" : "system", hr);
+    if (!z && hardware) {
+        z = MakeZ(dd, DDSCAPS_SYSTEMMEMORY, 16, 0xFFFE, 1, 1, &hr);
+        P("  Z buffer in system memory instead: 0x%08lx\n", hr);
+    }
+    IDirect3DDevice7* dev = nullptr;
+    if (rt && z) {
+        P("  AddAttachedSurface: 0x%08lx\n", rt->AddAttachedSurface(z));
+        P("  CreateDevice: 0x%08lx\n", d3d->CreateDevice(guid, rt, &dev));
+    }
+    if (dev) {
+        D3DVIEWPORT7 vp = {0, 0, 64, 64, 0.0f, 1.0f};
+        dev->SetViewport(&vp);
+        dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
+        dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+        DWORD a = 0, b = 0, c = 0;
+        dev->GetRenderState(D3DRENDERSTATE_STENCILMASK, &a);
+        dev->GetRenderState(D3DRENDERSTATE_STENCILWRITEMASK, &b);
+        dev->GetRenderState(D3DRENDERSTATE_STENCILREF, &c);
+        P("  at first: STENCILMASK 0x%lx, STENCILWRITEMASK 0x%lx, STENCILREF 0x%lx, the buffer's word 0x%04lx\n", a, b, c, ZWord(z));
+
+        P("  Clear(ZBUFFER | STENCIL), then the buffer's word:\n");
+        struct ClearCase {
+            float depth;
+            DWORD stencil;
+        };
+        static const ClearCase kClears[] = {{1.0f, 0}, {1.0f, 1}, {0.0f, 0}, {0.0f, 1}, {0.5f, 0}, {0.5f, 1},
+                                            {1.0f, 2}, {1.0f, 3}, {1.0f, 0xFF}, {1.0f, 0xFFFFFFFF}};
+        for (const ClearCase& k : kClears) {
+            hr = dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, k.depth, k.stencil);
+            P("    depth %.1f, stencil 0x%lx: 0x%08lx, word 0x%04lx\n", double(k.depth), k.stencil, hr, ZWord(z));
+        }
+        dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 1);
+        hr = dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER, 0, 0.5f, 0);
+        P("    after depth 1.0 and stencil 1, Clear(ZBUFFER) alone to 0.5: 0x%08lx, word 0x%04lx\n", hr, ZWord(z));
+        hr = dev->Clear(0, nullptr, D3DCLEAR_STENCIL, 0, 1.0f, 0);
+        P("    then Clear(STENCIL) alone to 0: 0x%08lx, word 0x%04lx\n", hr, ZWord(z));
+        hr = dev->Clear(0, nullptr, D3DCLEAR_STENCIL, 0, 1.0f, 1);
+        P("    then Clear(STENCIL) alone to 1: 0x%08lx, word 0x%04lx\n", hr, ZWord(z));
+
+        P("  the depth test (ZFUNC LESSEQUAL), the buffer cleared to depth 0.5 and stencil 0, the target to 0:\n");
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 0.5f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+        dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
+        hr = Quad(dev, 0.75f, 0xFFFF0000);
+        P("    a red quad at 0.75: 0x%08lx, pixel 0x%lx, word 0x%04lx\n", hr, TargetPixel(rt), ZWord(z));
+        hr = Quad(dev, 0.25f, 0xFFFFFFFF);
+        P("    a white quad at 0.25: 0x%08lx, pixel 0x%lx, word 0x%04lx\n", hr, TargetPixel(rt), ZWord(z));
+        dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 0.5f, 1);
+        hr = Quad(dev, 0.25f, 0xFF00FF00);
+        P("    stencil 1 and a green quad at 0.25, the stencil disabled: 0x%08lx, pixel 0x%lx, word 0x%04lx\n", hr, TargetPixel(rt),
+          ZWord(z));
+
+        P("  each stencil operation as STENCILPASS (STENCILFUNC ALWAYS, ZFUNC ALWAYS, a quad at 0.5 over depth 1.0):\n");
+        dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_ALWAYS);
+        P("    STENCILENABLE: 0x%08lx\n", dev->SetRenderState(D3DRENDERSTATE_STENCILENABLE, TRUE));
+        dev->SetRenderState(D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
+        struct Op {
+            const char* name;
+            DWORD op, start, ref, writeMask;
+        };
+        static const Op kOps[] = {{"KEEP from 1", D3DSTENCILOP_KEEP, 1, 0, 0xFFFFFFFF},
+                                  {"ZERO from 1", D3DSTENCILOP_ZERO, 1, 1, 0xFFFFFFFF},
+                                  {"REPLACE with 1 from 0", D3DSTENCILOP_REPLACE, 0, 1, 0xFFFFFFFF},
+                                  {"REPLACE with 2 from 1", D3DSTENCILOP_REPLACE, 1, 2, 0xFFFFFFFF},
+                                  {"REPLACE with 3 from 0", D3DSTENCILOP_REPLACE, 0, 3, 0xFFFFFFFF},
+                                  {"REPLACE with 0xff from 0", D3DSTENCILOP_REPLACE, 0, 0xFF, 0xFFFFFFFF},
+                                  {"REPLACE with 1 from 0, STENCILWRITEMASK 0", D3DSTENCILOP_REPLACE, 0, 1, 0},
+                                  {"REPLACE with 1 from 0, STENCILWRITEMASK 2", D3DSTENCILOP_REPLACE, 0, 1, 2},
+                                  {"INCRSAT from 0", D3DSTENCILOP_INCRSAT, 0, 0, 0xFFFFFFFF},
+                                  {"INCRSAT from 1", D3DSTENCILOP_INCRSAT, 1, 0, 0xFFFFFFFF},
+                                  {"DECRSAT from 1", D3DSTENCILOP_DECRSAT, 1, 0, 0xFFFFFFFF},
+                                  {"DECRSAT from 0", D3DSTENCILOP_DECRSAT, 0, 0, 0xFFFFFFFF},
+                                  {"INVERT from 0", D3DSTENCILOP_INVERT, 0, 0, 0xFFFFFFFF},
+                                  {"INVERT from 1", D3DSTENCILOP_INVERT, 1, 0, 0xFFFFFFFF},
+                                  {"INCR from 0", D3DSTENCILOP_INCR, 0, 0, 0xFFFFFFFF},
+                                  {"INCR from 1", D3DSTENCILOP_INCR, 1, 0, 0xFFFFFFFF},
+                                  {"DECR from 1", D3DSTENCILOP_DECR, 1, 0, 0xFFFFFFFF},
+                                  {"DECR from 0", D3DSTENCILOP_DECR, 0, 0, 0xFFFFFFFF}};
+        for (const Op& k : kOps) {
+            dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, k.start);
+            const HRESULT h1 = dev->SetRenderState(D3DRENDERSTATE_STENCILPASS, k.op);
+            dev->SetRenderState(D3DRENDERSTATE_STENCILREF, k.ref);
+            dev->SetRenderState(D3DRENDERSTATE_STENCILWRITEMASK, k.writeMask);
+            hr = Quad(dev, 0.5f, 0xFFFFFFFF);
+            P("    %s: set 0x%08lx, drawn 0x%08lx, word 0x%04lx\n", k.name, h1, hr, ZWord(z));
+        }
+        dev->SetRenderState(D3DRENDERSTATE_STENCILWRITEMASK, 0xFFFFFFFF);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILPASS, D3DSTENCILOP_KEEP);
+
+        P("  the stencil test (a white quad over a target cleared to 0; STENCILPASS KEEP):\n");
+        struct Test {
+            const char* name;
+            DWORD func, start, ref, mask;
+        };
+        static const Test kTests[] = {{"EQUAL, stencil 1, ref 1, mask 0xffffffff", D3DCMP_EQUAL, 1, 1, 0xFFFFFFFF},
+                                      {"EQUAL, stencil 0, ref 1, mask 0xffffffff", D3DCMP_EQUAL, 0, 1, 0xFFFFFFFF},
+                                      {"EQUAL, stencil 1, ref 0xff, mask 0xffffffff", D3DCMP_EQUAL, 1, 0xFF, 0xFFFFFFFF},
+                                      {"EQUAL, stencil 1, ref 3, mask 0xffffffff", D3DCMP_EQUAL, 1, 3, 0xFFFFFFFF},
+                                      {"EQUAL, stencil 1, ref 3, mask 1", D3DCMP_EQUAL, 1, 3, 1},
+                                      {"EQUAL, stencil 0, ref 2, mask 0xffffffff", D3DCMP_EQUAL, 0, 2, 0xFFFFFFFF},
+                                      {"EQUAL, stencil 1, ref 1, mask 2", D3DCMP_EQUAL, 1, 1, 2},
+                                      {"EQUAL, stencil 1, ref 0, mask 2", D3DCMP_EQUAL, 1, 0, 2},
+                                      {"LESS, stencil 1, ref 0, mask 0xffffffff", D3DCMP_LESS, 1, 0, 0xFFFFFFFF},
+                                      {"LESS, stencil 1, ref 2, mask 0xffffffff", D3DCMP_LESS, 1, 2, 0xFFFFFFFF},
+                                      {"GREATER, stencil 1, ref 2, mask 0xffffffff", D3DCMP_GREATER, 1, 2, 0xFFFFFFFF},
+                                      {"NEVER, stencil 1", D3DCMP_NEVER, 1, 1, 0xFFFFFFFF}};
+        for (const Test& k : kTests) {
+            dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, k.start);
+            dev->SetRenderState(D3DRENDERSTATE_STENCILFUNC, k.func);
+            dev->SetRenderState(D3DRENDERSTATE_STENCILREF, k.ref);
+            dev->SetRenderState(D3DRENDERSTATE_STENCILMASK, k.mask);
+            hr = Quad(dev, 0.5f, 0xFFFFFFFF);
+            P("    %s: drawn 0x%08lx, pixel 0x%lx, word 0x%04lx\n", k.name, hr, TargetPixel(rt), ZWord(z));
+        }
+        // A failed stencil test's operation, and a failed depth test's.
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 0.25f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILMASK, 0xFFFFFFFF);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILFUNC, D3DCMP_NEVER);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILFAIL, D3DSTENCILOP_INVERT);
+        hr = Quad(dev, 0.5f, 0xFFFFFFFF);
+        P("    NEVER with STENCILFAIL INVERT from 0: drawn 0x%08lx, pixel 0x%lx, word 0x%04lx\n", hr, TargetPixel(rt), ZWord(z));
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 0.25f, 0);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILFAIL, D3DSTENCILOP_KEEP);
+        dev->SetRenderState(D3DRENDERSTATE_STENCILZFAIL, D3DSTENCILOP_INVERT);
+        dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
+        hr = Quad(dev, 0.5f, 0xFFFFFFFF);
+        P("    a quad at 0.5 behind depth 0.25 with STENCILZFAIL INVERT from 0: drawn 0x%08lx, pixel 0x%lx, word 0x%04lx\n", hr,
+          TargetPixel(rt), ZWord(z));
+        P("  the device released: %lu left\n", dev->Release());
+    }
+    if (rt && z) rt->DeleteAttachedSurface(0, z);
+    if (z) z->Release();
+    if (rt) rt->Release();
+    d3d->Release();
+}
+
+// What a device leaves in a Z buffer: the word after Clear at several depths, and
+// after a quad drawn at them (ZFUNC ALWAYS), in each layout the emulation layer makes; and
+// along a quad whose depth runs from 0 at the left edge to 1 at the right.
+static void DepthWords(IDirectDraw7* dd, const char* name, const GUID& guid, bool hardware) {
+    P("\nZ buffer words with the %s device (the value at 32,32 as the buffer's bits; 64x64):\n", name);
+    IDirect3D7* d3d = nullptr;
+    dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d));
+    if (!d3d) {
+        P("  (no IDirect3D7)\n");
+        return;
+    }
+    struct Z {
+        const char* name;
+        DWORD bits, zmask, stencilBits, stencilMask;
+    };
+    static const Z kZ[] = {{"16 bits", 16, 0xFFFF, 0, 0},
+                           {"24 bits in 32, high", 32, 0xFFFFFF00, 0, 0},
+                           {"24 bits in 32, low", 32, 0x00FFFFFF, 0, 0},
+                           {"32 bits", 32, 0xFFFFFFFF, 0, 0},
+                           {"24 bits and 8 of stencil", 32, 0xFFFFFF00, 8, 0xFF},
+                           {"24 bits and 8 of stencil, stencil high", 32, 0x00FFFFFF, 8, 0xFF000000}};
+    static const float kDepths[] = {0.0f, 0.1f, 0.25f, 1.0f / 3, 0.5f, 0.6f, 0.75f, 0.9f, 0.999f, 1.0f};
+    const DWORD memory = hardware ? DDSCAPS_VIDEOMEMORY : DDSCAPS_SYSTEMMEMORY;
+    for (const Z& k : kZ) {
+        HRESULT hr, zh;
+        IDirectDrawSurface7* rt = Make(dd, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | memory, 64, 64, nullptr, &hr);
+        IDirectDrawSurface7* z = MakeZ(dd, memory, k.bits, k.zmask, k.stencilBits, k.stencilMask, &zh);
+        IDirect3DDevice7* dev = nullptr;
+        HRESULT ah = E_FAIL, dh = E_FAIL;
+        if (rt && z) {
+            ah = rt->AddAttachedSurface(z);
+            dh = d3d->CreateDevice(guid, rt, &dev);
+        }
+        P("  %s: target 0x%08lx, Z buffer 0x%08lx, attached 0x%08lx, device 0x%08lx\n", k.name, hr, zh, ah, dh);
+        if (dev) {
+            auto word = [&](int x) -> DWORD {
+                DDSURFACEDESC2 d = {};
+                d.dwSize = sizeof(d);
+                if (FAILED(z->Lock(nullptr, &d, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return 0xDEADDEAD;
+                DWORD v = 0;
+                memcpy(&v, static_cast<const BYTE*>(d.lpSurface) + 32 * d.lPitch + x * (k.bits / 8), k.bits / 8);
+                z->Unlock(nullptr);
+                return v;
+            };
+            D3DVIEWPORT7 vp = {0, 0, 64, 64, 0.0f, 1.0f};
+            dev->SetViewport(&vp);
+            dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
+            dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_TRUE);
+            dev->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
+            dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_ALWAYS);
+            const DWORD clearFlags = D3DCLEAR_ZBUFFER | (k.stencilBits ? D3DCLEAR_STENCIL : 0);
+            P("    cleared to:");
+            for (float depth : kDepths) {
+                hr = dev->Clear(0, nullptr, clearFlags, 0, depth, 0);
+                P(" %.3f 0x%lx%s", double(depth), word(32), FAILED(hr) ? " (failed)" : "");
+            }
+            P("\n    a quad at (over a buffer cleared to 0.0):");
+            for (float depth : kDepths) {
+                dev->Clear(0, nullptr, clearFlags, 0, 0.0f, 0);
+                hr = Quad(dev, depth, 0xFFFFFFFF);
+                P(" %.3f 0x%lx%s", double(depth), word(32), FAILED(hr) ? " (failed)" : "");
+            }
+            // Depth 0 at x = 0 to 1 at x = 64.
+            dev->Clear(0, nullptr, clearFlags, 0, 0.0f, 0);
+            D3DTLVERTEX v[4] = {};
+            const float xy[4][2] = {{0, 0}, {64, 0}, {0, 64}, {64, 64}};
+            for (int i = 0; i < 4; i++) {
+                v[i].sx = xy[i][0];
+                v[i].sy = xy[i][1];
+                v[i].sz = xy[i][0] / 64.0f;
+                v[i].rhw = 1.0f;
+                v[i].color = 0xFFFFFFFF;
+            }
+            hr = dev->BeginScene();
+            if (SUCCEEDED(hr)) {
+                hr = dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_TLVERTEX, v, 4, 0);
+                dev->EndScene();
+            }
+            P("\n    a quad from 0.0 at the left edge to 1.0 at the right (0x%08lx), at x =", hr);
+            for (int x : {0, 1, 15, 16, 31, 32, 48, 62, 63}) P(" %d 0x%lx", x, word(x));
+            P("\n");
+            dev->Release();
+        }
+        if (rt && z) rt->DeleteAttachedSurface(0, z);
+        if (z) z->Release();
+        if (rt) rt->Release();
+    }
+    d3d->Release();
+}
+
+static void LargeSurfaces(IDirectDraw7* dd) {
+    P("\nSurfaces of very many pixels in system memory (then Lock and the last pixel written and read back):\n");
+    static const Rgb kPal8 = {"8 bits", 8, 0, 0, 0, 0};
+    static const Rgb* const kFormats[] = {&kPal8, &k565, &kX888};
+    // (By size in bytes, so that a ddraw.dll that stops at one has answered the smaller.)
+    static const int kSizes[][2] = {{16384, 16384}, {16385, 16384}, {65535, 4096}, {65535, 4097}, {20000, 20000},
+                                    {32768, 32768}, {46341, 46341}, {65535, 65535}};
+    for (const Rgb* f : kFormats) {
+        for (const auto& size : kSizes) {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+            d.dwWidth = DWORD(size[0]);
+            d.dwHeight = DWORD(size[1]);
+            SetFormat(&d.ddpfPixelFormat, *f);
+            if (f->bits == 8) d.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+            IDirectDrawSurface7* s = nullptr;
+            const HRESULT hr = dd->CreateSurface(&d, &s, nullptr);
+            P("  %dx%d, %s: 0x%08lx", size[0], size[1], f->name, hr);
+            if (s) {
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                const HRESULT lh = s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+                P(", Lock 0x%08lx", lh);
+                if (SUCCEEDED(lh)) {
+                    BYTE* last = static_cast<BYTE*>(l.lpSurface) + size_t(size[1] - 1) * size_t(l.lPitch) +
+                                 size_t(size[0] - 1) * (f->bits / 8);
+                    *last = 0x5A;
+                    P(", pitch %ld, last pixel's byte 0x%02x", l.lPitch, *last);
+                    s->Unlock(nullptr);
+                }
+                P(", released: %lu left", s->Release());
+            }
+            P("\n");
+        }
+    }
+}
+
 static void WithObjects(void (*run)(IDirectDraw7*, IDirectDraw*)) {
     IDirectDraw7* dd7 = NewDD7();
     IDirectDraw* dd1 = nullptr;
@@ -3335,6 +3720,25 @@ static const Section kSections[] = {
     {"more blits", [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { MoreBlits(dd7); }); }, 120},
     {"the expected display mode", ExpectedMode, 600},
     {"more surfaces", [] { WithObjects(MoreSurfaces); }, 120},
+    {"a Z buffer with stencil, where it is made", [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { StencilZCreation(dd7); }); }, 60},
+    {"a 15+1 Z buffer, RGB device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { StencilZDevice(dd7, "RGB", IID_IDirect3DRGBDevice, false); }); }, 120},
+    {"a 15+1 Z buffer, MMX device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { StencilZDevice(dd7, "MMX", IID_IDirect3DMMXDevice, false); }); }, 120},
+    {"a 15+1 Z buffer, Reference device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { StencilZDevice(dd7, "Reference", IID_IDirect3DRefDevice, false); }); }, 120},
+    {"a 15+1 Z buffer, HAL device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { StencilZDevice(dd7, "HAL", IID_IDirect3DHALDevice, true); }); }, 120},
+    {"a 15+1 Z buffer, T&L HAL device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { StencilZDevice(dd7, "T&L HAL", IID_IDirect3DTnLHalDevice, true); }); },
+     120},
+    {"large surfaces", [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { LargeSurfaces(dd7); }); }, 900},
+    {"Z buffer words, RGB device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { DepthWords(dd7, "RGB", IID_IDirect3DRGBDevice, false); }); }, 120},
+    {"Z buffer words, MMX device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { DepthWords(dd7, "MMX", IID_IDirect3DMMXDevice, false); }); }, 120},
+    {"Z buffer words, HAL device",
+     [] { WithObjects([](IDirectDraw7* dd7, IDirectDraw*) { DepthWords(dd7, "HAL", IID_IDirect3DHALDevice, true); }); }, 120},
     {"bad arguments", BadArguments, 4 * 60 * 60},
 };
 

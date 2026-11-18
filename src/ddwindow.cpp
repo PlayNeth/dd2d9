@@ -564,13 +564,10 @@ void DDraw::ApplyWindow() {
     }
     activeDisplay_ = display;
     GameImageChanged();
-    // The game's mode shown scaled or in a window: its cursor functions are pointed at
-    // dd2d9's (input.cpp), which show it the mode as its screen. A real mode switch
-    // leaves its imports alone. Again for each mode: modules loaded since are covered.
-    if (modeSet_ && display != kDisplaySwitch) {
-        InstallMouseHooks();
-        InstallVideoHooks();
-    }
+    // The game's mode shown scaled or in a window: its cursor functions, pointed at dd2d9's
+    // since it was loaded (input.cpp), show it the mode as its screen from here on. The
+    // hooks again for each mode: modules loaded since are covered.
+    if (modeSet_ && display != kDisplaySwitch) InstallCompatHooks(false);
     if (!mayChange && display != kDisplayBorderless) {
         applying_ = false;
         return;

@@ -74,16 +74,30 @@ bool ReadBackDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g, const RECT* part) 
     if (FAILED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) return false;
     DWORD mask, shift, maxv;
     ZBits(b->fmt, &mask, &shift, &maxv);
-    const DWORD bytes = b->fmt.Bytes();
+    const DWORD bytes = b->fmt.Bytes(), keep = ~mask;
+    const double scale = maxv;
+    // (Up to 31 bits through a signed conversion, one instruction where the unsigned one is a
+    // 64-bit store: every buffer but a 32-bit one without stencil.)
+    const bool narrow = maxv <= 0x7FFFFFFF;
+    auto word = [&](float f) -> DWORD {
+        const float z = f > 0.0f ? std::min(f, 1.0f) : 0.0f;  // (not a number: 0)
+        const double d = double(z) * scale + 0.5;
+        return ((narrow ? DWORD(int32_t(d)) : DWORD(d)) << shift) & mask;
+    };
     for (int y = 0; y < h; y++) {
         const float* from = reinterpret_cast<const float*>(static_cast<const uint8_t*>(lr.pBits) + size_t(y) * lr.Pitch);
         uint8_t* row = b->Row(src.top + y) + size_t(src.left) * bytes;
-        for (int x = 0; x < w; x++) {
-            const float z = std::clamp(from[x], 0.0f, 1.0f);
-            const DWORD v = (DWORD(double(z) * maxv + 0.5) << shift) & mask;
-            uint8_t* p = row + size_t(x) * bytes;
-            const DWORD old = ReadPixel(p, bytes);
-            WritePixel(p, bytes, (old & ~mask) | v);
+        if (bytes == 2) {  // (the usual sizes as their own words)
+            auto* p = reinterpret_cast<uint16_t*>(row);
+            for (int x = 0; x < w; x++) p[x] = uint16_t((p[x] & keep) | word(from[x]));
+        } else if (bytes == 4) {
+            auto* p = reinterpret_cast<uint32_t*>(row);
+            for (int x = 0; x < w; x++) p[x] = (p[x] & keep) | word(from[x]);
+        } else {
+            for (int x = 0; x < w; x++) {
+                uint8_t* p = row + size_t(x) * bytes;
+                WritePixel(p, bytes, (ReadPixel(p, bytes) & keep) | word(from[x]));
+            }
         }
     }
     sys->UnlockRect();
@@ -115,7 +129,17 @@ void UploadDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     for (LONG y = rc.top; y < rc.bottom; y++) {
         float* dst = reinterpret_cast<float*>(static_cast<uint8_t*>(lr.pBits) + size_t(y - rc.top) * lr.Pitch);
         const uint8_t* row = b->Row(y);
-        for (LONG x = rc.left; x < rc.right; x++) dst[x - rc.left] = float((ReadPixel(row + size_t(x) * bytes, bytes) & mask) >> shift) * inv;
+        const LONG n = rc.right - rc.left;
+        const uint8_t* px = row + size_t(rc.left) * bytes;
+        if (bytes == 2) {  // (the usual sizes as their own words)
+            const auto* p = reinterpret_cast<const uint16_t*>(px);
+            for (LONG x = 0; x < n; x++) dst[x] = float((p[x] & mask) >> shift) * inv;
+        } else if (bytes == 4) {
+            const auto* p = reinterpret_cast<const uint32_t*>(px);
+            for (LONG x = 0; x < n; x++) dst[x] = float((p[x] & mask) >> shift) * inv;
+        } else {
+            for (LONG x = 0; x < n; x++) dst[x] = float((ReadPixel(px + size_t(x) * bytes, bytes) & mask) >> shift) * inv;
+        }
     }
     g->zupSys->UnlockRect(0);  // (its dirty rectangle: UpdateTexture copies that)
     gpu.CloseScene();
