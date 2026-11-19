@@ -92,6 +92,7 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         {"joypoll", &g_config.joyPoll},
         {"selfsuspend", &g_config.selfSuspend},
         {"nobuffering", &g_config.noBuffering},
+        {"safeterminate", &g_config.safeTerminate},
     };
     for (const auto& b : kBools) {
         if (key != b.key) continue;

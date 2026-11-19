@@ -209,7 +209,56 @@ static BOOL WINAPI CollectDevice(GUID* guid, LPSTR, LPSTR name, LPVOID ctx, HMON
     return TRUE;
 }
 
+// A thread that waits on the event given (one never set: for ever).
+static DWORD WINAPI WaitsForEver(void* h) { return WaitForSingleObject(h, 0xFFFFFFFF); }
+
 static int RunUnit() {
+    {  // The processors the program is told of are numbered from 0, as any machine's are
+       // (cpus=1 gives it one, whichever real one that is: mask 1), and the affinity calls
+       // agree with GetSystemInfo.
+        SYSTEM_INFO si = {};
+        GetSystemInfo(&si);
+        const DWORD n = si.dwNumberOfProcessors;
+        const DWORD_PTR all = n >= sizeof(DWORD_PTR) * 8 ? ~DWORD_PTR(0) : (DWORD_PTR(1) << n) - 1;
+        DWORD_PTR process = 0, system = 0;
+        const BOOL got = GetProcessAffinityMask(GetCurrentProcess(), &process, &system);
+        CHECK(n >= 1 && si.dwActiveProcessorMask == all && got && system == all && process && !(process & ~all),
+              "%lu processor(s): active mask 0x%lx, process 0x%lx, system 0x%lx", n, static_cast<unsigned long>(si.dwActiveProcessorMask),
+              static_cast<unsigned long>(process), static_cast<unsigned long>(system));
+        const DWORD_PTR lowest = process & (~process + 1);
+        const DWORD_PTR before = SetThreadAffinityMask(GetCurrentThread(), lowest);
+        const DWORD_PTR again = SetThreadAffinityMask(GetCurrentThread(), before ? before : process);
+        CHECK(before && !(before & ~all) && again == lowest, "SetThreadAffinityMask(0x%lx): was 0x%lx, then 0x%lx",
+              static_cast<unsigned long>(lowest), static_cast<unsigned long>(before), static_cast<unsigned long>(again));
+        if (n < sizeof(DWORD_PTR) * 8) {
+            SetLastError(0);
+            const DWORD_PTR beyond = SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << n);
+            CHECK(beyond == 0 && GetLastError() == ERROR_INVALID_PARAMETER,
+                  "SetThreadAffinityMask with a processor the machine doesn't have: 0x%lx, error %lu", static_cast<unsigned long>(beyond),
+                  GetLastError());
+        }
+    }
+    {  // A thread terminated while it waits ends with the code given, and threads start after
+       // it (safeterminate: the terminated one doesn't take the loader's lock with it).
+        const HANDLE never = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        DWORD id;
+        const HANDLE t = CreateThread(nullptr, 0, WaitsForEver, never, 0, &id);
+        Sleep(20);
+        const BOOL killed = TerminateThread(t, 7);
+        DWORD code = 0;
+        const DWORD ended = WaitForSingleObject(t, 2000);
+        GetExitCodeThread(t, &code);
+        CHECK(killed && ended == WAIT_OBJECT_0 && code == 7, "TerminateThread of a waiting thread: %d, wait 0x%lx, exit code %lu", killed,
+              ended, code);
+        const HANDLE set = CreateEventA(nullptr, TRUE, TRUE, nullptr);  // (signalled: that thread ends at once)
+        const HANDLE next = CreateThread(nullptr, 0, WaitsForEver, set, 0, &id);
+        const DWORD ran = WaitForSingleObject(next, 2000);
+        CHECK(ran == WAIT_OBJECT_0, "a thread started after it runs to its end (wait 0x%lx)", ran);
+        CloseHandle(next);
+        CloseHandle(set);
+        CloseHandle(t);
+        CloseHandle(never);
+    }
     IDirectDraw7* dd = nullptr;
     HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
     CHECK(SUCCEEDED(hr) && dd, "DirectDrawCreateEx -> 0x%08lx", hr);

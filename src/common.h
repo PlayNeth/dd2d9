@@ -55,6 +55,7 @@ struct Config {
     bool selfSuspend = false;      // selfsuspend=off: a sound callback suspending its own thread carries on (compat.cpp)
     int flipCopy = kFlipCopyAuto;  // flipcopy=auto: after a flip the back buffer gets the frame just shown, with Retained Mode loaded (attach.cpp)
     bool noBuffering = false;      // nobuffering=off: FILE_FLAG_NO_BUFFERING dropped from the game's CreateFile (compat.cpp)
+    bool safeTerminate = true;     // safeterminate=on: a terminated thread doesn't take the loader's lock with it (compat.cpp)
     bool joyPoll = true;           // joypoll=on: the game's joystick reads answered from dd2d9's own (compat.cpp)
     bool safeTimers = true;        // safetimers=on: timeSetEvent callbacks called with their registers kept (compat.cpp)
     bool drawTrace = false;        // log one frame's draws (render states, depths) every ~10 s

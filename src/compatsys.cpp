@@ -5,8 +5,9 @@
 //   cpu=  the processor clock in the registry (~MHz under HKLM, HARDWARE\DESCRIPTION\System
 //         \CentralProcessor\<n>). Games that time the processor with RDTSC measure the
 //         real one: a DLL can't intercept that instruction.
-//   cpus= the processors the game runs on (its affinity) and is told about (GetSystemInfo):
-//         games of the single-core era can race or stutter across cores.
+//   cpus= the processors the game runs on (its affinity) and is told about (GetSystemInfo
+//         and the affinity masks, numbered from 0): games of the single-core era can race
+//         or stutter across cores.
 #include "compatint.h"
 
 #include <algorithm>
@@ -267,15 +268,75 @@ LONG WINAPI HookRegQueryValueExW(HKEY k, LPCWSTR name, LPDWORD reserved, LPDWORD
 
 // ---------------------------------------------------------------- cpus=
 
+// The game is told of a machine with only the processors it was given, numbered from 0 as
+// any machine's are: one processor is mask 1 whichever real one it is (a program that looks
+// for its processor among the first, or asks for processor 0 by number, finds it). Masks
+// pass between the game's numbering and the real one in both directions.
 using GetSystemInfoFn = void(WINAPI*)(SYSTEM_INFO*);
+using GetProcessAffinityMaskFn = BOOL(WINAPI*)(HANDLE, PDWORD_PTR, PDWORD_PTR);
+using SetProcessAffinityMaskFn = BOOL(WINAPI*)(HANDLE, DWORD_PTR);
+using SetThreadAffinityMaskFn = DWORD_PTR(WINAPI*)(HANDLE, DWORD_PTR);
 GetSystemInfoFn g_getSystemInfo;
+GetProcessAffinityMaskFn g_getProcessAffinityMask;
+SetProcessAffinityMaskFn g_setProcessAffinityMask;
+SetThreadAffinityMaskFn g_setThreadAffinityMask;
 int g_cpuCount;
+
+// Every processor the game is told of.
+DWORD_PTR GameSystemMask() {
+    return g_cpuCount >= int(sizeof(DWORD_PTR) * 8) ? ~DWORD_PTR(0) : (DWORD_PTR(1) << g_cpuCount) - 1;
+}
+
+// The game's bit n is the n-th real processor of g_affinity, lowest first.
+DWORD_PTR MaskToReal(DWORD_PTR game) {
+    DWORD_PTR real = 0, bit = 1;
+    for (DWORD_PTR left = g_affinity; left; left &= left - 1, bit <<= 1)
+        if (game & bit) real |= left & (~left + 1);
+    return real;
+}
+
+DWORD_PTR MaskToGame(DWORD_PTR real) {
+    DWORD_PTR game = 0, bit = 1;
+    for (DWORD_PTR left = g_affinity; left; left &= left - 1, bit <<= 1)
+        if (real & left & (~left + 1)) game |= bit;
+    return game;
+}
+
+bool ThisProcess(HANDLE h) { return h == GetCurrentProcess() || GetProcessId(h) == GetCurrentProcessId(); }
 
 void WINAPI HookGetSystemInfo(SYSTEM_INFO* si) {
     DD2D9_NEXT(g_getSystemInfo)(si);
     if (!si || !g_affinity) return;
     si->dwNumberOfProcessors = DWORD(g_cpuCount);
-    si->dwActiveProcessorMask = g_affinity;
+    si->dwActiveProcessorMask = GameSystemMask();
+}
+
+BOOL WINAPI HookGetProcessAffinityMask(HANDLE h, PDWORD_PTR process, PDWORD_PTR system) {
+    const BOOL ok = DD2D9_NEXT(g_getProcessAffinityMask)(h, process, system);
+    if (!ok || !g_affinity || !ThisProcess(h)) return ok;
+    *process = MaskToGame(*process);
+    *system = GameSystemMask();
+    return ok;
+}
+
+// A mask with a processor the machine doesn't have is refused, as Windows refuses it.
+BOOL WINAPI HookSetProcessAffinityMask(HANDLE h, DWORD_PTR mask) {
+    if (!g_affinity || !ThisProcess(h)) return DD2D9_NEXT(g_setProcessAffinityMask)(h, mask);
+    if (!mask || (mask & ~GameSystemMask())) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    return DD2D9_NEXT(g_setProcessAffinityMask)(h, MaskToReal(mask));
+}
+
+// (A thread of another process isn't told apart: a game sets its own threads'.)
+DWORD_PTR WINAPI HookSetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
+    if (!g_affinity) return DD2D9_NEXT(g_setThreadAffinityMask)(h, mask);
+    if (!mask || (mask & ~GameSystemMask())) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return MaskToGame(DD2D9_NEXT(g_setThreadAffinityMask)(h, MaskToReal(mask)));
 }
 
 }  // namespace
@@ -342,6 +403,12 @@ const size_t kCpuHookCount = sizeof(kCpuHooks) / sizeof(kCpuHooks[0]);
 
 ImportHook kCpusHooks[] = {
     {"kernel32", "GetSystemInfo", reinterpret_cast<void*>(HookGetSystemInfo), reinterpret_cast<void**>(&g_getSystemInfo)},
+    {"kernel32", "GetProcessAffinityMask", reinterpret_cast<void*>(HookGetProcessAffinityMask),
+     reinterpret_cast<void**>(&g_getProcessAffinityMask)},
+    {"kernel32", "SetProcessAffinityMask", reinterpret_cast<void*>(HookSetProcessAffinityMask),
+     reinterpret_cast<void**>(&g_setProcessAffinityMask)},
+    {"kernel32", "SetThreadAffinityMask", reinterpret_cast<void*>(HookSetThreadAffinityMask),
+     reinterpret_cast<void**>(&g_setThreadAffinityMask)},
 };
 const size_t kCpusHookCount = sizeof(kCpusHooks) / sizeof(kCpusHooks[0]);
 

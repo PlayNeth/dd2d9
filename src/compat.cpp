@@ -3,9 +3,10 @@
 //   ram=, cpu=, cpus= (compatsys.cpp): the memory, processor clock and processors.
 //   desktopbpp= (compatdisplay.cpp), and the display mode and GDI in a mode of the game's own
 //   (compatdisplay.cpp, compatgdi.cpp), with the game's GDI drawing on a windowed primary.
-//   heapzero=, fairlocks=, safetimers=, joypoll=, selfsuspend=, nobuffering= (here): the heap,
-//   the critical sections, the multimedia timers, the joystick, sound callbacks and files
-//   opened without buffering as the games knew them.
+//   heapzero=, fairlocks=, safetimers=, joypoll=, selfsuspend=, nobuffering=, safeterminate=
+//   (here): the heap, the critical sections, the multimedia timers, the joystick, sound
+//   callbacks and files opened without buffering as the games knew them, and threads
+//   terminated without the loader's lock going with them.
 // The imports are patched in the game's modules (hooks.cpp): from DllMain, before the game's
 // own code runs, and in each DLL loaded later as it loads.
 #include "compatint.h"
@@ -76,6 +77,65 @@ HANDLE WINAPI HookCreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURIT
 ImportHook kFileHooks[] = {
     {"kernel32", "CreateFileA", reinterpret_cast<void*>(HookCreateFileA), reinterpret_cast<void**>(&g_createFileA)},
     {"kernel32", "CreateFileW", reinterpret_cast<void*>(HookCreateFileW), reinterpret_cast<void**>(&g_createFileW)},
+};
+
+// A thread the game terminates isn't killed while it holds the loader's lock (safeterminate=on,
+// the default). A thread starts and ends under that lock (the DLLs are told of both), and one
+// killed there keeps it for ever: no thread of the process can start or end after that, nor a
+// DLL be loaded. Need for Speed III ends its movies so: the stream thread is told to stop, the
+// main thread spins until the thread's "running" flag clears, and terminates it. The flag clears
+// just before the thread returns, so on one processor the thread had ended by the time the main
+// thread ran again; on several the main thread kills it in the middle of its ending, and the
+// game stops in the next thing that starts a thread. The thread gets a moment to end by itself,
+// and is then terminated with the lock held here, so that it cannot be the one holding it.
+using TerminateThreadFn = BOOL(WINAPI*)(HANDLE, DWORD);
+using LdrLockLoaderLockFn = LONG(NTAPI*)(ULONG flags, ULONG* disposition, ULONG_PTR* cookie);
+using LdrUnlockLoaderLockFn = LONG(NTAPI*)(ULONG flags, ULONG_PTR cookie);
+using NtQueryInformationThreadFn = LONG(NTAPI*)(HANDLE, int infoClass, void* info, ULONG size, ULONG* returned);
+TerminateThreadFn g_terminateThread;
+LdrLockLoaderLockFn g_lockLoader;      // (ntdll's, from Windows XP on)
+LdrUnlockLoaderLockFn g_unlockLoader;
+NtQueryInformationThreadFn g_queryThread;
+constexpr DWORD kEndingMs = 20;        // what a thread on its way out gets to finish
+constexpr int kLoaderTries = 50;       // ms the lock is tried for (a thread stuck with it: killed anyway)
+
+BOOL WINAPI HookTerminateThread(HANDLE thread, DWORD code) {
+    static volatile LONG logged;
+    if (!InterlockedExchange(&logged, 1))
+        DD2D9_LOG("compat: the game terminates a thread: not while it holds the loader's lock (safeterminate=on)");
+    // The thread terminating itself, or one that can't be told from it, must not take the
+    // lock with it; another process's thread has that process's lock, not this one's. Both
+    // as Windows does them.
+    struct {
+        LONG exitStatus;
+        void* teb;
+        HANDLE process, id;
+        ULONG_PTR affinity;
+        LONG priority, basePriority;
+    } basic = {};  // THREAD_BASIC_INFORMATION
+    if (g_queryThread(thread, 0, &basic, sizeof(basic), nullptr) < 0 || HandleToULong(basic.id) == GetCurrentThreadId() ||
+        HandleToULong(basic.process) != GetCurrentProcessId())
+        return DD2D9_NEXT(g_terminateThread)(thread, code);
+    // (Ended by itself in that time: the call below finds it ended, as when the game is late.)
+    WaitForSingleObject(thread, kEndingMs);
+    ULONG_PTR cookie = 0;
+    bool locked = false;
+    for (int i = 0; i < kLoaderTries && !locked; i++) {
+        ULONG got = 0;  // 1: acquired, 2: not (LDR_LOCK_LOADER_LOCK_FLAG_TRY_ONLY)
+        if (g_lockLoader(2, &got, &cookie) < 0) break;
+        locked = got == 1;
+        if (!locked) Sleep(1);
+    }
+    const BOOL ok = DD2D9_NEXT(g_terminateThread)(thread, code);
+    const DWORD err = GetLastError();
+    if (locked) g_unlockLoader(0, cookie);
+    SetLastError(err);
+    return ok;
+}
+
+ImportHook kTerminateHooks[] = {
+    {"kernel32", "TerminateThread", reinterpret_cast<void*>(HookTerminateThread),
+     reinterpret_cast<void**>(&g_terminateThread)},
 };
 
 // A critical section a thread releases goes to the thread waiting for it, as on Windows up to
@@ -705,7 +765,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[14];
+HookTable g_tables[15];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
@@ -762,6 +822,15 @@ void InstallCompatHooks(bool inLoaderLock) {
                    !g_config.selfSuspend && g_getThreadId && g_soundTls != TLS_OUT_OF_INDEXES &&
                        dd2d9_timerTls != TLS_OUT_OF_INDEXES};
     g_tables[10] = {kFileHooks, sizeof(kFileHooks) / sizeof(kFileHooks[0]), !g_config.noBuffering};
+    if (g_config.safeTerminate && !g_lockLoader) {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        auto find = [ntdll](const char* name) { return reinterpret_cast<void*>(GetProcAddress(ntdll, name)); };
+        g_unlockLoader = reinterpret_cast<LdrUnlockLoaderLockFn>(find("LdrUnlockLoaderLock"));
+        g_queryThread = reinterpret_cast<NtQueryInformationThreadFn>(find("NtQueryInformationThread"));
+        if (g_unlockLoader && g_queryThread) g_lockLoader = reinterpret_cast<LdrLockLoaderLockFn>(find("LdrLockLoaderLock"));
+    }
+    g_tables[14] = {kTerminateHooks, sizeof(kTerminateHooks) / sizeof(kTerminateHooks[0]),
+                    g_config.safeTerminate && g_lockLoader != nullptr};
     // The cursor, paint and video functions (input.cpp, inputpaint.cpp, video.cpp): always,
     // they translate only while a display mode of dd2d9's own is shown.
     size_t mouse, video;

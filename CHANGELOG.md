@@ -3,6 +3,22 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.5
+- **Need for Speed III no longer freezes in its movies on more than one processor**
+  (`safeterminate=on`, the default). The game stops its stream thread by waiting for the
+  thread's "running" flag to clear and terminating it at once; the flag clears just before
+  the thread returns, so with several processors the thread was killed in the middle of its
+  ending, holding the loader's lock, and no thread of the game could start after that: a
+  black screen. A thread the game terminates now gets 20 ms to end by itself, and is then
+  terminated with the loader's lock held by the caller, so that it cannot be the one
+  holding it. `safeterminate=off` gives Windows' `TerminateThread` untouched.
+- **`cpus=` numbers the game's processors from 0**, as any machine's are. `cpus=1` runs the
+  game on the second core where there is one, and told it of "1 processor, mask 0x2", which
+  no machine with one processor reports; `GetProcessAffinityMask` still showed every
+  processor. `GetSystemInfo`, `GetProcessAffinityMask`, `SetProcessAffinityMask` and
+  `SetThreadAffinityMask` now agree: one processor is mask 1, and a mask the game sets is
+  carried over to the real processors.
+
 ## 1.8.4
 What 1.8.2 left unmeasured, asked of Windows XP with new sections of `fmtprobe` and matched.
 - **Z buffers with stencil are made in any layout** the emulation layer of `ddraw.dll`
