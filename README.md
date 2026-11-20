@@ -104,7 +104,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **A frame limiter** for games that run too fast or use a whole processor core.
 - **What the game is told about the machine,** as a PC of its era would answer:
   - 1 GB of memory by default (`ram`): Windows reports 2 GB and a 4 GB page file, and old games overflow adding them up and claim there isn't enough;
-  - one processor (`cpus`), and a 2 GHz clock in the registry (`cpu`);
+  - one processor for its threads (`cpus`), and a 2 GHz clock in the registry (`cpu`);
   - a 256-colour, 16 or 24-bit desktop (`desktopbpp`) for games that refuse a 32-bit one, through DirectDraw, GDI and the display settings alike.
 - **Windows 9x and XP behaviour games relied on,** on by default:
   - memory from the process heap comes zeroed (`heapzero`), for games that read it before writing, such as Daytona USA Deluxe;
@@ -175,7 +175,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `ram` | `1024`: MB of memory games are told about, at most `2047`; `0`: the real values |
 | `vram` | `512`: MB of video memory DirectDraw reports, `1`–`2047` |
 | `cpu` | `2000`: MHz in the registry; `0`: the real clock |
-| `cpus` | `1`: processors the game runs on and is told about, numbered from 0 (`GetSystemInfo` and the affinity calls); `0`: all |
+| `cpus` | `1`: processors the game's threads run on and the game is told about, numbered from 0 (`GetSystemInfo` and the affinity calls). The sound mixer's, Direct3D 9's, the display driver's and dd2d9's own threads are left on any processor, as the sound and the card were outside the game's processor on a machine of the time; `0`: all, for everything |
 | `heapzero` | `on`: the game's heap memory comes zeroed, as fresh memory often was on Windows 9x (Daytona USA Deluxe needs it); `off`: as Windows gives it |
 | `fairlocks` | `on`: a critical section the game releases goes to the thread waiting for it, as up to Windows XP (KOF 99 Evolution's intro needs it); `off`: as Windows has it now |
 | `safetimers` | `on`: a multimedia timer's callback (`timeSetEvent`) gets back the registers, stack and direction flag it should have kept, as up to Windows XP (Mega Man X needs it on Windows 10 and 11); `off`: as Windows has it now |

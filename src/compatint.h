@@ -10,6 +10,7 @@ extern ImportHook kMemoryHooks[], kCpuHooks[], kCpusHooks[];
 extern const size_t kMemoryHookCount, kCpuHookCount, kCpusHookCount;
 extern DWORD_PTR g_affinity;  // the processors the game was given (0: not set)
 void SetAffinity();
+void PinThread(HANDLE thread, DWORD id);
 // compatdisplay.cpp: the display settings' depth and mode.
 extern ImportHook kDepthHooks[];
 extern const size_t kDepthHookCount;

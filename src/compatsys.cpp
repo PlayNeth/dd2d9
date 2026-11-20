@@ -10,6 +10,8 @@
 //         or stutter across cores.
 #include "compatint.h"
 
+#include <tlhelp32.h>
+
 #include <algorithm>
 #include <cstring>
 #include <cwctype>
@@ -277,10 +279,12 @@ using GetProcessAffinityMaskFn = BOOL(WINAPI*)(HANDLE, PDWORD_PTR, PDWORD_PTR);
 using SetProcessAffinityMaskFn = BOOL(WINAPI*)(HANDLE, DWORD_PTR);
 using SetThreadAffinityMaskFn = DWORD_PTR(WINAPI*)(HANDLE, DWORD_PTR);
 GetSystemInfoFn g_getSystemInfo;
+DWORD_PTR g_gameProcessMask;  // what the game set with SetProcessAffinityMask (its numbering; 0: not yet)
 GetProcessAffinityMaskFn g_getProcessAffinityMask;
 SetProcessAffinityMaskFn g_setProcessAffinityMask;
 SetThreadAffinityMaskFn g_setThreadAffinityMask;
 int g_cpuCount;
+bool g_pinThreads;  // the game's threads are pinned one by one (set once, in DllMain)
 
 // Every processor the game is told of.
 DWORD_PTR GameSystemMask() {
@@ -314,7 +318,8 @@ void WINAPI HookGetSystemInfo(SYSTEM_INFO* si) {
 BOOL WINAPI HookGetProcessAffinityMask(HANDLE h, PDWORD_PTR process, PDWORD_PTR system) {
     const BOOL ok = DD2D9_NEXT(g_getProcessAffinityMask)(h, process, system);
     if (!ok || !g_affinity || !ThisProcess(h)) return ok;
-    *process = MaskToGame(*process);
+    // (The real process's mask covers the helpers' processors too: the game's is its own.)
+    *process = g_pinThreads ? (g_gameProcessMask ? g_gameProcessMask : GameSystemMask()) : MaskToGame(*process);
     *system = GameSystemMask();
     return ok;
 }
@@ -326,7 +331,9 @@ BOOL WINAPI HookSetProcessAffinityMask(HANDLE h, DWORD_PTR mask) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    return DD2D9_NEXT(g_setProcessAffinityMask)(h, MaskToReal(mask));
+    if (!g_pinThreads) return DD2D9_NEXT(g_setProcessAffinityMask)(h, MaskToReal(mask));
+    g_gameProcessMask = mask;  // (kept for it to read back: its threads stay where cpus= put them)
+    return TRUE;
 }
 
 // (A thread of another process isn't told apart: a game sets its own threads'.)
@@ -344,6 +351,83 @@ DWORD_PTR WINAPI HookSetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
 // cpus= processors the process may run on: one logical processor per physical core (two
 // hyperthreads of one core would be about one core's worth), the first core last (it takes
 // most of the system's interrupts) when there are cores to spare.
+// cpus= pins the game's code, not the process. A machine of the time had one processor, but
+// the game had it to itself: the sound was mixed in the kernel and the picture drawn by the
+// card. Today the mixer, Direct3D 9 (DXVK's or wined3d's threads, the driver's) and dd2d9's
+// presenter are threads of the game's process, and pinned with it they take the one
+// processor from the game and from each other (sound that crackles, where thread priorities
+// count for little as under Wine). So a thread is put on the game's processors unless it
+// starts in one of those modules: every thread that can run the game's code stays there
+// (its own, and Windows' that call it back: winmm's timers and wave callbacks), which is
+// what cpus= is for, and one that isn't recognised is pinned as before.
+const wchar_t* const kHelperModules[] = {
+    L"d3d9.dll",    L"wined3d.dll",   L"winevulkan.dll", L"dxgi.dll",          L"vulkan-1.dll", L"opengl32.dll",
+    L"dsound.dll",  L"mmdevapi.dll",  L"audioses.dll",   L"winepulse.drv",     L"winealsa.drv", L"wineoss.drv",
+    L"winecoreaudio.drv",
+};
+// Display drivers' user-mode parts, by how their names begin.
+const wchar_t* const kHelperPrefixes[] = {L"nvd3dum", L"nvwgf2um", L"nvoglv", L"atiumd", L"aticfx", L"atidxx",
+                                           L"amdxx",   L"amdxc",    L"atio",   L"igdumd", L"igd10",  L"ig9icd"};
+
+// A thread starting at `start` is one of the helpers' (see above). Asked of the module each
+// time, not remembered: a thread starts seldom, and an address means another module once
+// the first is unloaded.
+bool HelperThread(const void* start) {
+    HMODULE m = nullptr, self = nullptr;
+    constexpr DWORD kFlags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    if (!GetModuleHandleExW(kFlags, static_cast<LPCWSTR>(start), &m) || !m) return false;  // not in a module: the game's
+    GetModuleHandleExW(kFlags, reinterpret_cast<LPCWSTR>(&HelperThread), &self);
+    if (m == self) return true;  // dd2d9's own: the presenter, the joystick poller, its window's thread
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(m, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return false;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    bool helper = false;
+    for (const wchar_t* h : kHelperModules) helper |= !_wcsicmp(name, h);
+    for (const wchar_t* h : kHelperPrefixes) helper |= !_wcsnicmp(name, h, wcslen(h));
+    if (!helper) return false;
+    // The log names each module once (by where it is loaded: twice at worst).
+    static HMODULE logged[16];
+    static SRWLOCK lock = SRWLOCK_INIT;
+    bool first = true;
+    AcquireSRWLockExclusive(&lock);
+    for (HMODULE l : logged) first &= l != m;
+    if (first) {
+        static size_t next;
+        logged[next++ % 16] = m;
+    }
+    ReleaseSRWLockExclusive(&lock);
+    if (first) DD2D9_LOG("cpus: %ls's threads run on any processor", name);
+    return true;
+}
+
+// The thread on the game's processors, unless it is a helper's.
+void PinThread(HANDLE thread, DWORD id) {
+    using NtQueryInformationThreadFn = LONG(NTAPI*)(HANDLE, int infoClass, void* info, ULONG size, ULONG* returned);
+    static const auto query = reinterpret_cast<NtQueryInformationThreadFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread")));
+    void* start = nullptr;  // ThreadQuerySetWin32StartAddress (unknown: pinned)
+    const bool known = query && query(thread, 9, &start, sizeof(start), nullptr) >= 0 && start;
+    const bool helper = known && HelperThread(start);
+    if (!helper) SetThreadAffinityMask(thread, g_affinity);
+    if (LogLevel() < 2) return;
+    // log=2: every thread, where it starts and what was done with it.
+    HMODULE m = nullptr;
+    wchar_t path[MAX_PATH] = L"";
+    if (known && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    static_cast<LPCWSTR>(start), &m) &&
+        m) {
+        const DWORD n = GetModuleFileNameW(m, path, MAX_PATH);
+        if (!n || n >= MAX_PATH) path[0] = 0;
+    }
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    DD2D9_TRACE("cpus: thread %04lx starts in %ls+0x%lx: %s", id, *name ? name : known ? L"no module" : L"an unknown place",
+                static_cast<unsigned long>(reinterpret_cast<uintptr_t>(start) - reinterpret_cast<uintptr_t>(m)),
+                helper ? "left on any processor" : "on the game's");
+}
+
 void SetAffinity() {
     DWORD_PTR process = 0, system = 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &process, &system)) return;
@@ -370,11 +454,39 @@ void SetAffinity() {
         mask |= c;
         count++;
     }
-    if (!mask || !SetProcessAffinityMask(GetCurrentProcess(), mask)) return;
+    if (!mask) return;
     g_affinity = mask;
     g_cpuCount = count;
-    DD2D9_LOG("cpus: the game runs on %d processor(s) (mask 0x%lx)", count, static_cast<unsigned long>(mask));
+    g_pinThreads = mask != process;
+    if (!g_pinThreads) {  // (a machine with no more processors than that: nothing to pin)
+        DD2D9_LOG("cpus: the game is told of %d processor(s), all there are (mask 0x%lx)", count,
+                  static_cast<unsigned long>(mask));
+        return;
+    }
+    DD2D9_LOG("cpus: the game's threads run on %d processor(s) (mask 0x%lx), sound and Direct3D threads on any", count,
+              static_cast<unsigned long>(mask));
+    // This thread (the game's, loading dd2d9), then the others there already are when dd2d9
+    // is loaded late.
+    PinThread(GetCurrentThread(), GetCurrentThreadId());
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te = {};
+    te.dwSize = sizeof(te);
+    for (BOOL more = Thread32First(snap, &te); more; more = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
+        if (const HANDLE t = OpenThread(THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION, FALSE, te.th32ThreadID)) {
+            if (te.th32ThreadID != GetCurrentThreadId()) PinThread(t, te.th32ThreadID);
+            CloseHandle(t);
+        }
+    }
+    CloseHandle(snap);
 }
+
+void PinNewThread() {
+    if (g_pinThreads) PinThread(GetCurrentThread(), GetCurrentThreadId());
+}
+
+bool PinsThreads() { return g_pinThreads; }
 
 ImportHook kMemoryHooks[] = {
     {"kernel32", "GlobalMemoryStatus", reinterpret_cast<void*>(HookGlobalMemoryStatus),

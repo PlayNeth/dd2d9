@@ -38,7 +38,7 @@ struct Config {
     int ramMB = 1024;              // GlobalMemoryStatus(Ex) physical memory; 0: the real values
     int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
     int cpuMHz = 2000;             // the processor clock in the registry (~MHz); 0: the real one
-    int cpus = 1;                  // processors the game runs on and is told about; 0: all
+    int cpus = 1;                  // processors the game's threads run on and it is told about; 0: all
     int desktopBpp = 32;           // the desktop's colour depth DirectDraw reports (8, 16, 24 or 32)
     bool lockWhole = false;        // a Lock of a rectangle counts as a write to the whole surface
     bool zAccess = true;           // zaccess=off: Z buffers on the GPU only, DirectDraw can't read or write them
@@ -279,6 +279,10 @@ bool ScaledPopup(HWND h, double* sx, double* sy);
 // (inLoaderLock: sets the affinity too) and again for each new DirectDraw object and display
 // mode (DLLs loaded since, where the loader doesn't announce them: see PatchGameModules).
 void InstallCompatHooks(bool inLoaderLock);
+// cpus=: the game's threads are pinned one by one as they start (compatsys.cpp). PinNewThread
+// from DllMain's DLL_THREAD_ATTACH, in the new thread; PinsThreads: whether it has anything to do.
+void PinNewThread();
+bool PinsThreads();
 // Whether a DirectDraw object's primary is shown in `hwnd` (ddgdi.cpp). Any thread.
 bool PresentsOnWindow(HWND hwnd);
 // The game's own GDI drawing into a window a normal-mode object shows its primary in (see

@@ -209,6 +209,20 @@ static BOOL WINAPI CollectDevice(GUID* guid, LPSTR, LPSTR name, LPVOID ctx, HMON
     return TRUE;
 }
 
+// Notes in *seen (a DWORD of bits) each processor it finds itself on over 40 ms, yielding
+// between looks.
+static DWORD WINAPI SeesProcessors(void* seen) {
+    using NumberFn = DWORD(WINAPI*)();
+    const auto number =
+        reinterpret_cast<NumberFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("kernel32"), "GetCurrentProcessorNumber")));
+    const DWORD t0 = GetTickCount();
+    while (number && GetTickCount() - t0 < 40) {
+        *static_cast<DWORD*>(seen) |= 1u << (number() & 31);
+        Sleep(0);
+    }
+    return 0;
+}
+
 // A thread that waits on the event given (one never set: for ever).
 static DWORD WINAPI WaitsForEver(void* h) { return WaitForSingleObject(h, 0xFFFFFFFF); }
 
@@ -236,6 +250,26 @@ static int RunUnit() {
             CHECK(beyond == 0 && GetLastError() == ERROR_INVALID_PARAMETER,
                   "SetThreadAffinityMask with a processor the machine doesn't have: 0x%lx, error %lu", static_cast<unsigned long>(beyond),
                   GetLastError());
+        }
+    }
+    {  // cpus=: the game's threads share its processors. Told of one processor, this thread
+       // and one it starts are found on the same real one every time they look.
+        using NumberFn = DWORD(WINAPI*)();
+        const auto number =
+            reinterpret_cast<NumberFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("kernel32"), "GetCurrentProcessorNumber")));
+        SYSTEM_INFO si = {};
+        GetSystemInfo(&si);
+        if (number && si.dwNumberOfProcessors == 1) {
+            DWORD seen[2] = {0, 0};  // a bit for each processor this thread, and the other, ran on
+            DWORD id;
+            const HANDLE t = CreateThread(nullptr, 0, SeesProcessors, &seen[1], 0, &id);
+            SeesProcessors(&seen[0]);
+            const DWORD ended = WaitForSingleObject(t, 5000);
+            CloseHandle(t);
+            CHECK(ended == WAIT_OBJECT_0 && seen[0] && seen[0] == seen[1] && !(seen[0] & (seen[0] - 1)),
+                  "told of 1 processor: this thread ran on processors 0x%lx, a thread it started on 0x%lx", seen[0], seen[1]);
+        } else {
+            fprintf(g_out, "SKIP the game's threads on one processor: %s\n", number ? "told of more than one" : "no GetCurrentProcessorNumber");
         }
     }
     {  // A thread terminated while it waits ends with the code given, and threads start after
@@ -3064,7 +3098,10 @@ static int RunLifetime() {
                 fx.dwSize = sizeof(fx);
                 fx.dwFillColor = 0x00FF00;
                 RECT fill = {0, 0, 100, 100};
-                for (int i = 0; i < 10; i++) {
+                // (A second of it: the device is made by the presenter's thread, and one still
+                // being made at the unload waits for a Direct3D 9 thread to start, which the
+                // loader lock keeps from starting: the 3 s again, for another reason.)
+                for (int i = 0; i < 50; i++) {
                     prim->Blt(&fill, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
                     Pump();
                     Sleep(20);

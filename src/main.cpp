@@ -86,13 +86,14 @@ extern "C" {
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(inst);
         InitializeCriticalSection(&g_lock);
         InitializeCriticalSection(&g_displayLock);
         LoadConfig(inst);
         LogInit();
         InstallCompatHooks(true);
+        if (!PinsThreads()) DisableThreadLibraryCalls(inst);  // (threads announced only for cpus=)
     }
+    if (reason == DLL_THREAD_ATTACH) PinNewThread();
     if (reason == DLL_PROCESS_DETACH) {
         if (!reserved) {  // unloaded while the process goes on: nothing may point into it
             CrashLoggerRemove();

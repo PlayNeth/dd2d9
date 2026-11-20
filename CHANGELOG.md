@@ -3,6 +3,23 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.8.6
+- **`cpus=` pins the game's threads, not the whole process.** A machine of the time had one
+  processor, but the game had it to itself: the sound was mixed in the kernel and the
+  picture drawn by the card. With the process pinned, the sound mixer, Direct3D 9's threads
+  (DXVK's, wined3d's, the display driver's) and dd2d9's presenter all shared the one
+  processor with the game, and where thread priorities count for little (Wine) the mixer
+  waited behind the game's loop: Need for Speed III's sound crackled in a race. Each thread
+  is now put on the game's processors as it starts unless it starts in one of those modules
+  (the log names each one left free, and with `log=2` every thread, where it starts and
+  which way it went). Every thread that can run the game's code is pinned
+  as before, Windows' timer and wave-callback threads included, and so is any thread dd2d9
+  doesn't recognise. The game is told of the same processors as before; a process affinity
+  it sets itself is kept for it to read back.
+- ddtest's check of a DLL releasing DirectDraw as it is unloaded gave the Direct3D device a
+  fifth of a second to come up, and failed about one run in four with dd2d9's threads on
+  other processors (`cpus=0`, and now the default): a second.
+
 ## 1.8.5
 - **Need for Speed III no longer freezes in its movies on more than one processor**
   (`safeterminate=on`, the default). The game stops its stream thread by waiting for the

@@ -161,9 +161,10 @@ DWORD WINAPI Presenter::ThreadProc(void* self) {
     // Above the game's threads: it runs briefly when woken, and must then run at once. A
     // game drawing as fast as it can without waiting for a vertical blank (DDFLIP_NOVSYNC,
     // or blits to the primary in a loop) would otherwise share a processor with it at equal
-    // priority (cpus=1 puts the whole process on one) and only be let run at the end of its
-    // time slices, about 30 times a second: the picture moved at that rate whatever the
-    // game's, and a fade the game blits in a few seconds showed few of its steps.
+    // priority (where they share one: a machine with one core, as cpus=1 keeps this thread
+    // off the game's) and only be let run at the end of its time slices, about 30 times a
+    // second: the picture moved at that rate whatever the game's, and a fade the game blits
+    // in a few seconds showed few of its steps.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     auto* p = static_cast<Presenter*>(self);
     const HMODULE hold = p->threadHold_;
