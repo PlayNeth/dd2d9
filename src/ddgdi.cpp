@@ -238,11 +238,11 @@ bool ScreenPaletteGet(PALETTEENTRY out[256]) {
 // PrintScreen let go in the exclusive window with EnablePrintScreen set: the primary copied
 // to the clipboard as a DIB, as ddraw.dll's window procedure copies it (FUN_7375dc1e,
 // FUN_7375d82c): 8 bits with its own palette, or without one GDI's palette of the screen
-// (GetSystemPaletteEntries on ddraw.dll's DC: ScreenPaletteGet here);
-// 16 bits of 5-5-5, or of 5-6-5 with its masks, 24 bits, 32 bits with its masks (red high), or without them where red is low (as ddraw.dll
-// writes it: its colours swapped); in any other format, nothing. The rows bottom up, each as
-// many bytes as the DIB's, read through a whole lock (what Direct3D drew too). Unlike
-// ddraw.dll, the memory is freed and the clipboard closed when the clipboard can't be opened
+// (GetSystemPaletteEntries on ddraw.dll's DC: ScreenPaletteGet here); 16 bits of 5-5-5, or of
+// 5-6-5 with its masks, 24 bits, 32 bits with its masks (red high), or without them where red
+// is low (as ddraw.dll writes it: its colours swapped); in any other format, nothing. The
+// rows bottom up, each as many bytes as the DIB's, read through a whole lock (what Direct3D
+// drew too). Unlike ddraw.dll, the memory is freed and the clipboard closed when it can't be opened
 // or won't take it. g_lock held.
 void CopyPrimaryToClipboard(DDraw* dd, HWND hwnd) {
     Surface* p = dd->primary;

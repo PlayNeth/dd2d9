@@ -469,7 +469,8 @@ it only shows up with invalid parameters, unusual sequences or exact-return-code
    - Fix: in `ReserveSystemEntries`, set only peRed/peGreen/peBlue. Since 1.9.0 dd2d9 makes the 0x05 rewrite too (`Palette::Realized`,
      `Palette::SetEntries`), as measured on XP. FUN_73751e14:74 tests the *surface's* local flags (param_1[1] + 0x1c) where the palette's
      were meant: entries 0/255 are forced at attach when the primary is DDRAWISURF_ATTACHED (0x1, a flip chain's front) without
-     DDRAWISURF_HASCKEYDESTBLT (0x200), ALLOW256 or not.
+     DDRAWISURF_HASCKEYDESTBLT (0x200), ALLOW256 or not (measured on XP). dd2d9 1.9.0 copied that; since 1.9.1 it leaves an ALLOW256
+     palette's two entries as set, a deliberate difference.
 5. **Palette QueryInterface for an unknown IID** (edge case).
    - XP: **E_FAIL with `*ppv` untouched**. A bad riid → INVALIDPARAMS (QI.c:23-27, 52; 0x737671f1).
    - dd2d9 (surface.cpp:1374-1375): `*out = NULL`, E_NOINTERFACE.

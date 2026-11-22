@@ -26,7 +26,7 @@ struct BlitKey {
 };
 
 // The colour key Blt's flags ask for, as values in the keyed surface's format: the override's
-// or the surface's, a range as the blit into `dst` compares it (see blit.cpp).
+// low value, or the surface's, a range as the blit into `dst` compares it (see blit.cpp).
 struct KeyRange {
     bool on = false;
     DWORD lo = 0, hi = 0;

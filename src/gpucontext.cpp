@@ -488,6 +488,10 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
                 if (bytes == 4) {  // (the usual buffers, 24 bits with 8 of stencil, every frame)
                     auto* q = reinterpret_cast<uint32_t*>(px);
                     for (size_t x = 0; x < count; x++) q[x] = (q[x] & keep) | bits;
+                } else if (bytes == 2) {  // (a 16-bit one the GPU can't give back, every frame too)
+                    auto* q = reinterpret_cast<uint16_t*>(px);
+                    const uint16_t k = uint16_t(keep), v = uint16_t(bits);
+                    for (size_t x = 0; x < count; x++) q[x] = uint16_t((q[x] & k) | v);
                 } else {
                     for (size_t x = 0; x < count; x++, px += bytes) WritePixel(px, bytes, (ReadPixel(px, bytes) & keep) | bits);
                 }

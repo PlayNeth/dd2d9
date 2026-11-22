@@ -477,12 +477,7 @@ HRESULT Surface::SetPalette(IDirectDrawPalette* p, int version) {
     palette = np;
     if (dd->primary == this) {  // (GDI's palette of the screen follows the primary's)
         if (np) {
-            // ddraw.dll forces the palette's ends by the surface's flags where the palette's
-            // were meant (FUN_73751e14: DDRAWISURF_ATTACHED and DDRAWISURF_HASCKEYDESTBLT have
-            // the values of DDRAWIPAL_256 and DDRAWIPAL_ALLOW256): on a primary of a flip chain
-            // without a destination key for blits, whatever the palette's caps. A primary on
-            // its own keeps a DDPCAPS_ALLOW256 palette's ends (its PrintScreen copy shows them).
-            if (np != old && dd->Exclusive()) np->Realized(chainNext && !hasCk[kCkDestBlt]);
+            if (np != old && dd->Exclusive()) np->Realized();
             ScreenPaletteShown(np->entries);
         } else {
             ScreenPaletteGone();

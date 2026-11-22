@@ -323,6 +323,8 @@ inline void IdentityRamp(DDGAMMARAMP* r) {
 // (and, once loaded, loadable).
 void ReadGammaCalibrator();
 bool GammaCalibratorRegistered();
+// The system settings exclusive mode changed, put back as the process ends (ddwindow.cpp).
+void ExclusiveSettingsAtExit();
 // EnablePrintScreen under HKLM\Software\Microsoft\DirectDraw, read as each DirectDraw object is
 // made, as ddraw.dll reads it (ddgdi.cpp).
 void ReadPrintScreenSetting();

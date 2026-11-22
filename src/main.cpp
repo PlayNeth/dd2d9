@@ -97,6 +97,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
     }
     if (reason == DLL_THREAD_ATTACH) PinNewThread();
     if (reason == DLL_PROCESS_DETACH) {
+        ExclusiveSettingsAtExit();  // (a game that never left exclusive mode)
         if (!reserved) {  // unloaded while the process goes on: nothing may point into it
             CrashLoggerRemove();
             UnpatchAll();

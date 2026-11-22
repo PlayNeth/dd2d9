@@ -204,7 +204,6 @@ static const int* BuildYMap(const BlitJob& j) {
     return g_ymap.data();
 }
 
-
 // SSE2 helpers per pixel size.
 template <typename T> struct Simd;
 template <> struct Simd<uint8_t> {

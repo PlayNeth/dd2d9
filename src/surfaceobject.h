@@ -84,7 +84,7 @@ public:
     Palette* self = this;
 
     void ReserveSystemEntries();
-    void Realized(bool ends);
+    void Realized();
     Palette(DDraw* dd, DWORD caps, const PALETTEENTRY* entries);
     static Palette* From(void* iface) { return static_cast<Palette*>(ImplFromIface(iface)); }
 

@@ -19,20 +19,25 @@ struct RectText {
 
 std::vector<RECT> g_clips;
 
-// A key's range as the blit into `dst` compares it: the driver's, into video memory, the whole
-// range; the emulation layer's (into system memory) the low value alone (measured on XP: a
-// KEYSRCOVERRIDE range keyed the low colour only there).
+// A surface's key as the blit into `dst` compares it: the driver's, into video memory, the
+// whole range; the emulation layer's (into system memory) the low value alone.
 static KeyRange KeyAsCompared(const DDCOLORKEY& k, const Surface* dst) {
     const DWORD lo = k.dwColorSpaceLowValue;
     return {true, lo, (dst->desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) ? k.dwColorSpaceHighValue : lo};
 }
+// An override's key (DDBLTFX's): its low value alone, wherever the blit goes. Nothing says an
+// override is a range (a surface's key has DDCKEY_COLORSPACE for that), and games leave the high
+// value uninitialized: most drivers had no ranges and never looked at it. Deliberately not as
+// XP with the Voodoo3's driver, which compared the range into video memory and, for a
+// destination override into system memory, refused one (DDERR_NOCOLORKEYHW); 1.9.0 did both.
+static KeyRange OverrideKey(const DDCOLORKEY& k) { return {true, k.dwColorSpaceLowValue, k.dwColorSpaceLowValue}; }
 KeyRange SourceKeyOf(DWORD flags, const DDBLTFX* fx, const Surface* src, const Surface* dst) {
-    if (flags & DDBLT_KEYSRCOVERRIDE) return KeyAsCompared(fx->ddckSrcColorkey, dst);
+    if (flags & DDBLT_KEYSRCOVERRIDE) return OverrideKey(fx->ddckSrcColorkey);
     if (flags & DDBLT_KEYSRC) return KeyAsCompared(src->ck[kCkSrcBlt], dst);
     return {};
 }
 KeyRange DestKeyOf(DWORD flags, const DDBLTFX* fx, const Surface* owner, const Surface* dst) {
-    if (flags & DDBLT_KEYDESTOVERRIDE) return KeyAsCompared(fx->ddckDestColorkey, dst);
+    if (flags & DDBLT_KEYDESTOVERRIDE) return OverrideKey(fx->ddckDestColorkey);
     if (flags & DDBLT_KEYDEST) return KeyAsCompared(owner->ck[kCkDestBlt], dst);
     return {};
 }
@@ -87,10 +92,6 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
     if ((flags & DDBLT_KEYSRC) && !src) return DDERR_INVALIDOBJECT;
     if ((flags & DDBLT_KEYSRC) && ((flags & DDBLT_KEYSRCOVERRIDE) || !src->hasCk[kCkSrcBlt])) return DDERR_INVALIDPARAMS;
     if ((flags & DDBLT_KEYDEST) && ((flags & DDBLT_KEYDESTOVERRIDE) || !hasCk[kCkDestBlt])) return DDERR_INVALIDPARAMS;
-    // A destination key range into system memory: the emulation layer has none (measured on XP).
-    if ((flags & DDBLT_KEYDESTOVERRIDE) && !(desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) &&
-        fx->ddckDestColorkey.dwColorSpaceLowValue != fx->ddckDestColorkey.dwColorSpaceHighValue)
-        return DDERR_NOCOLORKEYHW;
     // The operation: the first of these flags decides.
     const DWORD fills = DDBLT_COLORFILL | DDBLT_DEPTHFILL;
     if (flags & DDBLT_ROP) {

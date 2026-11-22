@@ -3,6 +3,34 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.9.1
+- **A `DDPCAPS_ALLOW256` palette keeps its first and last entries on the primary.** When a
+  palette goes on the primary, `ddraw.dll` makes its first and last entries black and white
+  by the surface's flags where the palette's were meant (`DDRAWISURF_ATTACHED` and
+  `DDRAWISURF_HASCKEYDESTBLT` have the values of `DDRAWIPAL_256` and `DDRAWIPAL_ALLOW256`):
+  on the primary of a flip chain a palette made with `DDPCAPS_ALLOW256` lost its own two
+  colours, shown and read back as black and white until `SetEntries` wrote them, and on a
+  primary without back buffers it kept them. 1.9.0 copied that. dd2d9 now does what was
+  meant: the two entries are black and white only without `DDPCAPS_ALLOW256`, wherever the
+  primary is. The `peFlags` read back stay XP's.
+- **A game that exits without leaving exclusive mode gets the system's settings put back.**
+  Since 1.9.0 dd2d9 turns off the cursor shadow, hot tracking and the IME's status window while
+  a fullscreen game is in front, as `ddraw.dll` does, and put them back at a focus loss, on
+  leaving exclusive mode and at the release. A game that simply ended (many never release
+  DirectDraw) left them off for the rest of the session. They are put back as the DLL is
+  unloaded now, which `ddraw.dll` itself doesn't do: its unloading only frees its record of
+  the process. (Not for a game that crashes or is terminated.)
+- **An override key (`DDBLT_KEYSRCOVERRIDE`, `DDBLT_KEYDESTOVERRIDE`) is its low value alone
+  again.** 1.9.0 compared an override's range in blits into video memory, as XP did with the
+  Voodoo3's driver, and refused a destination override's range into system memory. But nothing
+  marks an override as a range, and games leave the `DDBLTFX`'s high value uninitialized: most
+  drivers had no ranges and never read it, so a game with garbage there got more colours keyed
+  out of its blits, or the blit refused. A range is a surface's key, set with
+  `DDCKEY_COLORSPACE`: those stay as 1.9.0 has them.
+- **Direct3D's clear of a 16-bit Z buffer the GPU can't give back** (no depth textures, or
+  `zaccess=off`) is mirrored into the buffer's memory a word at a time: 1.9.0 did it pixel by
+  pixel through the generic reader and writer, at every clear.
+
 ## 1.9.0
 What dd2d9 still lacked of DirectDraw: as XP's `ddraw.dll` has it with the Voodoo3's driver
 (measured with new sections of `fmtprobe`), and as the DirectX 7 SDK describes it where that

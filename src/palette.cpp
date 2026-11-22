@@ -37,15 +37,15 @@ void Palette::ReserveSystemEntries() {
 
 // Put on the primary in exclusive mode: ddraw.dll realizes the palette, and its entries read
 // back as realized from then on, off the primary too (XP SP3, fmtprobe's "palette entries read
-// back"): the low four bits of each peFlags are 5 (PC_RESERVED | PC_NOCOLLAPSE). `ends`: the
-// first and last entries become black and white as well, DDPCAPS_ALLOW256 or not (with it,
-// SetEntries on the primary then writes those two).
-void Palette::Realized(bool ends) {
+// back"): the low four bits of each peFlags are 5 (PC_RESERVED | PC_NOCOLLAPSE). The colours
+// stay: ddraw.dll also makes the first and last entries black and white there by the surface's
+// flags where the palette's were meant (FUN_73751e14: DDRAWISURF_ATTACHED and
+// DDRAWISURF_HASCKEYDESTBLT have the values of DDRAWIPAL_256 and DDRAWIPAL_ALLOW256), so a
+// DDPCAPS_ALLOW256 palette lost its own two on the primary of a flip chain, until SetEntries
+// wrote them. dd2d9 does what was meant (since 1.9.1): only a palette without
+// DDPCAPS_ALLOW256 has black and white there, which ReserveSystemEntries has seen to already.
+void Palette::Realized() {
     for (PALETTEENTRY& e : entries) e.peFlags = BYTE((e.peFlags & 0xF0) | 5);
-    if (ends) {
-        entries[0].peRed = entries[0].peGreen = entries[0].peBlue = 0;
-        entries[255].peRed = entries[255].peGreen = entries[255].peBlue = 255;
-    }
     version = NextCpuSerial();
 }
 

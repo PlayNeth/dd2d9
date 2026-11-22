@@ -3246,10 +3246,6 @@ static int RunDesktop8() {
     return 0;
 }
 
-// DDSCAPS_OWNDC, as measured on XP (fmtprobe section 31): system memory only; the DC GetDC
-// gives stays the surface's (the same one asked again, and after ReleaseDC), it can be locked
-// and filled with the DC out, ReleaseDC only checks the DC (any interface), and the
-// uniqueness value stays 0. What GDI draws on the DC is in the memory at the next lock.
 // YUV surfaces as measured on XP (fmtprobe section 33, the Voodoo3): where each video format is
 // made, as an offscreen surface, an overlay and a texture, and its colour fills (dwFillColor's
 // low 16 bits repeated where the driver fills it).
@@ -3312,6 +3308,10 @@ static int RunYuvSurfaces() {
     return 0;
 }
 
+// DDSCAPS_OWNDC, as measured on XP (fmtprobe section 31): system memory only; the DC GetDC
+// gives stays the surface's (the same one asked again, and after ReleaseDC), it can be locked
+// and filled with the DC out, ReleaseDC only checks the DC (any interface), and the
+// uniqueness value stays 0. What GDI draws on the DC is in the memory at the next lock.
 static int RunOwnDc() {
     IDirectDraw7* dd = nullptr;
     DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
@@ -3480,8 +3480,10 @@ static int RunOwnDc() {
 
 // Colour-key ranges (DDCKEY_COLORSPACE), as measured on XP (fmtprobe section 26): in video
 // memory set, made with (kept as the low value alone) and blitted with, compared colour by
-// colour; in system memory, the emulation layer's, none (a source override's low value alone,
-// a destination override's range refused).
+// colour; in system memory, the emulation layer's, none. An override (DDBLTFX's key) is its
+// low value alone in either memory: dd2d9's own, deliberately (on XP the Voodoo3's driver
+// compared an override's range in video memory, and the emulation layer refused a destination
+// override's; see OverrideKey in blit.cpp).
 static int RunKeyRanges() {
     IDirectDraw7* dd = nullptr;
     DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
@@ -3572,7 +3574,7 @@ static int RunKeyRanges() {
             fx.dwSize = sizeof(fx);
             fx.ddckSrcColorkey = range;
             const HRESULT b2 = dst->Blt(nullptr, src, nullptr, DDBLT_KEYSRCOVERRIDE | DDBLT_WAIT, &fx);
-            const bool r2 = is(dst, video ? c.keyed : c.lowOnly);
+            const bool r2 = is(dst, c.lowOnly);
             fill(dst, c.marker);
             RECT all = {0, 0, 8, 1};
             const HRESULT b3 = dst->BltFast(0, 0, src, &all, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT);
@@ -3584,7 +3586,7 @@ static int RunKeyRanges() {
                   "key ranges, %s in %s: SetColorKey(SRCBLT | COLORSPACE) 0x%08lx (GetColorKey 0x%08lx: %lx-%lx); Blt KEYSRC "
                   "0x%08lx (%s), KEYSRCOVERRIDE 0x%08lx (%s), BltFast SRCCOLORKEY 0x%08lx (%s)",
                   c.name, video ? "video memory" : "system memory", sk, gk, got.dwColorSpaceLowValue, got.dwColorSpaceHighValue,
-                  b1, r1 ? "as XP" : "not as XP", b2, r2 ? "as XP" : "not as XP", b3, r3 ? "as XP" : "not as XP");
+                  b1, r1 ? "right" : "wrong", b2, r2 ? "right" : "wrong", b3, r3 ? "right" : "wrong");
             fill(src, c.solid);
             got = {};
             const HRESULT dk = dst->SetColorKey(DDCKEY_DESTBLT | DDCKEY_COLORSPACE, &range);
@@ -3595,7 +3597,9 @@ static int RunKeyRanges() {
             put(dst, c.px);
             fx.ddckDestColorkey = range;
             const HRESULT b5 = dst->Blt(nullptr, src, nullptr, DDBLT_KEYDESTOVERRIDE | DDBLT_WAIT, &fx);
-            const bool r5 = is(dst, video ? c.destKeyed : c.px);
+            DWORD destLow[8];  // (the solid colour where the destination is the low value)
+            for (int x = 0; x < 8; x++) destLow[x] = c.px[x] == c.low ? c.solid : c.px[x];
+            const bool r5 = is(dst, destLow);
             src->Release();
             dst->Release();
             HRESULT hm;
@@ -3604,13 +3608,13 @@ static int RunKeyRanges() {
             const HRESULT gm = made ? made->GetColorKey(DDCKEY_SRCBLT, &mk) : E_FAIL;
             if (made) made->Release();
             CHECK((video ? dk == DD_OK && gdk == DD_OK : dk == DDERR_NOCOLORKEYHW && gdk == DDERR_NOCOLORKEY) &&
-                      b4 == (video ? DD_OK : DDERR_INVALIDPARAMS) && r4 && b5 == (video ? DD_OK : DDERR_NOCOLORKEYHW) && r5 &&
+                      b4 == (video ? DD_OK : DDERR_INVALIDPARAMS) && r4 && b5 == DD_OK && r5 &&
                       (video ? hm == DD_OK && gm == DD_OK && mk.dwColorSpaceLowValue == c.low && mk.dwColorSpaceHighValue == c.low
                              : hm == DDERR_NOCOLORKEYHW),
                   "key ranges, %s in %s: SetColorKey(DESTBLT | COLORSPACE) 0x%08lx (GetColorKey 0x%08lx); Blt KEYDEST 0x%08lx "
                   "(%s), KEYDESTOVERRIDE 0x%08lx (%s); CreateSurface with a CKSRCBLT range 0x%08lx (its key %lx-%lx)",
-                  c.name, video ? "video memory" : "system memory", dk, gdk, b4, r4 ? "as XP" : "not as XP", b5,
-                  r5 ? "as XP" : "not as XP", hm, mk.dwColorSpaceLowValue, mk.dwColorSpaceHighValue);
+                  c.name, video ? "video memory" : "system memory", dk, gdk, b4, r4 ? "right" : "wrong", b5,
+                  r5 ? "right" : "wrong", hm, mk.dwColorSpaceLowValue, mk.dwColorSpaceHighValue);
         }
     }
     dd->Release();
@@ -4241,18 +4245,12 @@ static int RunFuzz() {
                     useSrc = true;
                 }
                 if (keyMode == 2) {
-                    // An override's range in video memory; in system memory one colour, the high
-                    // value ignored.
+                    // An override key is one colour: the high value is ignored.
                     flags |= DDBLT_KEYSRCOVERRIDE;
-                    if (video) {
-                        used = Rand() % 2 ? sk : makeKey(2, 300);
-                        fx.ddckSrcColorkey = {used.lo, used.hi};
-                    } else {
-                        fx.ddckSrcColorkey.dwColorSpaceLowValue = Rand() % 2 ? sk.lo : (Rand() & valueMask);
-                        fx.ddckSrcColorkey.dwColorSpaceHighValue = Rand();
-                        used = FuzzKey();
-                        used.lo = used.hi = fx.ddckSrcColorkey.dwColorSpaceLowValue & fm.keyMask;
-                    }
+                    fx.ddckSrcColorkey.dwColorSpaceLowValue = Rand() % 2 ? sk.lo : (Rand() & valueMask);
+                    fx.ddckSrcColorkey.dwColorSpaceHighValue = Rand();
+                    used = FuzzKey();
+                    used.lo = used.hi = fx.ddckSrcColorkey.dwColorSpaceLowValue & fm.keyMask;
                     useSrc = true;
                 }
                 if (keyMode == 3 || keyMode == 4) {
@@ -6344,7 +6342,7 @@ static int RunPrintScreen() {
 // GDI's palette of the screen in an 8-bit exclusive mode, as measured on XP (fmtprobe section
 // 37): GetSystemPaletteEntries and GetSystemPaletteUse with no palette on the primary (the
 // static colours at the ends), with one on a plain surface or the back buffer (the same), on
-// the primary (its entries, the first black and the last white; no static colours), after
+// the primary (its entries, all of them: see `state` below; no static colours), after
 // SetEntries (as given, the ends too), with another and after a flip, with the palette taken
 // off (the static colours back, the rest kept), released while the primary holds it (still
 // it), and the primary gone; the call's bounds; the screen's colour resolution.
@@ -6386,7 +6384,8 @@ static int RunScreenPalette() {
     auto rgb = [](const PALETTEENTRY& e) { return DWORD(e.peRed) << 16 | DWORD(e.peGreen) << 8 | e.peBlue; };
     // The screen's palette now: `use`, the 256 entries, and whether they are `mid` (a palette's
     // colours, or null: any) from 10 to 245 with the static colours at the ends (statics) or
-    // the palette's own from 1 to 254 between black and white.
+    // all the palette's own. (On XP the first and last were black and white for these
+    // DDPCAPS_ALLOW256 palettes too, ddraw.dll testing the wrong flags: see Palette::Realized.)
     auto state = [&](const char* what, UINT use, const PALETTEENTRY* mid, bool statics) {
         static const DWORD kLow[10] = {0x000000, 0x800000, 0x008000, 0x808000, 0x000080,
                                        0x800080, 0x008080, 0xC0C0C0, 0xACA899, 0xECE9D8};
@@ -6399,14 +6398,12 @@ static int RunScreenPalette() {
         ReleaseDC(nullptr, sdc);
         int wrong = 0, first = -1;
         for (int i = 0; i < 256; i++) {
-            const bool end = statics ? i < 10 || i >= 246 : i == 0 || i == 255;
-            const DWORD want = !end ? (mid ? rgb(mid[i]) : rgb(sys[i]))
-                               : statics ? (i < 10 ? kLow[i] : kHigh[i - 246])
-                               : i ? 0xFFFFFFu : 0u;
+            const bool end = statics && (i < 10 || i >= 246);
+            const DWORD want = end ? (i < 10 ? kLow[i] : kHigh[i - 246]) : mid ? rgb(mid[i]) : rgb(sys[i]);
             if ((rgb(sys[i]) != want || sys[i].peFlags) && !wrong++) first = i;
         }
         CHECK(got == 256 && gotUse == use && !wrong,
-              "GDI's palette of the screen, %s: %u entries, use %u (%u); %d not XP's (the first: %d, %06lx)", what, got, gotUse, use, wrong,
+              "GDI's palette of the screen, %s: %u entries, use %u (%u); %d wrong (the first: %d, %06lx)", what, got, gotUse, use, wrong,
               first, first >= 0 ? rgb(sys[first]) : 0);
     };
     HDC sdc = GetDC(nullptr);
@@ -6446,8 +6443,9 @@ static int RunScreenPalette() {
           rgb(part[16]));
     // A palette's own entries, read back (XP SP3, fmtprobe's "palette entries read back"): as
     // given until it is on the primary; there, and from then on, the low four bits of each
-    // peFlags are 5, and on this primary, a flip chain's, the first and last entries black and
-    // white, with DDPCAPS_ALLOW256 too (SetEntries on the primary then writes those two).
+    // peFlags are 5. The colours stay: black and white at the ends without DDPCAPS_ALLOW256,
+    // the palette's own with it (on XP black and white on this primary, a flip chain's, until
+    // SetEntries wrote them: ddraw.dll's mistake, see Palette::Realized).
     for (int kind = 0; kind < 4; kind++) {
         const bool all = kind & 1;
         const BYTE given = kind & 2 ? 0xFF : 0;
@@ -6471,7 +6469,8 @@ static int RunScreenPalette() {
             for (int i = 0; i < 256; i++)
                 if (memcmp(&got[i], &want[i], sizeof(PALETTEENTRY)) && !wrong++) first = i;
             CHECK(hr == DD_OK && !wrong,
-                  "a palette's entries read back (%s, flags 0x%02x), %s: 0x%08lx, %d not XP's (the first: %d, %06lx/%02x for %06lx/%02x)",
+                  "a palette's entries read back (%s, flags 0x%02x), %s: 0x%08lx, %d wrong (the first: %d, %06lx/%02x for "
+                  "%06lx/%02x)",
                   all ? "ALLOW256" : "8BIT", given, what, hr, wrong, first, first >= 0 ? rgb(got[first]) : 0,
                   first >= 0 ? got[first].peFlags : 0, first >= 0 ? rgb(want[first]) : 0, first >= 0 ? want[first].peFlags : 0);
         };
@@ -6492,7 +6491,6 @@ static int RunScreenPalette() {
         back->SetPalette(nullptr);
         front->SetPalette(pc);
         for (PALETTEENTRY& e : want) e.peFlags = BYTE((e.peFlags & 0xF0) | 5);
-        ends(true);
         same("on the primary");
         set(0, true);
         set(104, true);
@@ -6781,11 +6779,62 @@ static int RunActivation() {
           normal.errorMode, normal.shadow, normal.hot, normal.ime, normal.semaphore);
     dd->Release();
     DestroyWindow(hwnd);
+    // A program that ends in exclusive mode without releasing anything ("ddtest leave", a
+    // process of its own): the settings are put back as it ends, the semaphore gone. Read by
+    // another process ("ddtest leave after": this one may hold what it read before).
+    char exe[MAX_PATH], cmd[MAX_PATH + 32];
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    fflush(g_out);
+    auto child = [&](const char* mode) {
+        snprintf(cmd, sizeof(cmd), "\"%s\" %s", exe, mode);
+        STARTUPINFOA si = {};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi = {};
+        DWORD code = DWORD(-1);
+        if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+            if (WaitForSingleObject(pi.hProcess, 60000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
+            GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        return code;
+    };
+    const DWORD left = child("leave"), after = child("leave after");
+    Pump();
+    CHECK(left == 0 && after == DWORD(10 + (before.hot ? 1 : 0) + (before.shadow ? 2 : 0)) && !sys().semaphore,
+          "a program ended in exclusive mode without releasing DirectDraw (exit %lu: 0, hot tracking off there): the settings "
+          "as they were (%lu: 10 + hot tracking %d + 2 x cursor shadow %d), the semaphore gone (%d)",
+          left, after, before.hot, before.shadow, !sys().semaphore);
     SetErrorMode(keepMode);
     SystemParametersInfoA(SPI_SETCURSORSHADOW, 0, reinterpret_cast<PVOID>(INT_PTR(was.shadow)), 0);
     SystemParametersInfoA(SPI_SETHOTTRACKING, 0, reinterpret_cast<PVOID>(INT_PTR(was.hot)), 0);
     SystemParametersInfoA(SPI_SETSHOWIMEUI, was.ime, nullptr, 0);
     return 0;
+}
+
+// "ddtest leave", started by RunActivation: exclusive mode taken, in front, and the process
+// ended there, nothing released. Its exit code: 0 if the settings were off (hot tracking, which
+// RunActivation turned on), 2 if not, 1 if exclusive mode couldn't be taken. "ddtest leave
+// after": the settings as a new process finds them, 10 + hot tracking + 2 x cursor shadow.
+static int RunLeave(bool after) {
+    if (after) {
+        BOOL hot = FALSE, shadow = FALSE;
+        SystemParametersInfoA(SPI_GETHOTTRACKING, 0, &hot, 0);
+        SystemParametersInfoA(SPI_GETCURSORSHADOW, 0, &shadow, 0);
+        ExitProcess(UINT(10 + (hot ? 1 : 0) + (shadow ? 2 : 0)));
+    }
+    HWND hwnd = MakeWindow(WS_POPUP | WS_VISIBLE, 640, 480);
+    SetForegroundWindow(hwnd);
+    Pump();
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd || FAILED(dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)) ||
+        FAILED(dd->SetDisplayMode(640, 480, 16, 0, 0)))
+        ExitProcess(1);
+    Pump();
+    BOOL hot = TRUE;
+    SystemParametersInfoA(SPI_GETHOTTRACKING, 0, &hot, 0);
+    ExitProcess(hot ? 2 : 0);
 }
 
 // DDSCL_NOWINDOWCHANGES with the mode shown scaled (run with display=borderless): Hydro
@@ -8084,6 +8133,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
     else if (strstr(cmd, "calibrator")) r = RunCalibrator();
+    else if (strstr(cmd, "leave")) r = RunLeave(strstr(cmd, "after") != nullptr);
     else
         r = RunUnit() | RunExecute() | RunTargetGone() | RunPalTarget() | RunDrawnPrimary(8) | RunDrawnPrimary(32) |
             RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() | RunCoopModes() |

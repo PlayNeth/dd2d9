@@ -108,6 +108,23 @@ void ExclusiveSettings(bool on) {
     }
 }
 
+// The process ends with the settings still changed: a game that exits without releasing
+// DirectDraw or leaving exclusive mode, as many do. Put back: 1.9.0 left the cursor shadow,
+// hot tracking and the IME's status window off for the rest of the user's session. dd2d9's
+// own: ddraw.dll's detach (FUN_7373149b) only frees its record of the process, undoing none
+// of this. From DllMain's detach, without the display lock: no other thread runs, and one may
+// have ended holding it.
+// (A process that is terminated, or crashes, gets no detach: nothing can be done there.)
+void ExclusiveSettingsAtExit() {
+    Settings& s = g_settings;
+    if (!s.on) return;
+    s.on = false;
+    SystemParametersInfoA(SPI_SETCURSORSHADOW, 0, reinterpret_cast<PVOID>(INT_PTR(s.cursorShadow)), 0);
+    SystemParametersInfoA(SPI_SETHOTTRACKING, 0, reinterpret_cast<PVOID>(INT_PTR(s.hotTracking)), 0);
+    SystemParametersInfoA(SPI_SETSHOWIMEUI, s.imeUi != FALSE, nullptr, 0);
+    g_imeUi.store(0);
+}
+
 void ApplyImeUi() {
     if (const UINT v = g_imeUi.exchange(0)) SystemParametersInfoA(SPI_SETSHOWIMEUI, v - 1, nullptr, 0);
 }
