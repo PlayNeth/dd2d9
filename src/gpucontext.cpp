@@ -445,20 +445,43 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
     // and the one read back are the 16-bit target's.)
     const Format& tf = p.rt->buf->fmt;
     if ((flags & D3DCLEAR_TARGET) && tf.bpp == 16 && !tf.CopyOnly()) color = ClearColor16(tf, color, p.software);
-    // The stencil value in as many bits as the buffer has (ddraw.dll's Clear: 3 clears a
-    // buffer of 1 stencil bit to 1, 2 to 0), and into the CPU copy too, which the depth read
-    // back later leaves alone: locked after a clear, the buffer shows its stencil.
+    // What the clear leaves in the buffer's CPU copy (`bits`, in place of all but `keep`). The
+    // stencil value in as many bits as the buffer has (ddraw.dll's Clear: 3 clears a buffer of
+    // 1 stencil bit to 1, 2 to 0): the depth read back later leaves it alone, so locked after
+    // a clear, the buffer shows its stencil.
+    DWORD keep = ~DWORD(0), bits = 0;
     if ((flags & D3DCLEAR_STENCIL) && p.z->buf->fmt.a) {
         const Format& zf = p.z->buf->fmt;
         const DWORD shift = DWORD(__builtin_ctz(zf.a));
         stencil &= zf.a >> shift;
+        keep &= ~zf.a;
+        bits |= stencil << shift;
+        stencil &= 0xFF;  // (the GPU's has 8 bits)
+    }
+    // The depth the buffer's own word holds, as ddraw.dll's buffer does after a clear (0.9
+    // in 16 bits is 0xe665, less than 0.9): what the buffer shows locked, and what the
+    // depths drawn next are compared with. (A buffer of fewer bits than the GPU's 24: the
+    // GPU rounds a wider one's itself.) Into the CPU copy too where the GPU's can't be read
+    // back (no depth texture for it: one with stencil without INTZ): locked after a clear, it
+    // shows the clear at least.
+    if (flags & D3DCLEAR_ZBUFFER) {
+        DWORD mask, shift, maxv;
+        ZBits(p.z->buf->fmt, &mask, &shift, &maxv);
+        const DWORD word = maxv ? DepthWord(z, maxv) : 0;
+        if (maxv && maxv < 0xFFFFFF) z = float(double(word) / maxv);
+        if (maxv && !(p.z->buf->gpu && p.z->buf->gpu->Readable())) {
+            keep &= ~mask;
+            bits |= (word << shift) & mask;
+        }
+    }
+    if (keep != ~DWORD(0)) {
+        const Format& zf = p.z->buf->fmt;
         const RECT view = {LONG(p.vp.X), LONG(p.vp.Y), LONG(p.vp.X + p.vp.Width), LONG(p.vp.Y + p.vp.Height)};
         const RECT all = {0, 0, p.z->buf->w, p.z->buf->h};
         const DWORD bytes = zf.Bytes();
         for (DWORD i = 0; i < std::max<DWORD>(n, 1); i++) {
             RECT r;
             if (!IntersectRect(&r, n ? &rects[i] : &view, &all)) continue;
-            const DWORD keep = ~zf.a, bits = stencil << shift;
             const size_t count = size_t(r.right - r.left);
             for (LONG y = r.top; y < r.bottom; y++) {
                 uint8_t* px = p.z->buf->Row(y) + size_t(r.left) * bytes;
@@ -470,16 +493,6 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
                 }
             }
         }
-        stencil &= 0xFF;  // (the GPU's has 8 bits)
-    }
-    // The depth the buffer's own word holds, as ddraw.dll's buffer does after a clear (0.9
-    // in 16 bits is 0xe665, less than 0.9): what the buffer shows locked, and what the
-    // depths drawn next are compared with. (A buffer of fewer bits than the GPU's 24: the
-    // GPU rounds a wider one's itself.)
-    if (flags & D3DCLEAR_ZBUFFER) {
-        DWORD mask, shift, maxv;
-        ZBits(p.z->buf->fmt, &mask, &shift, &maxv);
-        if (maxv && maxv < 0xFFFFFF) z = float(double(DepthWord(z, maxv)) / maxv);
     }
     p.dev->Clear(n, reinterpret_cast<const D3DRECT*>(rects), flags, color, z, stencil);
     // Emulated W buffering's scale starts again with each whole depth clear (a frame): one
@@ -492,7 +505,7 @@ void GpuContext::Clear(DWORD n, const RECT* rects, DWORD flags, DWORD color, flo
         p.rt->buf->gpu->serial = ++g_drawSerial;
         p.rt->buf->gpuStale = false;
     }
-    if ((flags & D3DCLEAR_ZBUFFER) && p.z && p.z->buf->gpu && p.z->buf->gpu->ztex) {
+    if ((flags & D3DCLEAR_ZBUFFER) && p.z && p.z->buf->gpu && p.z->buf->gpu->Readable()) {
         p.z->buf->cpuStale = true;  // a writable Z buffer: read back when DirectDraw reads it
         if (whole) p.z->buf->gpuStale = false;
     }

@@ -127,7 +127,14 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
     c.dwNumFourCCCodes = DWORD(std::size(kFourCCCodes));  // as GetFourCCCodes lists them
     c.dwCaps2 = DDCAPS2_WIDESURFACES | DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_CANRENDERWINDOWED |
                 DDCAPS2_PRIMARYGAMMA | DDCAPS2_FLIPNOVSYNC | DDCAPS2_FLIPINTERVAL | DDCAPS2_CERTIFIED;
-    c.dwCKeyCaps = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT;  // no key ranges (see SetColorKey)
+    // A gamma calibrator registered (see SetGammaRamp), as ddraw.dll adds it to a driver with
+    // primary gamma: DDSGR_CALIBRATE.
+    if (GammaCalibratorRegistered()) c.dwCaps2 |= DDCAPS2_CANCALIBRATEGAMMA;
+    // Colour controls on the primary (IDirectDrawColorControl, applied to its picture: the
+    // DirectX 7 SDK's; the Voodoo3 has none), and on overlays below.
+    c.dwCaps2 |= DDCAPS2_COLORCONTROLPRIMARY;
+    // Key ranges in video memory (see SetColorKey), as the Voodoo3's XP driver has them.
+    c.dwCKeyCaps = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT | DDCKEYCAPS_SRCBLTCLRSPACE | DDCKEYCAPS_DESTBLTCLRSPACE;
     c.dwFXCaps = DDFXCAPS_BLTSTRETCHX | DDFXCAPS_BLTSTRETCHY | DDFXCAPS_BLTSHRINKX | DDFXCAPS_BLTSHRINKY |
                  DDFXCAPS_BLTSTRETCHXN | DDFXCAPS_BLTSTRETCHYN | DDFXCAPS_BLTSHRINKXN | DDFXCAPS_BLTSHRINKYN |
                  DDFXCAPS_BLTMIRRORLEFTRIGHT | DDFXCAPS_BLTMIRRORUPDOWN;
@@ -154,9 +161,24 @@ HRESULT DDraw::GetCaps(DDCAPS* drv, DDCAPS* hel) {
         c.dwZBufferBitDepths = DDBD_16 | DDBD_24 | DDBD_32;
     }
     if (OverlaysOffered(this)) {
-        // Overlays (overlay.cpp): emulated, any stretch, mirroring, single colour keys.
+        // Overlays (overlay.cpp): emulated, any stretch, mirroring, colour keys (ranges too).
         c.dwCaps |= DDCAPS_OVERLAY | DDCAPS_OVERLAYSTRETCH | DDCAPS_OVERLAYFOURCC;
-        c.dwCKeyCaps |= DDCKEYCAPS_DESTOVERLAY | DDCKEYCAPS_SRCOVERLAY;
+        c.dwCKeyCaps |= DDCKEYCAPS_DESTOVERLAY | DDCKEYCAPS_SRCOVERLAY | DDCKEYCAPS_DESTOVERLAYCLRSPACE |
+                        DDCKEYCAPS_SRCOVERLAYCLRSPACE;
+        // Bob and fields (see DrawOverlays), and the video port the Voodoo3's driver has (one
+        // that can't be made: see ddvideoport.cpp), with the autoflipping and hardware bob
+        // that go with it, as XP reported them.
+        c.dwCaps2 |= DDCAPS2_CANBOBINTERLEAVED | DDCAPS2_CANBOBNONINTERLEAVED | DDCAPS2_CANFLIPODDEVEN |
+                     DDCAPS2_CANBOBHARDWARE | DDCAPS2_AUTOFLIPOVERLAY | DDCAPS2_VIDEOPORT | DDCAPS2_COLORCONTROLOVERLAY;
+        c.dwMaxVideoPorts = 1;
+        // Alpha, as the DirectX 7 SDK has it (the Voodoo3 has none; see OverlayLayer): the
+        // overlay's own (its format's), alpha surfaces for it and for the destination (any
+        // surface with alpha in its format), constants for both, and edge blending.
+        c.dwFXAlphaCaps |= DDFXALPHACAPS_OVERLAYALPHAPIXELS | DDFXALPHACAPS_OVERLAYALPHAPIXELSNEG |
+                           DDFXALPHACAPS_OVERLAYALPHASURFACES | DDFXALPHACAPS_OVERLAYALPHASURFACESNEG |
+                           DDFXALPHACAPS_OVERLAYALPHAEDGEBLEND;
+        c.dwAlphaOverlayConstBitDepths = DDBD_2 | DDBD_4 | DDBD_8;
+        c.dwAlphaOverlayPixelBitDepths = c.dwAlphaOverlaySurfaceBitDepths = DDBD_1 | DDBD_4 | DDBD_8;
         c.dwFXCaps |= kOverlayFxCaps;
         c.ddsCaps.dwCaps |= DDSCAPS_OVERLAY;
         c.dwMaxVisibleOverlays = 16;  // (overlay.cpp's kMaxVisibleOverlays)

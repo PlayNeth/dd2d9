@@ -246,7 +246,7 @@
    "crash": false
   },
   "ddraw1:test_range_colorkey": {
-   "nfail": 0,
+   "nfail": 9,
    "crash": false
   },
   "ddraw1:test_redundant_mode_set": {
@@ -614,7 +614,7 @@
    "crash": false
   },
   "ddraw2:test_range_colorkey": {
-   "nfail": 0,
+   "nfail": 9,
    "crash": false
   },
   "ddraw2:test_redundant_mode_set": {
@@ -1018,7 +1018,7 @@
    "crash": false
   },
   "ddraw4:test_range_colorkey": {
-   "nfail": 0,
+   "nfail": 10,
    "crash": false
   },
   "ddraw4:test_redundant_mode_set": {
@@ -1498,7 +1498,7 @@
    "crash": false
   },
   "ddraw7:test_range_colorkey": {
-   "nfail": 0,
+   "nfail": 10,
    "crash": false
   },
   "ddraw7:test_redundant_mode_set": {

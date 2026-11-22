@@ -7,6 +7,7 @@
 namespace dd2d9 {
 
 Config g_config;
+const char* g_tilingWm = nullptr;
 std::wstring g_dllPath;
 std::vector<std::wstring> g_iniLoaded;
 std::vector<std::wstring> g_iniErrors;
@@ -128,6 +129,11 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         int b;
         if (v == "auto") g_config.flipCopy = kFlipCopyAuto;
         else if (ParseBool(v, &b)) g_config.flipCopy = b ? kFlipCopyOn : kFlipCopyOff;
+        else ok = false;
+    } else if (key == "minimize") {
+        int b;
+        if (v == "auto") g_config.minimize = kMinimizeAuto;
+        else if (ParseBool(v, &b)) g_config.minimize = b ? kMinimizeOn : kMinimizeOff;
         else ok = false;
     } else if (key == "mouse") {
         // Gone in 1.3.0: the game always sees its mode's coordinates when it is shown scaled or
@@ -282,6 +288,11 @@ void LoadConfig(HMODULE self) {
     for (const auto& f : files)
         if (LoadIni(f, exeName, false)) g_iniLoaded.push_back(f);
     for (const auto& f : g_iniLoaded) LoadIni(f, exeName, true);
+
+    // i3 gives the programs it starts its IPC socket's path in I3SOCK; sway in SWAYSOCK, and in
+    // I3SOCK too, for i3's tools (Wine passes both on to the game).
+    if (!Env(L"SWAYSOCK").empty()) g_tilingWm = "sway";
+    else if (!Env(L"I3SOCK").empty()) g_tilingWm = "i3";
 
     // DD2D9_LOG=0/1/2 sets the level; any other value is a log file path (and enables logging).
     std::wstring envLog = Env(L"DD2D9_LOG");

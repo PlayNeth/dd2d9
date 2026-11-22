@@ -1,10 +1,12 @@
-// The presenter's GPU passes over a frame: the gamma ramp, sharp bilinear scaling, and the
-// draw call for overlay tools (see presenter.h).
+// The presenter's GPU passes over a frame: the gamma ramp, the colour controls, sharp bilinear
+// scaling, and the draw call for overlay tools (see presenter.h).
 #include "objects.h"
 #include "gpu.h"
 
 #include <d3d9.h>
 #include "quadpass.h"
+
+#include <cmath>
 
 namespace dd2d9 {
 
@@ -24,13 +26,13 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     if (!gammaPs_ && FAILED(d->CreatePixelShader(kGammaPs, &gammaPs_))) {
         gammaPs_ = nullptr;
         gammaFailed_ = true;
-        DD2D9_LOG("gamma: no pixel shader (the ramp isn't applied to Direct3D frames)");
+        DD2D9_LOG("gamma: no pixel shader (the CPU applies the ramp, Direct3D frames read back for it)");
         return nullptr;
     }
     if (!gammaLutTex_ && FAILED(d->CreateTexture(256, 1, 1, 0, D3DFMT_X8R8G8B8, D3DPOOL_MANAGED, &gammaLutTex_, nullptr))) {
         gammaLutTex_ = nullptr;
         gammaLutFailed_ = true;
-        DD2D9_LOG("gamma: no ramp texture (the ramp isn't applied to Direct3D frames)");
+        DD2D9_LOG("gamma: no ramp texture (the CPU applies the ramp, Direct3D frames read back for it)");
         return nullptr;
     }
     if (gammaW_ != w || gammaH_ != h || !gammaSrc_ || !gammaOut_) {
@@ -65,16 +67,113 @@ IDirect3DSurface9* Presenter::ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurfac
     LeaveCriticalSection(&gammaLock_);
     IDirect3DSurface9* level = nullptr;
     if (FAILED(gammaSrc_->GetSurfaceLevel(0, &level))) return nullptr;
-    d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT);
+    const bool copied = SUCCEEDED(d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT));
     level->Release();
+    if (!copied) return nullptr;
     Gpu& gpu = dd_->GetGpu();
     QuadPass pass(gpu, d, gammaPs_);
     pass.Target(gammaOut_);
     pass.Texture(0, gammaSrc_);
     pass.Texture(1, gammaLutTex_);
-    pass.Draw(RECT{0, 0, LONG(w), LONG(h)}, 0, 0, 1, 1);
+    const bool drawn = pass.Draw(RECT{0, 0, LONG(w), LONG(h)}, 0, 0, 1, 1);
     gpu.CloseScene();
-    return gammaOut_;
+    return drawn ? gammaOut_ : nullptr;
+}
+
+// IDirectDrawColorControl's settings (the SDK's units) as a transform of RGB, through BT.601's
+// luma and colour differences (Cb, Cr): contrast scales the picture (luma and colour alike),
+// brightness lifts it (7.5 IRE, the default, by nothing; each IRE a hundredth of white),
+// saturation scales the colour (none without DDCOLOR_COLORENABLE's 1), hue turns it. Sharpness
+// and gamma (not reported in GetColorControls' flags) change nothing.
+bool ColorTransformOf(const DDCOLORCONTROL& c, ColorTransform* out) {
+    *out = ColorTransform();
+    const double brightness = (c.lBrightness - 750) / 10000.0, contrast = c.lContrast / 10000.0;
+    const double saturation = c.lColorEnable ? c.lSaturation / 10000.0 : 0.0, hue = c.lHue * 3.14159265358979323846 / 180.0;
+    if (!brightness && contrast == 1.0 && saturation == 1.0 && !hue) return false;
+    const double kr = 0.299, kg = 0.587, kb = 0.114, ku = 2 * (1 - kb), kv = 2 * (1 - kr);
+    const double hc = std::cos(hue) * saturation, hs = std::sin(hue) * saturation;
+    for (int in = 0; in < 3; in++) {  // each input channel's column
+        const double rgb[3] = {in == 0 ? 1.0 : 0.0, in == 1 ? 1.0 : 0.0, in == 2 ? 1.0 : 0.0};
+        const double y = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+        const double cb = (rgb[2] - y) / ku, cr = (rgb[0] - y) / kv;
+        const double cb2 = (cb * hc - cr * hs) * contrast, cr2 = (cb * hs + cr * hc) * contrast, y2 = y * contrast;
+        const double r = y2 + kv * cr2, b = y2 + ku * cb2, g = (y2 - kr * r - kb * b) / kg;
+        out->m[0][in] = float(r);
+        out->m[1][in] = float(g);
+        out->m[2][in] = float(b);
+    }
+    for (int k = 0; k < 3; k++) out->m[k][3] = float(brightness);
+    return true;
+}
+
+// The transform as kColorPs makes it, in 16.16 fixed point: each output channel the sum of
+// three table entries (an input channel's 0..255 times its factor) and its offset, rounded to
+// the nearest and clamped to 0..255, as the shader's result is stored in X8R8G8B8.
+void Presenter::ApplyColorCpu(uint32_t* p, int pitch, int w, int h, const ColorTransform& t) {
+    int32_t table[3][3][256], offset[3];
+    for (int c = 0; c < 3; c++) {
+        for (int k = 0; k < 3; k++)
+            for (int v = 0; v < 256; v++) table[c][k][v] = int32_t(std::lround(double(t.m[c][k]) * v * 65536.0));
+        offset[c] = int32_t(std::lround(double(t.m[c][3]) * 255.0 * 65536.0)) + 32768;
+    }
+    auto channel = [](int32_t sum) { return uint32_t(sum <= 0 ? 0 : sum >= (255 << 16) ? 255 : sum >> 16); };
+    for (int y = 0; y < h; y++, p += pitch)
+        for (int x = 0; x < w; x++) {
+            const uint32_t v = p[x], r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF, b = v & 0xFF;
+            uint32_t out = v & 0xFF000000u;
+            for (int c = 0; c < 3; c++)
+                out |= channel(table[c][0][r] + table[c][1][g] + table[c][2][b] + offset[c]) << (16 - 8 * c);
+            p[x] = out;
+        }
+}
+
+// ps_2_0: s0 through the colour transform, c0..c2 its rows (ColorTransform). Assembled from:
+//   def c3, 0, 1, 0, 0 / dcl t0.xy / dcl_2d s0 / mov r1, c3.x / texld r0, t0, s0 / r0.w = 1
+//   r1.x..z = dp4(r0, c0..c2) / r1.w = 1 / oC0 = r1
+static const DWORD kColorPs[] = {0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000, 0xa00f0800, 0x05000051, 0xa00f0003, 0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0x02000001, 0x800f0001, 0xa0000003, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001, 0x80080000, 0xa0550003, 0x03000009, 0x80010001, 0x80e40000, 0xa0e40000, 0x03000009, 0x80020001, 0x80e40000, 0xa0e40001, 0x03000009, 0x80040001, 0x80e40000, 0xa0e40002, 0x02000001, 0x80080001, 0xa0550003, 0x02000001, 0x800f0800, 0x80e40001, 0x0000ffff};
+
+// The frame (src's rectangle r) through the colour transform, or null (shown without it). Gpu
+// lock held, outside a scene; the device's state put back after, as ApplyGammaGpu.
+IDirect3DSurface9* Presenter::ApplyColorGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r, const ColorTransform& t) {
+    if (colorFailed_) return nullptr;
+    const UINT w = UINT(r.right - r.left), h = UINT(r.bottom - r.top);
+    if (!colorPs_ && FAILED(d->CreatePixelShader(kColorPs, &colorPs_))) {
+        colorPs_ = nullptr;
+        colorFailed_ = true;
+        DD2D9_LOG("colour controls: no pixel shader (the CPU applies the primary's, Direct3D frames read back for them)");
+        return nullptr;
+    }
+    if (colorW_ != w || colorH_ != h || !colorSrc_ || !colorOut_) {
+        if (colorFail_.Is(w, h)) return nullptr;  // (not tried again every frame)
+        if (colorSrc_) colorSrc_->Release();
+        if (colorOut_) colorOut_->Release();
+        colorSrc_ = nullptr;
+        colorOut_ = nullptr;
+        colorW_ = colorH_ = 0;
+        if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &colorSrc_, nullptr)) ||
+            FAILED(d->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &colorOut_, nullptr))) {
+            if (colorSrc_) colorSrc_->Release();
+            colorSrc_ = nullptr;
+            colorOut_ = nullptr;
+            colorFail_.Set(w, h);
+            return nullptr;
+        }
+        colorW_ = w;
+        colorH_ = h;
+    }
+    IDirect3DSurface9* level = nullptr;
+    if (FAILED(colorSrc_->GetSurfaceLevel(0, &level))) return nullptr;
+    const bool copied = SUCCEEDED(d->StretchRect(src, &r, level, nullptr, D3DTEXF_POINT));
+    level->Release();
+    if (!copied) return nullptr;
+    Gpu& gpu = dd_->GetGpu();
+    QuadPass pass(gpu, d, colorPs_);
+    pass.Target(colorOut_);
+    pass.Texture(0, colorSrc_);
+    d->SetPixelShaderConstantF(0, &t.m[0][0], 3);
+    const bool drawn = pass.Draw(RECT{0, 0, LONG(w), LONG(h)}, 0, 0, 1, 1);
+    gpu.CloseScene();
+    return drawn ? colorOut_ : nullptr;
 }
 
 // filter=sharp without pixel shaders: the frame enlarged by a whole factor (a render

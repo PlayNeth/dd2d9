@@ -76,6 +76,9 @@ public:
         virtual void ReleaseGpuResources() = 0;
         // The device itself goes (Release): its resources go, and the owner is no longer one.
         virtual void GpuReleased() { ReleaseGpuResources(); }
+        // Antialiasing goes off on the device (MultisamplingOff): no multisampled resource
+        // kept. Lock held.
+        virtual void MultisamplingOff(IDirect3DDevice9*) {}
     };
 
     Gpu() { InitializeCriticalSection(&lock_); }
@@ -133,10 +136,18 @@ public:
     void CloseScene();
     // Something drew (opened a scene) since the last PresentTarget. Lock held.
     bool DrewSincePresent() const { return drew_; }
+    // Antialiasing turned off on this device (MultisamplingOff): no multisampled surface made
+    // from then on. Lock held.
+    bool msaaOff = false;
 
     void AddOwner(Owner* o);     // Lock held (may throw std::bad_alloc: nothing is added)
     void RemoveOwner(Owner* o);  // Lock held
     bool Unused() const { return owners_.empty(); }  // Lock held
+    // Each owner's MultisamplingOff (none removes itself there), msaaOff set first. Lock held.
+    void MultisamplingOff(IDirect3DDevice9* d) {
+        msaaOff = true;
+        for (Owner* o : owners_) o->MultisamplingOff(d);
+    }
     void Release();              // Lock held: everything goes (the DirectDraw object is going)
 
 private:

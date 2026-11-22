@@ -493,8 +493,8 @@ DWORD JoyMs() {
 // One joystick read with one set of flags (a game may ask with more than one: raw or
 // calibrated, with or without the POV), the poller's answer kept twice over: it writes the
 // copy the readers aren't reading and then makes it the current one, so that a reader always
-// finds a whole answer, even when it runs while the poller is in the middle of one (with
-// cpus=1 the game's timer thread can stop it there).
+// finds a whole answer, even when it runs while the poller is in the middle of one (on
+// another processor, or having taken the poller's processor from it there).
 struct JoyRead {
     volatile LONG key;          // id + 1 | flags << 8 (0: free)
     volatile LONG asked;        // JoyMs of the game's last read (| 1)
@@ -754,10 +754,10 @@ ImportHook kLockHooks[] = {
 
 // Functions looked up at run time (games that also ran on Windows 95 find
 // GlobalMemoryStatusEx this way): the hooked ones are answered with dd2d9's. Every table
-// installed so far counts (hooks.cpp keeps them): the options' here, and the mouse, paint
-// and movie translations made when the game sets a display mode (a game that picks
-// GetCursorPos or MoveWindow by name got Windows' own, untranslated). A function looked up
-// before its table was installed stays Windows'.
+// installed counts (hooks.cpp keeps them): the options' and the mouse, paint and movie
+// translations, all installed as dd2d9 loads (a game that picked GetCursorPos or MoveWindow
+// by name got Windows' own, untranslated). A function looked up before dd2d9 was loaded
+// stays Windows'.
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 GetProcAddressFn g_getProcAddress;
 struct HookTable {

@@ -5,7 +5,7 @@
 //   cpu=  the processor clock in the registry (~MHz under HKLM, HARDWARE\DESCRIPTION\System
 //         \CentralProcessor\<n>). Games that time the processor with RDTSC measure the
 //         real one: a DLL can't intercept that instruction.
-//   cpus= the processors the game runs on (its affinity) and is told about (GetSystemInfo
+//   cpus= the processors the game's threads run on and the game is told about (GetSystemInfo
 //         and the affinity masks, numbered from 0): games of the single-core era can race
 //         or stutter across cores.
 #include "compatint.h"
@@ -348,9 +348,9 @@ DWORD_PTR WINAPI HookSetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
 
 }  // namespace
 
-// cpus= processors the process may run on: one logical processor per physical core (two
-// hyperthreads of one core would be about one core's worth), the first core last (it takes
-// most of the system's interrupts) when there are cores to spare.
+// cpus= processors out of those the process may run on: one logical processor per physical
+// core (two hyperthreads of one core would be about one core's worth), the first core last
+// (it takes most of the system's interrupts) when there are cores to spare.
 // cpus= pins the game's code, not the process. A machine of the time had one processor, but
 // the game had it to itself: the sound was mixed in the kernel and the picture drawn by the
 // card. Today the mixer, Direct3D 9 (DXVK's or wined3d's threads, the driver's) and dd2d9's

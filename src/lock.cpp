@@ -7,13 +7,21 @@ namespace dd2d9 {
 
 // Checks in ddraw.dll's order (spec: re/spec/surface-lock-dc.md, sections 3 and 4). A DC
 // out counts as one more lock: the surface can't be locked meanwhile, but a locked one can
-// still give a DC.
+// still give a DC. A DDSCAPS_OWNDC surface (system memory only) keeps the DC it gave, as
+// measured on XP: asked again, the same one (its colours the first ones); locked, filled and
+// blitted with it out; released any number of times (another DC, even through
+// IDirectDrawSurface: DDERR_INVALIDPARAMS), and still the surface's.
 HRESULT Surface::GetDC(HDC* out) {
     Guard l;
     if (CantDraw()) return DDERR_SURFACELOST;
     if (dcOut) return DDERR_DCALREADYCREATED;  // *out left alone, as ddraw.dll
     if (!out) return DDERR_INVALIDPARAMS;
     *out = nullptr;
+    if (dcKept && buf->dc) {
+        CpuAccess(true);  // (in step: SyncKeptDc)
+        *out = buf->dc;
+        return DD_OK;
+    }
     // A palettized surface without a palette of its own has no colours to give a DC: none
     // (XP SP3 at 16 and 32 bits: DDERR_CANTCREATEDC at 1, 2, 4 and 8 bits; with a palette
     // attached, a DC at 1, 4 and 8). Except an 8-bit one while the display is palettized:
@@ -30,17 +38,42 @@ HRESULT Surface::GetDC(HDC* out) {
         const Palette* p = palette ? palette : (dd->primary ? dd->primary->ShownPalette() : nullptr);
         if (p != buf->dcPal || (p && p->version != buf->dcPalVersion) || !p) LoadDcColorTable(dc, p);
     }
+    *out = dc;
+    DD2D9_TRACE("GetDC %p%s", static_cast<void*>(this), isPrimary ? " (primary)" : "");
+    if (desc.ddsCaps.dwCaps & DDSCAPS_OWNDC) {
+        dcKept = true;
+        return DD_OK;
+    }
     dcOut = dc;
     dcCounted = true;
     lockCount++;
-    *out = dc;
-    DD2D9_TRACE("GetDC %p%s", static_cast<void*>(this), isPrimary ? " (primary)" : "");
     return DD_OK;
+}
+
+// GDI's drawing on a kept DC into the memory, and the memory into what GDI draws on (where it
+// draws on a DIB copy: what GDI changed since the last time goes back, see Buffer::EndDC);
+// after the memory was written (a lock, a blit), the copy made again.
+void Surface::SyncKeptDc() {
+    GdiFlush();
+    if (!buf->shadow) return;
+    buf->EndDC();
+    buf->CopyToShadow();
+}
+
+void Surface::KeptDcWritten() {
+    if (dcKept && buf->shadow) buf->CopyToShadow();
 }
 
 // IDirectDrawSurface 1 and 2 take any DC (even null) and release the surface's own.
 HRESULT Surface::ReleaseDC(HDC dc, int version) {
     Guard l;
+    if (dcKept && buf->dc) {
+        if (dc != buf->dc) return DDERR_INVALIDPARAMS;
+        CpuAccess(true);  // (in step: SyncKeptDc)
+        BumpUniqueness();  // (an OWNDC surface's is 0: it stays so)
+        MarkDirtyIfVisible();
+        return DD_OK;
+    }
     if (!dcOut) return DDERR_NODC;
     if (dc != dcOut && version >= 3) return DDERR_INVALIDPARAMS;
     GdiFlush();
@@ -255,6 +288,7 @@ HRESULT Surface::Unlock(void* pointer, const RECT* rect, int version) {
     if (!readOnly) {
         BumpUniqueness();
         MarkDirtyIfVisible(g_config.lockWhole ? nullptr : &area);
+        KeptDcWritten();
     }
     return CantDraw() ? DDERR_SURFACELOST : DD_OK;  // unlocked either way, as ddraw.dll
 }

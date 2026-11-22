@@ -238,7 +238,8 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     // the exclusive mode's here).
     const bool restack = !(flags & DDSCL_NOWINDOWCHANGES) || ((coop_ & DDSCL_NOWINDOWCHANGES) && WindowChanges());
     if (leaving) {
-        FlipToGDISurface();  // as ddraw.dll: the screen GDI draws on is in front again
+        FlipToGDISurface(true);  // as ddraw.dll: the screen GDI draws on is in front again
+        ExclusiveSettings(false);
         if (restore) {
             // Still hooked: the window covers the screen in the desktop mode before the game
             // hears of the change (see OnDisplayChange).
@@ -295,6 +296,10 @@ HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
         ApplyGamma();
     }
     if (Exclusive()) HookWindow();
+    if (acquire) {
+        ActivationTaken();  // as ddraw.dll, taking exclusive mode counts as an activation
+        if (DisplayKind() != kDisplayWindow) ExclusiveSettings(true);
+    }
     ApplyWindow();
     UpdateDeviceWindow();
     // After the window is set up, as ddraw.dll: the activation (WM_ACTIVATEAPP, see
@@ -344,6 +349,7 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD rr, DWORD flags
         modeH_ = h;
         modeBpp_ = bpp;
         modeRefresh_ = rr;
+        if (bpp == 8) ScreenPaletteReset();  // (GDI's palette of the screen, as a mode set leaves it)
         if (!away) {
             if (suspended_ && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);  // (see HookProc's WM_PAINT)
             suspended_ = false;
@@ -375,9 +381,12 @@ void DDraw::ApplyGamma() {
     if (Exclusive() && primary && primary->gammaRamp) {
         r = *primary->gammaRamp;
     } else {
-        for (int i = 0; i < 256; i++) r.red[i] = r.green[i] = r.blue[i] = WORD(i * 0x101);
+        IdentityRamp(&r);
     }
     presenter_->SetGamma(r);
+    // The primary's colour controls (IDirectDrawColorControl): its picture's, exclusive or not.
+    ColorTransform t;
+    presenter_->SetColor(primary && primary->colorControls && ColorTransformOf(*primary->colorControls, &t) ? &t : nullptr);
 }
 
 // The primary surface is gone while the game's display mode is set: ddraw.dll has the
@@ -541,8 +550,10 @@ HRESULT DDraw::RestoreDisplayMode() {
 // g_lock held.
 void DDraw::UpdateLostSurfaces() {
     // Railroad Tycoon 2 restores its surfaces from its WM_QUERYNEWPALETTE handler, before
-    // WM_ACTIVATEAPP has told us the game is in front again (Wine's finding).
-    if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_)
+    // WM_ACTIVATEAPP has told us the game is in front again (Wine's finding). Not while its
+    // window is minimized: set aside in front (its Tab let go, or WM_ACTIVATEAPP(FALSE) while
+    // in front), its surfaces stay lost until it is restored, as measured on XP.
+    if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_ && !IsIconic(hwnd_))
         InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     if (deviceState_ != kDevNotRestored) return;
     // Every surface that can be is lost, as in ddraw.dll, which frees their video memory.
@@ -582,7 +593,7 @@ HRESULT DDraw::TestCooperativeLevel() {
         return m && expectedMode_ && m != expectedMode_ ? DDERR_WRONGMODE : DD_OK;
     }
     // Back in front without WM_ACTIVATEAPP having said so yet (see UpdateLostSurfaces).
-    if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_)
+    if (deviceState_ == kDevLost && hwnd_ && GetForegroundWindow() == hwnd_ && !IsIconic(hwnd_))
         InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     return deviceState_ == kDevLost ? DDERR_NOEXCLUSIVEMODE : DD_OK;
 }

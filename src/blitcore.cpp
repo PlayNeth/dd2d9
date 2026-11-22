@@ -64,10 +64,7 @@ struct BlitJob {
     RECT dc;  // destination rectangle clipped to the surface
     bool mirrorX, mirrorY;
     bool overlapped = false;  // the source was copied aside: it overlapped the destination in the same memory
-    bool srcKey;
-    uint32_t skLo, skHi, skMask;
-    bool dstKey;
-    uint32_t dkLo, dkHi, dkMask;
+    BlitKey sk, dk;  // the source's and destination's keys
     bool convert;
     const Format* sf;
     const Format* df;
@@ -207,8 +204,6 @@ static const int* BuildYMap(const BlitJob& j) {
     return g_ymap.data();
 }
 
-// In-range test for color keys: lo <= k <= hi in one unsigned comparison.
-static inline bool InKey(uint32_t k, uint32_t lo, uint32_t hi) { return k - lo <= hi - lo; }
 
 // SSE2 helpers per pixel size.
 template <typename T> struct Simd;
@@ -252,7 +247,7 @@ __attribute__((noinline)) static void KeyRow(T* d, const T* s, int n, uint32_t m
     }
 }
 
-// lo <= (v & mask) <= hi for each pixel (all ones where so), as InKey.
+// lo <= (v & mask) <= hi for each pixel (all ones where so), as KeyHits.
 template <typename T> struct InRange;
 template <> struct InRange<uint8_t> {
     static __m128i Test(__m128i v, __m128i lo, __m128i range) {
@@ -276,13 +271,37 @@ template <> struct InRange<uint32_t> {
     static __m128i Bias(uint32_t v) { return _mm_set1_epi32(int(v ^ 0x80000000u)); }
 };
 
+// A key's test on a vector of pixels (all ones where they match): the masked value in its
+// range, or each channel's (KeyHits).
+template <typename T> struct KeyTest {
+    int parts = 1;
+    __m128i mask[3], lo[3], range[3];
+    explicit KeyTest(const BlitKey& k) {
+        if (!k.chan[0]) {
+            Set(0, k.mask, k.lo, k.hi);
+            return;
+        }
+        parts = 3;
+        for (int c = 0; c < 3; c++) Set(c, k.chan[c], k.lo & k.chan[c], k.hi & k.chan[c]);
+    }
+    void Set(int c, uint32_t m, uint32_t l, uint32_t h) {
+        mask[c] = Simd<T>::Set(m);
+        lo[c] = Simd<T>::Set(l);
+        range[c] = InRange<T>::Bias(h - l);
+    }
+    __m128i Test(__m128i v) const {
+        __m128i r = InRange<T>::Test(_mm_and_si128(v, mask[0]), lo[0], range[0]);
+        for (int c = 1; c < parts; c++) r = _mm_and_si128(r, InRange<T>::Test(_mm_and_si128(v, mask[c]), lo[c], range[c]));
+        return r;
+    }
+};
+
 // One row, 1:1, any combination of keys (ranges too) and the OR mask: a source pixel is
 // written where its key doesn't match and the destination's key does.
 template <typename T, bool SrcKey, bool DstKey>
 __attribute__((noinline)) static void KeyRowAny(T* d, const T* s, int n, const BlitJob& j) {
     constexpr int kPerVector = 16 / sizeof(T);
-    const __m128i skMask = Simd<T>::Set(j.skMask), skLo = Simd<T>::Set(j.skLo), skRange = InRange<T>::Bias(j.skHi - j.skLo);
-    const __m128i dkMask = Simd<T>::Set(j.dkMask), dkLo = Simd<T>::Set(j.dkLo), dkRange = InRange<T>::Bias(j.dkHi - j.dkLo);
+    const KeyTest<T> sk(j.sk), dk(j.dk);
     const __m128i orMask = Simd<T>::Set(j.orMask);
     int i = 0;
     for (; i + kPerVector <= n; i += kPerVector) {
@@ -290,8 +309,8 @@ __attribute__((noinline)) static void KeyRowAny(T* d, const T* s, int n, const B
         __m128i* dp = reinterpret_cast<__m128i*>(d + i);
         const __m128i dv = _mm_loadu_si128(dp);
         __m128i write = _mm_set1_epi32(-1);
-        if (SrcKey) write = _mm_andnot_si128(InRange<T>::Test(_mm_and_si128(sv, skMask), skLo, skRange), write);
-        if (DstKey) write = _mm_and_si128(InRange<T>::Test(_mm_and_si128(dv, dkMask), dkLo, dkRange), write);
+        if (SrcKey) write = _mm_andnot_si128(sk.Test(sv), write);
+        if (DstKey) write = _mm_and_si128(dk.Test(dv), write);
         const int bits = _mm_movemask_epi8(write);
         if (bits == 0) continue;
         const __m128i out = _mm_or_si128(sv, orMask);
@@ -299,8 +318,8 @@ __attribute__((noinline)) static void KeyRowAny(T* d, const T* s, int n, const B
     }
     for (; i < n; i++) {
         const uint32_t v = s[i];
-        if (SrcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
-        if (DstKey && !InKey(uint32_t(d[i]) & j.dkMask, j.dkLo, j.dkHi)) continue;
+        if (SrcKey && KeyHits(j.sk, v)) continue;
+        if (DstKey && !KeyHits(j.dk, d[i])) continue;
         d[i] = T(v | j.orMask);
     }
 }
@@ -410,9 +429,9 @@ __attribute__((noinline)) static void StretchRows(const BlitJob& j, const int* _
 
 template <typename T, bool Direct>
 static void KeyRowsDispatch(const BlitJob& j, const int* xmap) {
-    if (j.srcKey && j.dstKey) KeyRows<T, Direct, true, true>(j, xmap);
-    else if (j.srcKey) KeyRows<T, Direct, true, false>(j, xmap);
-    else if (j.dstKey) KeyRows<T, Direct, false, true>(j, xmap);
+    if (j.sk.on && j.dk.on) KeyRows<T, Direct, true, true>(j, xmap);
+    else if (j.sk.on) KeyRows<T, Direct, true, false>(j, xmap);
+    else if (j.dk.on) KeyRows<T, Direct, false, true>(j, xmap);
     else KeyRows<T, Direct, false, false>(j, xmap);
 }
 
@@ -421,18 +440,18 @@ static void BlitSameFormat(const BlitJob& j) {
     const int dw = j.d0.right - j.d0.left, sw = j.s0.right - j.s0.left;
     const bool direct = !j.mirrorX && dw == sw;
     const int n = j.dc.right - j.dc.left;
-    if (direct && !j.dstKey && (!j.srcKey || j.skLo == j.skHi) && !j.orMask) {
+    if (direct && !j.dk.on && (!j.sk.on || j.sk.lo == j.sk.hi) && !j.orMask) {
         const int sx = j.s0.left + (j.dc.left - j.d0.left);
         const int* const ymap = BuildYMap(j);
         for (int y = j.dc.top; y < j.dc.bottom; y++) {
             T* drow = reinterpret_cast<T*>(j.dst + y * j.dpitch) + j.dc.left;
             const T* srow = reinterpret_cast<const T*>(j.src + ymap[y - j.dc.top] * j.spitch) + sx;
-            if (j.srcKey) KeyRow(drow, srow, n, j.skMask, j.skLo);
+            if (j.sk.on) KeyRow(drow, srow, n, j.sk.mask, j.sk.lo);
             else memcpy(drow, srow, size_t(n) * sizeof(T));
         }
     } else if (direct) {
         KeyRowsDispatch<T, true>(j, nullptr);
-    } else if (!j.srcKey && !j.dstKey && !j.orMask) {
+    } else if (!j.sk.on && !j.dk.on && !j.orMask) {
         StretchRows<T>(j, BuildXMap(j));
     } else {
         KeyRowsDispatch<T, false>(j, BuildXMap(j));
@@ -475,7 +494,7 @@ static void BlitGeneric(const BlitJob& j) {
     const int n = j.dc.right - j.dc.left;
     if (n <= 0) return;
     const int lo = std::min(xmap[0], xmap[n - 1]), span = std::max(xmap[0], xmap[n - 1]) + 1 - lo;
-    const bool keys = j.srcKey || j.dstKey;
+    const bool keys = j.sk.on || j.dk.on;
     const bool rows = j.convert && !keys && !j.df->pal8;
     const RowConverter* conv = nullptr;
     if (j.convert) {
@@ -509,12 +528,12 @@ static void BlitGeneric(const BlitJob& j) {
         }
         for (int i = 0; i < n; i++) {
             uint32_t v = 0;
-            if (j.srcKey || !j.convert) {
+            if (j.sk.on || !j.convert) {
                 v = ReadPx(srow + xmap[i] * j.sbytes, j.sbytes);
-                if (j.srcKey && InKey(v & j.skMask, j.skLo, j.skHi)) continue;
+                if (j.sk.on && KeyHits(j.sk, v)) continue;
             }
             uint8_t* dp = drow + i * j.dbytes;
-            if (j.dstKey && !InKey(ReadPx(dp, j.dbytes) & j.dkMask, j.dkLo, j.dkHi)) continue;
+            if (j.dk.on && !KeyHits(j.dk, ReadPx(dp, j.dbytes))) continue;
             if (j.convert) {
                 const uint32_t argb = g_row[size_t(xmap[i] - lo)];
                 v = j.df->pal8 ? g_nearest(j.dpal, argb) : g_packer.One(argb);
@@ -552,16 +571,14 @@ void DrawBlit(Buffer* db, const RECT& d, const Buffer* sb, const RECT& s, const 
     j.orMask = p.orMask;
     j.mirrorX = p.mirrorX;
     j.mirrorY = p.mirrorY;
-    j.srcKey = p.srcKey.on;
-    j.skLo = p.srcKey.lo, j.skHi = p.srcKey.hi, j.skMask = p.srcKey.mask;
-    j.dstKey = p.dstKey.on;
-    j.dkLo = p.dstKey.lo, j.dkHi = p.dstKey.hi, j.dkMask = p.dstKey.mask;
+    j.sk = p.srcKey;
+    j.dk = p.dstKey;
     if (j.convert && j.dpal) g_nearest.Prepare(j.dpal);
 
     // A plain copy (any pixel size): a row at a time; overlapping in the same memory (a
     // scroll), in the order that reads each row before it is written (one clip rectangle:
     // with more, one could overwrite what another reads).
-    const bool plain = !j.convert && j.dbytes == j.sbytes && !j.srcKey && !j.dstKey && !j.mirrorX && !j.mirrorY &&
+    const bool plain = !j.convert && j.dbytes == j.sbytes && !j.sk.on && !j.dk.on && !j.mirrorX && !j.mirrorY &&
                        !j.orMask && d.right - d.left == s.right - s.left && d.bottom - d.top == s.bottom - s.top &&
                        (sb != db || clips.size() == 1);
     if (plain) {

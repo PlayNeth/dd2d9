@@ -14,7 +14,9 @@ public:
     // fromVersion: the interface version called (Direct3D 7 forwards its references there).
     HRESULT QueryInterface(REFIID riid, void** out, int fromVersion = 7);
     // Every interface version (1, 2, 4, 7) counts its own references, as in
-    // ddraw.dll; the object is torn down when all of them are released.
+    // ddraw.dll, and so does the video port container (kVideoPortContainer: see
+    // ddvideoport.cpp); the object is torn down when all of them are released.
+    static constexpr int kVideoPortContainer = 0;
     ULONG AddRef(int version);
     ULONG Release(int version);
     void IntAddRef() { InterlockedIncrement(&intRef_); }
@@ -35,7 +37,7 @@ public:
     HRESULT GetCaps(DDCAPS* drv, DDCAPS* hel);
     HRESULT GetDisplayMode(void* desc, int version);
     HRESULT GetGDISurface(void** out, int version);
-    HRESULT FlipToGDISurface();
+    HRESULT FlipToGDISurface(bool own = false);  // own: dd2d9's (see Surface::Flip)
     Surface* GdiSurface() const;  // g_lock held
     HRESULT GetMonitorFrequency(DWORD* freq);
     HRESULT GetScanLine(DWORD* line);
@@ -138,6 +140,14 @@ public:
     bool ShowsMode() const;     // the display is in its mode, as far as anyone can see (see ddmode.cpp)
     bool CoverSize(HWND h, SIZE* out) const;  // the size CoverMonitor gave h, frame included
     bool QuietMove() const { return quietMove_; }  // CheckCover's move: hidden from the game
+    // What the window procedure reads of the object without the display lock (ddhook.cpp):
+    // dd2d9 itself moving, sizing or showing the window; the game's display isn't a window
+    // (display=window); a focus loss minimizes the window (see OnActivate); the popup that was
+    // active when it did (ddraw.dll gives it the focus back).
+    bool OwnWindowWork() const { return applying_ || covering_ || restoring_ || quietMove_ || windowWork_; }
+    bool FullscreenDisplay() const { return DisplayKind() != kDisplayWindow; }
+    bool FocusLossMinimizes() const;
+    HWND LastPopup() const { return lastPopup_; }
     void TakeOverExclusive(DDraw* prev, HWND hwnd);  // g_displayLock held
     void SleepUntilVBlank(int count);
     void PaceFlip();  // never let Flip() run faster than the refresh rate
@@ -189,7 +199,7 @@ private:
 
     LONG ref_ = 0;
     LONG tornDown_ = 0;
-    LONG ifaceRef_[4] = {};  // per interface version: 1, 2, 4, 7
+    LONG ifaceRef_[5] = {};  // per interface version (1, 2, 4, 7), then the video port container's
 public:
     // Video memory as games see it: the configured total (vram=), minus the video-memory
     // surfaces (g_lock).
@@ -206,6 +216,7 @@ private:
     RECT dirtyRect_ = {0, 0, 0, 0};  // guarded by g_lock
     LONG intRef_ = 1;  // released when the last external reference goes away
     void* wraps_[4] = {};
+    void* videoPorts_ = nullptr;  // the video port container (ddvideoport.cpp)
     void FreeParts();
     HWND hwnd_ = nullptr;
     // ddraw.dll's own two windows, as its rules about them see them (hwnd_ above is the one
@@ -247,6 +258,8 @@ private:
     bool covering_ = false;      // CoverMonitor moving it (FitCover leaves dd2d9's own moves alone)
     volatile bool quietMove_ = false;  // inside CheckCover's CoverMonitor
     bool applying_ = false;     // inside ApplyWindow: focus changes are our own doing
+    bool windowWork_ = false;   // inside RestoreSavedWindow (see OwnWindowWork)
+    HWND lastPopup_ = nullptr;  // the game's last active popup when the focus went (OnActivate)
     bool inCoop_ = false;       // inside SetCooperativeLevel (g_displayLock)
     int activeDisplay_ = kDisplaySwitch;  // the display mode ApplyWindow actually used
     HWND savedHwnd_ = nullptr;  // window whose style / position are saved

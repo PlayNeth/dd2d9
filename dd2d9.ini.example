@@ -15,6 +15,18 @@
 ;   borderless - no mode change: a borderless window covering the monitor, image scaled
 display=switch
 
+; The fullscreen game's window when the game loses the focus (Alt+Tab, another workspace):
+;   auto - minimized, as DirectDraw does, but left as it is under i3 and sway (default)
+;   on   - minimized
+;   off  - left as it is
+; Tiling window managers don't minimize windows: under Wine, minimized there, the game's
+; window didn't get the keyboard focus back from another workspace, and the game's mouse
+; stood still (Need for Speed III). auto finds i3 and sway by what they give the programs
+; they start (I3SOCK, SWAYSOCK); under another tiling one, set off. Not under one that
+; minimizes: under Openbox the window, left as it is, came back in front as soon as another
+; desktop was switched to.
+minimize=auto
+
 ; Scaling when the image doesn't fit 1:1 (window resized, borderless, windowed games):
 ;   aspect (default), fill, integer
 stretch=aspect
@@ -64,10 +76,13 @@ vram=512
 ; that times itself with the registry's figure runs at the wrong speed: set 0 (the real
 ; clock) for it.
 cpu=2000
-; Processors the game runs on and is told about (GetSystemInfo): 1 (default), as the PCs of
-; the era had; games of the era can crash, stutter or run at the wrong speed on several.
-; One logical processor per physical core is taken, the first core last (it handles most of
-; the system's interrupts). dd2d9's own presenting thread shares them. 0: all.
+; Processors the game's threads run on and the game is told about (GetSystemInfo and the
+; affinity calls, numbered from 0): 1 (default), as the PCs of the era had; games of the era
+; can crash, stutter or run at the wrong speed on several. One logical processor per physical
+; core is taken, the first core last (it handles most of the system's interrupts). The threads
+; of the sound mixer, Direct3D 9, the display driver and dd2d9 itself run on any processor, as
+; the sound and the picture were made outside the game's processor then (sharing it with the
+; game, Need for Speed III's sound crackled). 0: all, for every thread.
 cpus=1
 ; The game's heap memory (HeapAlloc) comes zeroed: on (default), as fresh memory often was on
 ; Windows 9x, where games were tested; today's heap hands back blocks other code freed, with
@@ -101,6 +116,12 @@ selfsuspend=off
 ; whole sectors into sector-aligned memory, or it fails; Biko reads a 60-byte header that
 ; way, doesn't notice the failure and crashes. on: the flag kept, as Windows has it.
 nobuffering=off
+; A thread the game terminates (TerminateThread): on (default) gives it 20 ms to end by
+; itself, then terminates it while holding the loader's lock, so that it can't be the thread
+; holding that lock. One killed while it holds it, in the middle of ending, keeps it for good,
+; and no thread of the game can start or end after that (Need for Speed III froze on a black
+; screen after its movies on more than one processor). off: as Windows has it.
+safeterminate=on
 ; After each Flip, the back buffer gets a copy of the frame just shown: auto (default) does so
 ; while Direct3D Retained Mode (d3drm.dll) is loaded, on always, off never. A flip leaves the
 ; back buffer the frame before the one shown; Retained Mode clears and draws again only the
@@ -122,10 +143,10 @@ desktopbpp=32
 ; Costs a whole-surface copy per lock.
 lockwhole=off
 
-; Z buffers DirectDraw can read and write (Lock, Blt): on (default) where the GPU has the
-; depth format for it and antialiasing is off; off: on the GPU only, as before 1.0.3 (a
-; game that locks its Z buffer gets what DirectDraw itself last wrote there). For a driver
-; that draws wrongly with it.
+; Z buffers DirectDraw can read and write (Lock, Blt): on (default) where the GPU has a
+; depth texture format for it (INTZ; DF24 or DF16 for those without stencil); off: on the
+; GPU only, as before 1.0.3 (a game that locks its Z buffer gets what DirectDraw itself last
+; wrote there). For a driver that draws wrongly with it.
 zaccess=on
 
 ; Overlays (video players, some games' movies): on (default) offers overlay surfaces, laid
@@ -159,7 +180,8 @@ depth24=off
 ; the back buffer between its 3D draws is kept; each time that happens costs a copy.
 ; Cut-out sprites (trees) drawn within their texture are addressed clamped meanwhile, so
 ; their edges don't pick up a line from the texture's other side. A game reading or
-; copying its Z buffer through DirectDraw (rare) finds only what DirectDraw wrote there.
+; copying its Z buffer through DirectDraw (rare) gets what Direct3D drew where the GPU can
+; resolve a multisampled one (RESZ); elsewhere antialiasing goes off the first time it does.
 antialiasing=0
 ; With antialiasing, 2D drawn through Direct3D (HUDs, menus, text: screen-aligned, drawn
 ; with the depth test off, or always passing without writing depth) is drawn without it,

@@ -19,8 +19,17 @@ class DDraw;
 class Surface;
 struct Buffer;
 class OverlayGpu;
+struct PaletteFrame;
 
 bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out);  // presenter.cpp
+
+// IDirectDrawColorControl's settings as a colour transform (presentpass.cpp): each channel of
+// the result m · (r, g, b, 1), in 0..1. ColorTransformOf: false for settings that change
+// nothing (the defaults), the identity then.
+struct ColorTransform {
+    float m[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+};
+bool ColorTransformOf(const DDCOLORCONTROL& c, ColorTransform* out);
 
 // ---------------------------------------------------------------- Presenter
 // A dedicated thread copies the primary surface into a D3D9 surface (converting
@@ -37,6 +46,7 @@ public:
     bool WaitPresented(uint64_t afterSeq, DWORD timeoutMs);
     bool Active() const { return active_; }
     void SetGamma(const DDGAMMARAMP& ramp);
+    void SetColor(const ColorTransform* t);  // the primary's colour controls (null: none)
     // Where an sw x sh image goes in a bw x bh area, as the stretch setting says.
     RECT FitRect(UINT sw, UINT sh, UINT bw, UINT bh) const;
 
@@ -104,9 +114,23 @@ private:
     IDirect3DPixelShader9* gammaPs_ = nullptr;
     UINT gammaW_ = 0, gammaH_ = 0;
     DWORD gammaTexVersion_ = 0;
-    bool gammaFailed_ = false;     // no pixel shaders: GPU frames shown without the ramp
+    bool gammaFailed_ = false;     // no pixel shaders: GPU frames read back, the CPU applies it
     bool gammaLutFailed_ = false;  // no ramp texture on this device: the same until another
     IDirect3DSurface9* ApplyGammaGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r);
+    // A palettized primary Direct3D drew into, shown from its render target through its
+    // palette on the GPU (PaletteFrameGpu, gpures.h) rather than read back every frame.
+    PaletteFrame* palFrame_ = nullptr;
+    // The primary's colour controls on the frame as shown (after the gamma ramp, whichever
+    // frame it is): copied into a texture, drawn through a pixel shader that transforms it.
+    IDirect3DTexture9* colorSrc_ = nullptr;
+    IDirect3DSurface9* colorOut_ = nullptr;
+    IDirect3DPixelShader9* colorPs_ = nullptr;
+    UINT colorW_ = 0, colorH_ = 0;
+    bool colorFailed_ = false;  // no pixel shaders: the CPU applies them (ApplyColorCpu)
+    bool colorCpuShown_ = false;  // the frame converted last had them applied by the CPU
+    IDirect3DSurface9* ApplyColorGpu(IDirect3DDevice9* d, IDirect3DSurface9* src, const RECT& r, const ColorTransform& t);
+    // The same on the CPU, over the w x h pixels at p (rows `pitch` pixels apart).
+    static void ApplyColorCpu(uint32_t* p, int pitch, int w, int h, const ColorTransform& t);
     // The size a render target or texture above couldn't be made at (on this device): not
     // tried again every frame, only at another size.
     struct FailedSize {
@@ -114,7 +138,11 @@ private:
         bool Is(UINT ww, UINT hh) const { return w == ww && h == hh; }
         void Set(UINT ww, UINT hh) { w = ww, h = hh; }
     };
-    FailedSize gammaFail_, preFail_, sharpFail_;
+    FailedSize gammaFail_, colorFail_, preFail_, sharpFail_;
+    // The gamma ramp's and colour controls' GPU passes over a w x h frame can't be done (no
+    // pixel shaders, nothing made at that size): the CPU applies them instead.
+    bool GammaOnCpu(UINT w, UINT h) const { return gammaFailed_ || gammaLutFailed_ || gammaFail_.Is(w, h); }
+    bool ColorOnCpu(UINT w, UINT h) const { return colorFailed_ || colorFail_.Is(w, h); }
     UINT stW_ = 0, stH_ = 0;
 
     // What the staging surface holds (presenter thread only): a partial update
@@ -142,6 +170,8 @@ private:
     uint8_t gammaLut_[3][256];
     bool gammaActive_ = false;
     DWORD gammaVersion_ = 1;
+    ColorTransform color_;  // gammaLock_
+    bool colorActive_ = false;
 };
 
 // presentpass.cpp: the draw call RivaTuner needs in a frame (see there).

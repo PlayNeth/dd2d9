@@ -1,7 +1,9 @@
 // Pointing a game's imports at dd2d9's functions (import address table patching), shared by
-// the mouse translation (input.cpp) and the compatibility options (compat.cpp). Only the
-// game's own modules are patched: its executable and the DLLs it brought, not Windows'
-// modules, not other graphics, sound or input wrappers, and not dd2d9 itself.
+// the compatibility options (compat.cpp, compatsys.cpp, compatdisplay.cpp, compatgdi.cpp) and
+// the mouse, paint and movie translations (input.cpp, inputpaint.cpp, video.cpp); compat.cpp
+// installs them all. Only the game's own modules are patched: its executable and the DLLs it
+// brought, not Windows' modules, not other graphics, sound or input wrappers, and not dd2d9
+// itself.
 #pragma once
 #include "common.h"
 

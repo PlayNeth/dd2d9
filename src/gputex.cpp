@@ -155,12 +155,209 @@ static const DWORD kKeyPs[] = {
     0x80000001, 0x80aa0001, 0x03000002, 0x80010001, 0x80000001, 0xa0550002, 0x04000058, 0x800f0000, 0x80000001,
     0x80e40000, 0xa0aa0002, 0x02000001, 0x800f0800, 0x80e40000, 0x0000ffff};
 
+// ps_2_0, the palette pass: the texel of the palette entry ReadBack makes the render target's
+// colour (PaletteMap::Index). s0: the render target; s1: `palColors` (1024x32, a texel per
+// 15-bit colour, r + 32 g across, b down: red its nearest entry, green its row of s2, blue 1
+// where it has one); s2: `palExact` (512x256: a row per 15-bit colour the palette has colours
+// in, its 512 colours across by their low three bits, 64 r + 8 g + b); s3: `palTexels` (each
+// entry's texel). Each lookup at its texel's centre. Assembled (psasm) from:
+//   def c0, 31.875, 0.0625, 0, 0.5 / def c1, 1/1024, 1/32, 0, 1/1024 / def c2, 1/32, 1/64, 0, 0
+//   def c3, 1, 1/8, 1/64, -72/512 / def c4, 255/256, 1/512, -0.5, 0
+//   mov r1, r4..r7, c0.z / mov r2, r3, c0.w / texld r0, t0, s0
+//   r1.xyz = r0 * c0.x + c0.y (the 15-bit colour plus (low bits + 0.5) / 8)
+//   r2.xy = frc(r1) / r3.x = r1.z, r3.xy = frc(r3), r2.z = r3.x / r3.xyz = r1 - r2
+//   r4.x = dp4(r3, c1) / r4.y = r3.z * c2.x + c2.y / texld r5, r4, s1  (r3.w, r2.w: 0.5)
+//   r6.x = dp4(r2, c3) / r6.y = r5.y * c4.x + c4.y / texld r7, r6, s2
+//   r3.x = r5.z + c4.z / r6.x = r3.x >= 0 ? r7.x : r5.x
+//   r4.x = r6.x * c4.x + c4.y / r4.y = c0.w / texld r0, r4, s3 / oC0 = r0
+// Written to Windows' ps_2_0 rules as kKeyPs is.
+static const DWORD kPalPs[] = {
+    0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000, 0xa00f0800, 0x0200001f, 0x90000000,
+    0xa00f0801, 0x0200001f, 0x90000000, 0xa00f0802, 0x0200001f, 0x90000000, 0xa00f0803, 0x05000051, 0xa00f0000,
+    0x41ff0000, 0x3d800000, 0x00000000, 0x3f000000, 0x05000051, 0xa00f0001, 0x3a800000, 0x3d000000, 0x00000000,
+    0x3a800000, 0x05000051, 0xa00f0002, 0x3d000000, 0x3c800000, 0x00000000, 0x00000000, 0x05000051, 0xa00f0003,
+    0x3f800000, 0x3e000000, 0x3c800000, 0xbe100000, 0x05000051, 0xa00f0004, 0x3f7f0000, 0x3b000000, 0xbf000000,
+    0x00000000, 0x02000001, 0x800f0001, 0xa0aa0000, 0x02000001, 0x800f0002, 0xa0ff0000, 0x02000001, 0x800f0003,
+    0xa0ff0000, 0x02000001, 0x800f0004, 0xa0aa0000, 0x02000001, 0x800f0005, 0xa0aa0000, 0x02000001, 0x800f0006,
+    0xa0aa0000, 0x02000001, 0x800f0007, 0xa0aa0000, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x04000004,
+    0x80070001, 0x80e40000, 0xa0000000, 0xa0550000, 0x02000013, 0x80030002, 0x80e40001, 0x02000001, 0x80010003,
+    0x80aa0001, 0x02000013, 0x80030003, 0x80e40003, 0x02000001, 0x80040002, 0x80000003, 0x03000002, 0x80070003,
+    0x80e40001, 0x81e40002, 0x03000009, 0x80010004, 0x80e40003, 0xa0e40001, 0x04000004, 0x80020004, 0x80aa0003,
+    0xa0000002, 0xa0550002, 0x03000042, 0x800f0005, 0x80e40004, 0xa0e40801, 0x03000009, 0x80010006, 0x80e40002,
+    0xa0e40003, 0x04000004, 0x80020006, 0x80550005, 0xa0000004, 0xa0550004, 0x03000042, 0x800f0007, 0x80e40006,
+    0xa0e40802, 0x03000002, 0x80010003, 0x80aa0005, 0xa0aa0004, 0x04000058, 0x80010006, 0x80000003, 0x80000007,
+    0x80000005, 0x04000004, 0x80010004, 0x80000006, 0xa0000004, 0xa0550004, 0x02000001, 0x80020004, 0xa0ff0000,
+    0x03000042, 0x800f0000, 0x80e40004, 0xa0e40803, 0x02000001, 0x800f0800, 0x80e40000, 0x0000ffff};
+
+bool PalettePass::Shader(IDirect3DDevice9* d) {
+    if (!ps && FAILED(d->CreatePixelShader(kPalPs, &ps))) ps = nullptr;
+    return ps != nullptr;
+}
+
+// The colour lookups for palette `m`: made again when it changed.
+bool PalettePass::Tables(IDirect3DDevice9* d, PaletteMap& m) {
+    if (madeOk && !memcmp(made, m.pal, sizeof(made))) return true;
+    madeOk = false;
+    if (!colors && FAILED(d->CreateTexture(1024, 32, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &colors, nullptr))) colors = nullptr;
+    if (!exact && FAILED(d->CreateTexture(512, 256, 1, 0, D3DFMT_L8, D3DPOOL_MANAGED, &exact, nullptr))) exact = nullptr;
+    D3DLOCKED_RECT ex, co;
+    if (!colors || !exact || FAILED(exact->LockRect(0, &ex, nullptr, 0))) return false;
+    m.FillNearest();
+    // The 15-bit colours the palette has colours in, a row each (at most 256): their nearest
+    // entry, the palette's colours their entry, from the top (the lowest of a colour last).
+    uint16_t rowColor[256];
+    int rows = 0;
+    for (int i = 255; i >= 0; i--) {
+        const PALETTEENTRY& e = m.pal[i];
+        const uint32_t c = PaletteMap::Bucket(uint32_t(e.peRed) << 16 | uint32_t(e.peGreen) << 8 | e.peBlue);
+        int row = 0;
+        while (row < rows && rowColor[row] != c) row++;
+        uint8_t* line = static_cast<uint8_t*>(ex.pBits) + row * ex.Pitch;
+        if (row == rows) {
+            rowColor[rows++] = uint16_t(c);
+            memset(line, m.nearest[c], 512);
+        }
+        line[(e.peRed & 7) << 6 | (e.peGreen & 7) << 3 | (e.peBlue & 7)] = uint8_t(i);
+    }
+    exact->UnlockRect(0);
+    if (FAILED(colors->LockRect(0, &co, nullptr, 0))) return false;
+    for (uint32_t b = 0; b < 32; b++) {
+        uint32_t* line = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(co.pBits) + b * co.Pitch);
+        for (uint32_t x = 0; x < 1024; x++) line[x] = 0xFF000000u | uint32_t(m.nearest[(x & 31) << 10 | (x >> 5) << 5 | b]) << 16;
+    }
+    for (int row = 0; row < rows; row++) {
+        const uint32_t c = rowColor[row];
+        reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(co.pBits) + (c & 31) * co.Pitch)[c >> 10 | ((c >> 5) & 31) << 5] |=
+            uint32_t(row) << 8 | 0xFF;
+    }
+    colors->UnlockRect(0);
+    memcpy(made, m.pal, sizeof(made));
+    madeOk = true;
+    return true;
+}
+
+// The texels: each entry's as WriteLevel makes it in `fmt`.
+bool PalettePass::Texels(IDirect3DDevice9* d, const Format& fmt, const PALETTEENTRY* entries, bool keyed, DWORD key,
+                         bool palAlpha) {
+    if (!texels && FAILED(d->CreateTexture(256, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &texels, nullptr))) {
+        texels = nullptr;
+        return false;
+    }
+    D3DLOCKED_RECT lr;
+    if (FAILED(texels->LockRect(0, &lr, nullptr, 0))) return false;
+    uint8_t all[256];
+    for (int i = 0; i < 256; i++) all[i] = uint8_t(i);
+    RowConverter(fmt, entries, keyed, key, palAlpha).Run(all, static_cast<uint32_t*>(lr.pBits), 256);
+    texels->UnlockRect(0);
+    return true;
+}
+
+bool PalettePass::Draw(Gpu& gpu, IDirect3DDevice9* d, IDirect3DTexture9* src, IDirect3DSurface9* target, UINT w, UINT h) {
+    QuadPass pass(gpu, d, ps);
+    pass.Target(target);
+    pass.Texture(0, src);
+    pass.Texture(1, colors);
+    pass.Texture(2, exact);
+    pass.Texture(3, texels);
+    const RECT all = {0, 0, LONG(w), LONG(h)};
+    const bool ok = pass.Draw(all, all, w, h);
+    gpu.CloseScene();
+    return ok;
+}
+
+// The presenter's palettized frame (see gpures.h): the render target's part copied into `src`,
+// drawn through the pass into `out`, with the shown palette's map and its entries' colours.
+struct PaletteFrame {
+    PalettePass pass;
+    PaletteMap map;
+    unsigned texelsVersion = 0;  // the map's version the texels were made for
+    IDirect3DTexture9* src = nullptr;
+    IDirect3DSurface9* out = nullptr;
+    UINT w = 0, h = 0;
+    D3DFORMAT fmt = D3DFMT_UNKNOWN;
+    bool failed = false;  // no pixel shaders
+    void Release() {
+        pass.Release();
+        texelsVersion = 0;
+        if (src) src->Release();
+        if (out) out->Release();
+        src = nullptr;
+        out = nullptr;
+        w = h = 0;
+    }
+};
+
+PaletteFrame* NewPaletteFrame() { return new PaletteFrame; }
+void DeletePaletteFrame(PaletteFrame* f) {
+    if (f) f->Release();
+    delete f;
+}
+void ReleasePaletteFrame(PaletteFrame* f) {
+    if (f) f->Release();
+}
+bool PaletteFrameFailed(const PaletteFrame* f) { return f && f->failed; }
+
+// `r` of the render target `rt` through the palette `entries` (PalettePass) into f's own target,
+// which it returns; null where that can't be done (no pixel shaders): PaletteFrameGpu then
+// gives the GPU up, and the frame is read back from then on.
+static IDirect3DSurface9* MakePaletteFrame(Gpu& gpu, IDirect3DDevice9* d, PaletteFrame* f, IDirect3DSurface9* rt, const RECT& r,
+                                           const PALETTEENTRY* entries) {
+    if (!f->pass.Shader(d)) return nullptr;
+    D3DSURFACE_DESC rd;
+    if (FAILED(rt->GetDesc(&rd))) return nullptr;
+    const UINT w = UINT(r.right - r.left), h = UINT(r.bottom - r.top);
+    if (!f->src || f->w != w || f->h != h || f->fmt != rd.Format) {
+        if (f->src) f->src->Release();
+        if (f->out) f->out->Release();
+        f->src = nullptr;
+        f->out = nullptr;
+        f->w = f->h = 0;
+        if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, rd.Format, D3DPOOL_DEFAULT, &f->src, nullptr)) ||
+            FAILED(d->CreateRenderTarget(w, h, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &f->out, nullptr))) {
+            if (f->src) f->src->Release();
+            f->src = nullptr;
+            f->out = nullptr;
+            return nullptr;
+        }
+        f->w = w;
+        f->h = h;
+        f->fmt = rd.Format;
+    }
+    f->map.Set(entries);  // (nothing done for the same palette)
+    if (!f->pass.Tables(d, f->map)) return nullptr;
+    if (f->texelsVersion != f->map.version) {
+        if (!f->pass.Texels(d, Format::ForDisplayBpp(8), entries, false, 0, false)) return nullptr;
+        f->texelsVersion = f->map.version;
+    }
+    IDirect3DSurface9* level = nullptr;
+    if (FAILED(f->src->GetSurfaceLevel(0, &level))) return nullptr;
+    gpu.CloseScene();  // StretchRect: outside a scene
+    const bool copied = SUCCEEDED(d->StretchRect(rt, &r, level, nullptr, D3DTEXF_NONE));
+    level->Release();
+    return copied && f->pass.Draw(gpu, d, f->src, f->out, w, h) ? f->out : nullptr;
+}
+
+IDirect3DSurface9* PaletteFrameGpu(Gpu& gpu, PaletteFrame* f, IDirect3DSurface9* rt, const RECT& r, const PALETTEENTRY* entries) {
+    IDirect3DDevice9* d = gpu.CurrentDevice();
+    if (!f || f->failed || !d) return nullptr;
+    IDirect3DSurface9* out = MakePaletteFrame(gpu, d, f, rt, r, entries);
+    static bool logged;  // Gpu lock
+    if (!out) {
+        f->failed = true;
+        DD2D9_LOG("Direct3D: a palettized primary's frame can't go through its palette on the GPU (no pixel shaders?): read "
+                  "back instead");
+    } else if (!logged) {
+        logged = true;
+        DD2D9_LOG("Direct3D: a palettized primary's frame shown through its palette on the GPU");
+    }
+    return out;
+}
+
 // A texture with levels Direct3D drew into, made on the GPU (see GpuTex::rtTex); null when
 // none of its levels is newer on the GPU, or this can't be done here (the CPU copy is used:
-// read back, then uploaded). Palettized textures go through the CPU (the palette is applied
-// there). Gpu lock held.
+// read back, then uploaded). Gpu lock held.
 static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Surface* const* chain, size_t n,
-                                    const Format& fmt, bool keyed, DWORD key) {
+                                    const Format& fmt, const TexLook& look) {
     auto newest = [](const Buffer* b) { return b->gpu && b->gpu->surf && b->cpuStale && !b->gpuStale; };
     D3DFORMAT gfmt = D3DFMT_UNKNOWN;
     for (size_t i = 0; i < n; i++) {
@@ -169,17 +366,21 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
         if (gfmt == D3DFMT_UNKNOWN) gfmt = b->gpu->fmt;
         else if (b->gpu->fmt != gfmt) return nullptr;  // (levels drawn in different formats)
     }
-    if (gfmt == D3DFMT_UNKNOWN || fmt.Palettized() || fmt.fourcc || fmt.CopyOnly()) return nullptr;
-    // The texture's format: the render targets', or with a key A8R8G8B8 (alpha for it). The
-    // levels the CPU has newer go up as they are (the render targets' layout is the
-    // texture's) or converted to 32-bit colour.
-    const D3DFORMAT T = keyed ? D3DFMT_A8R8G8B8 : gfmt;
+    if (gfmt == D3DFMT_UNKNOWN || (fmt.Palettized() && !fmt.pal8) || fmt.fourcc || fmt.CopyOnly()) return nullptr;
+    const bool keyed = look.keyed, pal8 = fmt.pal8;
+    const DWORD key = look.key;
+    // The texture's format: the render targets', or keyed or palettized A8R8G8B8 (alpha for
+    // the key, the palette's colours). The levels the CPU has newer go up as they are (the
+    // render targets' layout is the texture's) or converted to 32-bit colour.
+    const D3DFORMAT T = keyed || pal8 ? D3DFMT_A8R8G8B8 : gfmt;
     const bool cpuConvert = keyed || T != NativeFormat(fmt);
     if (cpuConvert && T != D3DFMT_A8R8G8B8 && T != D3DFMT_X8R8G8B8) return nullptr;
-    if (keyed && !t->keyPs && FAILED(d->CreatePixelShader(kKeyPs, &t->keyPs))) {
+    if (pal8 && !t->palPass.Shader(d)) return nullptr;
+    if (keyed && !pal8 && !t->keyPs && FAILED(d->CreatePixelShader(kKeyPs, &t->keyPs))) {
         t->keyPs = nullptr;
         return nullptr;
     }
+    const PALETTEENTRY* entries = look.pal ? look.pal->entries : chain[0]->dd->defaultPalette;
     const Buffer* top = chain[0]->buf;
     if (!t->rtTex || t->rtW != UINT(top->w) || t->rtH != UINT(top->h) || t->rtFmt != T || t->rtLevels != n) {
         t->DropRt();
@@ -192,11 +393,20 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
         t->rtFmt = T;
         t->rtLevels = UINT(n);
     }
-    if (t->rtLevelSrc.size() != n || keyed != t->rtKeyed || key != t->rtKey) {
+    // (Another look since: every level made again. Palettized, its texels first.)
+    if (t->rtLevelSrc.size() != n || keyed != t->rtKeyed || key != t->rtKey || look.pal != t->rtPal ||
+        (look.pal && look.pal->version != t->rtPalVersion)) {
         t->rtLevelSrc.assign(n, nullptr);
         t->rtLevelSerial.assign(n, 0);
+        t->rtLevelMap.assign(n, 0);
         t->rtKeyed = keyed;
         t->rtKey = key;
+        t->rtPal = look.pal;
+        t->rtPalVersion = look.pal ? look.pal->version : 0;
+        if (pal8 && !t->palPass.Texels(d, fmt, entries, keyed, key, PaletteHasAlpha(look.pal))) {
+            t->rtLevelSrc.clear();  // (tried again next time)
+            return nullptr;
+        }
     }
     for (size_t i = 0; i < n; i++) {
         Buffer* b = chain[i]->buf;
@@ -207,15 +417,19 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
             return nullptr;  // (a level given another size or format since: the CPU path copes)
         if (newest(b)) {
             GpuSurf* g = b->gpu;
-            if (t->rtLevelSrc[i] == g && t->rtLevelSerial[i] == g->serial) continue;
+            // (A palettized one maps back through the palette it has: its copy goes with it.)
+            PaletteMap* m = pal8 ? g->pal : nullptr;
+            if (pal8 && !m) return nullptr;
+            if (t->rtLevelSrc[i] == g && t->rtLevelSerial[i] == g->serial && (!m || t->rtLevelMap[i] == m->version)) continue;
+            if (m && !t->palPass.Tables(d, *m)) return nullptr;
             Resolve(gpu, d, g);
             if (FAILED(t->rtTex->GetSurfaceLevel(UINT(i), &level))) return nullptr;
             gpu.CloseScene();  // StretchRect: outside a scene
             bool ok;
-            if (!keyed) {
+            if (!keyed && !pal8) {
                 ok = SUCCEEDED(d->StretchRect(g->surf, nullptr, level, nullptr, D3DTEXF_NONE));
             } else {
-                // The render target copied into a texture, drawn through the key shader.
+                // The render target copied into a texture, drawn through the key or palette shader.
                 if (!t->rtTmp || t->tmpW != UINT(b->w) || t->tmpH != UINT(b->h) || t->tmpFmt != g->fmt) {
                     if (t->rtTmp) t->rtTmp->Release();
                     if (FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_RENDERTARGET, g->fmt, D3DPOOL_DEFAULT, &t->rtTmp,
@@ -229,14 +443,16 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
                 ok = t->rtTmp && SUCCEEDED(t->rtTmp->GetSurfaceLevel(0, &tmp)) &&
                      SUCCEEDED(d->StretchRect(g->surf, nullptr, tmp, nullptr, D3DTEXF_NONE));
                 if (tmp) tmp->Release();
-                if (ok) {
+                if (ok && pal8) {
+                    ok = t->palPass.Draw(gpu, d, t->rtTmp, level, b->w, b->h);
+                } else if (ok) {
+                    QuadPass pass(gpu, d, t->keyPs);
+                    pass.Target(level);
+                    pass.Texture(0, t->rtTmp);
                     auto bits = [](DWORD mask) { return mask ? float(mask >> __builtin_ctz(mask)) : 0.0f; };
                     auto chan = [](DWORD v, DWORD mask) { return mask ? -float((v & mask) >> __builtin_ctz(mask)) : 0.0f; };
                     const float maxes[4] = {bits(fmt.r), bits(fmt.g), bits(fmt.b), 0};
                     const float minusKey[4] = {chan(key, fmt.r), chan(key, fmt.g), chan(key, fmt.b), 0};
-                    QuadPass pass(gpu, d, t->keyPs);
-                    pass.Target(level);
-                    pass.Texture(0, t->rtTmp);
                     d->SetPixelShaderConstantF(0, maxes, 1);
                     d->SetPixelShaderConstantF(3, minusKey, 1);
                     const RECT all = {0, 0, b->w, b->h};
@@ -248,6 +464,7 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
             if (!ok) return nullptr;
             t->rtLevelSrc[i] = g;
             t->rtLevelSerial[i] = g->serial;
+            t->rtLevelMap[i] = m ? m->version : 0;
         } else {
             // A level the CPU has newer (or that nothing drew into): its CPU copy, through a
             // system-memory texture (what Direct3D drew there merged in first, if both changed).
@@ -259,7 +476,7 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
             }
             D3DLOCKED_RECT lr;
             if (FAILED(t->rtSys->LockRect(UINT(i), &lr, nullptr, 0))) return nullptr;
-            WriteLevel(b, lr, chain[0]->dd->defaultPalette, cpuConvert, keyed, key);
+            WriteLevel(b, lr, entries, cpuConvert, keyed, key, PaletteHasAlpha(look.pal));
             t->rtSys->UnlockRect(UINT(i));
             IDirect3DSurface9* sys = nullptr;
             bool ok = SUCCEEDED(t->rtSys->GetSurfaceLevel(UINT(i), &sys)) && SUCCEEDED(t->rtTex->GetSurfaceLevel(UINT(i), &level));
@@ -272,10 +489,14 @@ static IDirect3DTexture9* RtTexture(Gpu& gpu, IDirect3DDevice9* d, GpuTex* t, Su
             t->rtLevelSerial[i] = b->cpuSerial;
         }
     }
-    static bool loggedKeyed, loggedMip;  // Gpu lock
+    static bool loggedKeyed, loggedPal, loggedMip;  // Gpu lock
     if (keyed && !loggedKeyed) {
         loggedKeyed = true;
         DD2D9_LOG("Direct3D: a colour-keyed render-target texture copied on the GPU");
+    }
+    if (pal8 && !loggedPal) {
+        loggedPal = true;
+        DD2D9_LOG("Direct3D: a palettized render-target texture copied on the GPU (its colours through its palette)");
     }
     if (n > 1 && !loggedMip) {
         loggedMip = true;
@@ -301,7 +522,7 @@ IDirect3DBaseTexture9* EnsureTex(Gpu& gpu, IDirect3DDevice9* d, Surface* s, bool
     const bool keyed = look.keyed;
     const DWORD key = look.key;
     // Levels rendered into by Direct3D and not touched by the CPU since: copied on the GPU.
-    if (IDirect3DTexture9* rt = RtTexture(gpu, d, t, chain.l, chain.n, s->buf->fmt, keyed, key)) {
+    if (IDirect3DTexture9* rt = RtTexture(gpu, d, t, chain.l, chain.n, s->buf->fmt, look)) {
         t->levelBufs.assign(chain.size(), nullptr);  // the managed copies are behind now
         t->alt.levelBufs.assign(t->alt.levelBufs.size(), nullptr);
         t->shownKeyed = keyed;

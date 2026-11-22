@@ -25,10 +25,12 @@ enum { kDisplaySwitch, kDisplayWindow, kDisplayBorderless };
 enum { kVSyncAuto, kVSyncOn, kVSyncOff };
 enum { kD3DAuto, kD3DOn, kD3DOff };
 enum { kFlipCopyAuto, kFlipCopyOn, kFlipCopyOff };
+enum { kMinimizeAuto, kMinimizeOn, kMinimizeOff };
 
 // Defaults behave like the original DirectDraw.
 struct Config {
     int display = kDisplaySwitch;  // exclusive-mode games: real mode switch / centered window / borderless scaled
+    int minimize = kMinimizeAuto;  // the fullscreen window minimized on focus loss: auto (not under i3, sway), on, off
     int stretch = 0;               // window & borderless scaling: 0 aspect, 1 fill, 2 integer
     int filter = 2;                // 0 point, 1 linear, 2 sharp (integer point prescale, then linear; default)
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
@@ -69,6 +71,12 @@ struct Config {
 };
 extern Config g_config;
 void LoadConfig(HMODULE self);
+// The window manager, if it is i3 or sway, which don't minimize windows: its name (config.cpp).
+extern const char* g_tilingWm;
+// minimize= as it applies: auto minimizes, except under i3 or sway.
+inline bool MinimizeOnFocusLoss() {
+    return g_config.minimize == kMinimizeOn || (g_config.minimize == kMinimizeAuto && !g_tilingWm);
+}
 // dd2d9 was loaded under another name than ddraw.dll (behind a wrapper).
 bool LoadedBehindWrapper();
 
@@ -306,5 +314,26 @@ void GameImageChanged();
 // desktopbpp=: the colour depth the game is told the screen has (its mode's, or desktopbpp=).
 int ShownDisplayBpp();
 bool ShownDisplaySize(int* w, int* h);  // a display mode of dd2d9's own (ddscreen.cpp)
+
+// The identity gamma ramp as XP has it: i << 8 (GetGammaRamp once the ramp was dropped).
+inline void IdentityRamp(DDGAMMARAMP* r) {
+    for (int i = 0; i < 256; i++) r->red[i] = r->green[i] = r->blue[i] = WORD(i << 8);
+}
+// The gamma calibrator (surface.cpp): read from the registry as the DLL loads; registered
+// (and, once loaded, loadable).
+void ReadGammaCalibrator();
+bool GammaCalibratorRegistered();
+// EnablePrintScreen under HKLM\Software\Microsoft\DirectDraw, read as each DirectDraw object is
+// made, as ddraw.dll reads it (ddgdi.cpp).
+void ReadPrintScreenSetting();
+// GDI's palette of an 8-bit screen, as XP's GDI kept it beside DirectDraw (ddgdi.cpp): started
+// again by a mode set; a palette put on the primary (Shown), its entries set (`entries`: the
+// palette's own, from `start`), and taken off or gone with the primary (Gone). Get: all of
+// it; true while a primary's palette is it (SYSPAL_NOSTATIC256).
+void ScreenPaletteReset();
+void ScreenPaletteShown(const PALETTEENTRY* entries);
+void ScreenPaletteSet(const PALETTEENTRY* entries, DWORD start, DWORD count);
+void ScreenPaletteGone();
+bool ScreenPaletteGet(PALETTEENTRY out[256]);
 
 }  // namespace dd2d9

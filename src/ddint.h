@@ -28,6 +28,26 @@ ULONG ModeHash();            // the current display mode as one number (ddmode.c
 ULONG DisplayUniqueness();   // Windows' display settings uniqueness (ddmode.cpp)
 extern volatile LONG g_toldSize;  // what the game's window was last told its size is (ddhook.cpp)
 HWND CreateDeviceWindow(HWND focus);  // DDSCL_CREATEDEVICEWINDOW's window (ddwindow.cpp)
+// A focus change taken up later, as the foreground is then: one that came while dd2d9 itself
+// moved or sized the window (ddhook.cpp).
+void DeferActivation(HWND h, DWORD thread);
+// Exclusive mode taken: the game counts as told it's active (ddhook.cpp).
+void ActivationTaken();
+// ddraw.dll's system settings while a fullscreen game holds exclusive mode in front
+// (ddwindow.cpp; g_displayLock held), and the IME's, changed once that lock is let go.
+void ExclusiveSettings(bool on);
+void ApplyImeUi();
+
+// EnablePrintScreen set (ReadPrintScreenSetting), and the primary copied to the clipboard on
+// PrintScreen's key-up in the exclusive window (ddgdi.cpp; g_lock held).
+bool PrintScreenEnabled();
+void CopyPrimaryToClipboard(DDraw* dd, HWND hwnd);
+
+// The video port container (ddvideoport.cpp): one per DirectDraw object (New throws
+// std::bad_alloc), handed out for its IID.
+void* NewVideoPortContainer(DDraw* d);
+void DeleteVideoPortContainer(void* c);
+bool IsVideoPortContainerIid(REFIID r);
 
 // GameImageChanged at the end of a scope that moves or resizes the game's window.
 struct ImageChangedAtExit {

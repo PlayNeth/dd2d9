@@ -8,9 +8,12 @@ QuadPass::QuadPass(Gpu& gpu, IDirect3DDevice9* d, IDirect3DPixelShader9* ps, DWO
     d->SetVertexShader(nullptr);
     SetFvf9(d, fvf);
     // Only what the pass sets is bound (a texture left bound may be the target itself).
-    for (DWORD s = 0; s < 3; s++) SetTexture9(d, s, nullptr);
-    d->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
-    d->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    // Stage i's texture coordinates (a shader's t<i>): the vertices' set i, untransformed.
+    for (DWORD s = 0; s < 4; s++) {
+        SetTexture9(d, s, nullptr);
+        d->SetTextureStageState(s, D3DTSS_TEXCOORDINDEX, s);
+        d->SetTextureStageState(s, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    }
     if (!ps) {
         const DWORD tss[][2] = {{D3DTSS_COLOROP, D3DTOP_SELECTARG1}, {D3DTSS_COLORARG1, D3DTA_TEXTURE},
                                 {D3DTSS_ALPHAOP, D3DTOP_SELECTARG1}, {D3DTSS_ALPHAARG1, D3DTA_TEXTURE}};

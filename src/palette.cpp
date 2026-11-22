@@ -35,6 +35,20 @@ void Palette::ReserveSystemEntries() {
     }
 }
 
+// Put on the primary in exclusive mode: ddraw.dll realizes the palette, and its entries read
+// back as realized from then on, off the primary too (XP SP3, fmtprobe's "palette entries read
+// back"): the low four bits of each peFlags are 5 (PC_RESERVED | PC_NOCOLLAPSE). `ends`: the
+// first and last entries become black and white as well, DDPCAPS_ALLOW256 or not (with it,
+// SetEntries on the primary then writes those two).
+void Palette::Realized(bool ends) {
+    for (PALETTEENTRY& e : entries) e.peFlags = BYTE((e.peFlags & 0xF0) | 5);
+    if (ends) {
+        entries[0].peRed = entries[0].peGreen = entries[0].peBlue = 0;
+        entries[255].peRed = entries[255].peGreen = entries[255].peBlue = 255;
+    }
+    version = NextCpuSerial();
+}
+
 // Released more often than referenced (the surfaces it's attached to hold references):
 // ddraw.dll detaches it, so GetPalette then says DDERR_NOPALETTEATTACHED instead of
 // handing out freed memory. g_lock held.
@@ -42,6 +56,7 @@ Palette::~Palette() {
     g_palettes.Remove(this);
     if (dd_) {
         if (dd_->primary && dd_->primary->ShownPalette() == this) dd_->KeepHardwarePalette(entries);
+        if (dd_->primary && dd_->primary->palette == this) ScreenPaletteGone();
         for (const std::vector<Surface*>* list : {&dd_->surfaces, &dd_->detached})
             for (Surface* s : *list)
                 if (s->palette == this) s->palette = nullptr;
@@ -129,6 +144,12 @@ HRESULT Palette::SetEntries(DWORD flags, DWORD start, DWORD count, LPPALETTEENTR
     }
     ReserveSystemEntries();
     version = NextCpuSerial();
+    if (dd_ && dd_->primary && dd_->primary->palette == this) {
+        // (On the primary the flags are stored as realized: see Realized.)
+        if (dd_->Exclusive())
+            for (DWORD i = start; i < start + count; i++) entries[i].peFlags = BYTE((entries[i].peFlags & 0xF0) | 5);
+        ScreenPaletteSet(entries, start, count);
+    }
     DD2D9_TRACE("Palette %p SetEntries start=%lu count=%lu%s", static_cast<void*>(this), start, count,
                dd_ && dd_->primary && dd_->primary->ShownPalette() == this ? " (primary)" : "");
     if (dd_ && dd_->primary && dd_->primary->ShownPalette() == this) dd_->MarkDirty();
@@ -141,8 +162,9 @@ HRESULT Palette::SetEntries(DWORD flags, DWORD start, DWORD count, LPPALETTEENTR
     // strokes.
     if (dd_)
         for (Surface* sf : dd_->surfaces)
-            if (sf->dcOut && !sf->palette && sf->buf && sf->buf->fmt.Palettized() && sf->buf->dcPal == this)
-                sf->LoadDcColorTable(sf->dcOut, this);
+            if (sf->buf && (sf->dcOut || (sf->dcKept && sf->buf->dc)) && !sf->palette && sf->buf->fmt.Palettized() &&
+                sf->buf->dcPal == this)
+                sf->LoadDcColorTable(sf->dcOut ? sf->dcOut : sf->buf->dc, this);
     return DD_OK;
 }
 

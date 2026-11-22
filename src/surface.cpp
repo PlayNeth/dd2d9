@@ -7,6 +7,7 @@
 #include "d3d6.h"
 
 #include <algorithm>
+#include <atomic>
 
 namespace dd2d9 {
 
@@ -85,7 +86,10 @@ Surface::~Surface() {
         else doomed.push_back(c);
     }
     for (Surface* c : doomed) delete c;
-    if (palette && dd->primary == this) dd->KeepHardwarePalette(palette->entries);
+    if (palette && dd->primary == this) {
+        dd->KeepHardwarePalette(palette->entries);
+        ScreenPaletteGone();
+    }
     if (palette) palette->Release();
     if (clipper) {
         clipper->users.erase(std::find(clipper->users.begin(), clipper->users.end(), this));
@@ -99,6 +103,8 @@ Surface::~Surface() {
     FreeWraps();
     delete gamma;
     delete gammaRamp;
+    delete color;
+    delete colorControls;
     dd->vidMemUsed -= vidMemBytes;
     if (dd->primary == this) {
         DD2D9_LOG("primary surface %p released", static_cast<void*>(this));
@@ -145,7 +151,19 @@ HRESULT Surface::QueryInterface(REFIID r, void** out, int version) {
         *out = gamma;
         return S_OK;
     }
-    if (IsEqualGUID(r, IID_IDirectDrawColorControl)) return E_NOINTERFACE;  // ddraw's own; not on these surfaces
+    // The colour controls: the primary's and overlays', as the caps say (DDCAPS2_COLORCONTROLPRIMARY,
+    // DDCAPS2_COLORCONTROLOVERLAY; none on an emulation-only object), as ddraw.dll hands them out.
+    if (IsEqualGUID(r, IID_IDirectDrawColorControl)) {
+        Guard l;
+        const DWORD caps = desc.ddsCaps.dwCaps;
+        if (dd->capsSide == DDraw::kEmulationOnly ||
+            !((caps & DDSCAPS_PRIMARYSURFACE) || ((caps & DDSCAPS_OVERLAY) && OverlaysOffered(dd))))
+            return E_NOINTERFACE;
+        if (!color && !(color = new (std::nothrow) ColorControl(this))) return E_OUTOFMEMORY;
+        AddRef(kRefColor);
+        *out = color;
+        return S_OK;
+    }
     // Textures and Direct3D 1 devices (DirectDraw 1-4 objects).
     HRESULT hr = D3DLegacyQuerySurface(this, r, out, version);
     if (hr != E_NOINTERFACE) return hr;
@@ -177,7 +195,7 @@ int Surface::InterfacesHeld(LONG when[kRefV7 + 1]) const {
 // primary decides whether a new one can be created).
 void Surface::TraceRef(const char* what, int slot, LONG r) const {
     if (LogLevel() < 2 || !(isPrimary || (root && root->isPrimary))) return;
-    static const char* const kSlot[kRefSlots] = {"v1", "v2", "v3", "v4", "v7", "gamma", "dd2d9"};
+    static const char* const kSlot[kRefSlots] = {"v1", "v2", "v3", "v4", "v7", "gamma", "color", "dd2d9"};
     DD2D9_TRACE("%s %p%s through %s -> %ld (total %ld)", what, static_cast<const void*>(this),
                 isPrimary ? " (primary)" : " (primary chain)", slot >= 0 && slot < kRefSlots ? kSlot[slot] : "?", r,
                 total_);
@@ -358,8 +376,10 @@ HRESULT Surface::GetColorKey(DWORD flags, DDCOLORKEY* key) {
     return DD_OK;
 }
 
-// Checks in ddraw.dll's order (spec section 3). dd2d9 reports single colour keys (no
-// ranges): for blits, and for overlays while they are offered (videooverlay=on).
+// Checks in ddraw.dll's order (spec section 3). Keys for blits, and for overlays while they
+// are offered (videooverlay=on); ranges (DDCKEY_COLORSPACE) where the driver compares them:
+// blit keys in video memory, overlay keys (measured on XP: in system memory, the emulation
+// layer's, DDERR_NOCOLORKEYHW).
 HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key, int version) {
     if (IsLost()) return DDERR_SURFACELOST;
     if (desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER) return DDERR_INVALIDSURFACETYPE;
@@ -397,11 +417,13 @@ HRESULT Surface::SetColorKey(DWORD flags, DDCOLORKEY* key, int version) {
     const DWORD low = key->dwColorSpaceLowValue;
     const DWORD high = (flags & DDCKEY_COLORSPACE) ? key->dwColorSpaceHighValue : low;
     if ((type & (DDCKEY_SRCOVERLAY | DDCKEY_DESTOVERLAY)) && !overlays) return DDERR_NOCOLORKEYHW;
-    if (low != high) return DDERR_NOCOLORKEYHW;
+    if (low != high && !(type & (DDCKEY_SRCOVERLAY | DDCKEY_DESTOVERLAY)) && !(desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY))
+        return DDERR_NOCOLORKEYHW;
     if (type & DDCKEY_DESTOVERLAY)
         if (HRESULT hr = destOverlayCheck(); FAILED(hr)) return hr;
     const int i = CkIndex(type);
-    ck[i].dwColorSpaceLowValue = ck[i].dwColorSpaceHighValue = low;
+    ck[i].dwColorSpaceLowValue = low;
+    ck[i].dwColorSpaceHighValue = high;
     hasCk[i] = true;
     return DD_OK;
 }
@@ -449,9 +471,23 @@ HRESULT Surface::SetPalette(IDirectDrawPalette* p, int version) {
     }
     DD2D9_TRACE("SetPalette %p%s <- %p", static_cast<void*>(this), isPrimary ? " (primary)" : "", static_cast<void*>(np));
     if (np) np->AddRef();
+    const Palette* const old = palette;
     if (palette && isPrimary) dd->KeepHardwarePalette(palette->entries);  // (shown until another is)
     if (palette) palette->Release();
     palette = np;
+    if (dd->primary == this) {  // (GDI's palette of the screen follows the primary's)
+        if (np) {
+            // ddraw.dll forces the palette's ends by the surface's flags where the palette's
+            // were meant (FUN_73751e14: DDRAWISURF_ATTACHED and DDRAWISURF_HASCKEYDESTBLT have
+            // the values of DDRAWIPAL_256 and DDRAWIPAL_ALLOW256): on a primary of a flip chain
+            // without a destination key for blits, whatever the palette's caps. A primary on
+            // its own keeps a DDPCAPS_ALLOW256 palette's ends (its PrintScreen copy shows them).
+            if (np != old && dd->Exclusive()) np->Realized(chainNext && !hasCk[kCkDestBlt]);
+            ScreenPaletteShown(np->entries);
+        } else {
+            ScreenPaletteGone();
+        }
+    }
     BumpUniqueness();
     MarkDirtyIfVisible();
     // A back buffer's palette is shown while the front has none (see ShownPalette).
@@ -645,6 +681,7 @@ HRESULT Surface::FreePrivateData(REFGUID tag) {
 }
 
 void Surface::CpuAccess(bool write, const RECT* area) {
+    if (dcKept) SyncKeptDc();  // GDI's drawing on an OWNDC surface's DC in the memory first
     if (buf->gpu) GpuCpuAccess(this, write, area);  // reads back what Direct3D drew, if newer
     else if (write) buf->MarkGpuStale(area);
     if (write) buf->cpuSerial = NextCpuSerial();              // a texture's GPU copy is made from its levels' buffers
@@ -667,6 +704,7 @@ Surface* Surface::NextMipLevel() const {
 void Surface::MarkDirtyIfVisible(const RECT* area) {
     if (!isPrimary) {
         if (OverlayShown() && overlayDest->isPrimary) overlayDest->dd->MarkOverlayDirty();  // laid over the primary
+        OverlayAlphaDrawn(this);  // (or the alpha of one that is)
         return;
     }
     if (area) dd->MarkDirtyRect(*area);
@@ -685,6 +723,43 @@ HRESULT Surface::ManagedTextureCheck() const {
 
 // ================================================================ GammaControl
 
+namespace {
+// The gamma calibrator DDSGR_CALIBRATE calibrates with, as ddraw.dll's: the DLL registered under
+// HKLM\Software\Microsoft\DirectDraw\GammaCalibrator ("Path", a string), read as the DLL loads
+// (FUN_7373b5cc), loaded at the first calibration and kept (FUN_73764449). One that won't load
+// or has no CalibrateGammaRamp takes calibration away from then on.
+char g_calibratorPath[MAX_PATH];
+std::atomic<bool> g_calibratorRegistered{false};
+using CalibrateFn = HRESULT(WINAPI*)(LPDDGAMMARAMP, LPBYTE);
+CalibrateFn g_calibrate;  // g_lock
+
+CalibrateFn LoadedCalibrator() {
+    if (!g_calibrate && g_calibratorRegistered.load()) {
+        const HMODULE m = LoadLibraryA(g_calibratorPath);
+        const FARPROC fn = m ? GetProcAddress(m, "CalibrateGammaRamp") : nullptr;
+        g_calibrate = reinterpret_cast<CalibrateFn>(reinterpret_cast<void*>(fn));
+        if (!g_calibrate) {
+            DD2D9_LOG("the gamma calibrator %s: %s", g_calibratorPath, m ? "no CalibrateGammaRamp" : "won't load");
+            if (m) FreeLibrary(m);
+            g_calibratorRegistered.store(false);
+        }
+    }
+    return g_calibrate;
+}
+}  // namespace
+
+void ReadGammaCalibrator() {
+    HKEY k;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\DirectDraw\\GammaCalibrator", 0, KEY_QUERY_VALUE, &k)) return;
+    DWORD type = 0, size = sizeof(g_calibratorPath) - 1;  // (zeroed: ends in a 0 however long)
+    if (!RegQueryValueExA(k, "Path", nullptr, &type, reinterpret_cast<BYTE*>(g_calibratorPath), &size) && type == REG_SZ &&
+        g_calibratorPath[0])
+        g_calibratorRegistered.store(true);
+    RegCloseKey(k);
+}
+
+bool GammaCalibratorRegistered() { return g_calibratorRegistered.load(); }
+
 HRESULT GammaControl::QueryInterface(REFIID r, void** out) { return surface->QueryInterface(r, out); }
 ULONG GammaControl::AddRef() { return surface->AddRef(Surface::kRefGamma); }
 ULONG GammaControl::Release() { return surface->Release(Surface::kRefGamma); }
@@ -692,7 +767,7 @@ ULONG GammaControl::Release() { return surface->Release(Surface::kRefGamma); }
 // As ddraw.dll (spec: re/spec/gamma-colorcontrol.md): the primary's only. Without a ramp
 // of its own, the display's. Where Windows has none to give, ddraw.dll returns
 // DDERR_UNSUPPORTED; dd2d9 applies ramps itself (to the game's image), so it always
-// has one: the identity (deliberate).
+// has one: the identity (deliberate), as XP's is (i << 8).
 HRESULT GammaControl::GetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
     Guard l;
     if (!ramp || flags || !(surface->desc.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)) return DDERR_INVALIDPARAMS;
@@ -704,20 +779,30 @@ HRESULT GammaControl::GetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
     HDC dc = GetDC(nullptr);
     const bool ok = dc && GetDeviceGammaRamp(dc, ramp);
     if (dc) ReleaseDC(nullptr, dc);
-    if (!ok)
-        for (int i = 0; i < 256; i++) ramp->red[i] = ramp->green[i] = ramp->blue[i] = WORD(i * 0x101);
+    if (!ok) IdentityRamp(ramp);
     return DD_OK;
 }
 
 // The ramp is the primary's and shows only while its DirectDraw object is exclusive;
-// NULL drops it. No calibrator here: DDSGR_CALIBRATE (1) is unsupported.
+// NULL drops it. DDSGR_CALIBRATE hands a copy to the calibrator first, as ddraw.dll, with the
+// display driver's name ("display"): what it makes of it is the ramp; its failure is returned,
+// the ramp left as it was. With no calibrator, unsupported (checked first); NULL calls none.
 HRESULT GammaControl::SetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
     Guard l;
     const DWORD kCalibrate = 1;  // DDSGR_CALIBRATE
     if (flags & ~kCalibrate) return DDERR_INVALIDPARAMS;
-    if (flags & kCalibrate) return DDERR_UNSUPPORTED;
+    if ((flags & kCalibrate) && !GammaCalibratorRegistered()) return DDERR_UNSUPPORTED;
     if (!(surface->desc.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)) return DDERR_INVALIDPARAMS;
     if (surface->IsLost()) return DDERR_SURFACELOST;
+    DDGAMMARAMP calibrated;
+    if (ramp && (flags & kCalibrate)) {
+        const CalibrateFn calibrate = LoadedCalibrator();
+        if (!calibrate) return DDERR_UNSUPPORTED;
+        calibrated = *ramp;
+        char driver[] = "display";
+        if (const HRESULT hr = calibrate(&calibrated, reinterpret_cast<LPBYTE>(driver))) return hr;
+        ramp = &calibrated;
+    }
     if (!ramp) {
         delete surface->gammaRamp;
         surface->gammaRamp = nullptr;
@@ -728,6 +813,69 @@ HRESULT GammaControl::SetGammaRamp(DWORD flags, LPDDGAMMARAMP ramp) {
     if (surface->dd->primary == surface) {
         surface->dd->ApplyGamma();
         surface->dd->MarkDirty();
+    }
+    return DD_OK;
+}
+
+// ================================================================ ColorControl
+
+// As the DirectX 7 SDK has it (XP's checks first, IDirectDrawColorControl_Get/SetColorControls:
+// a structure of its size; the rest was its driver's, and the Voodoo3 has none): brightness,
+// contrast, hue, saturation and colour on or off, as GetColorControls' flags say, each set
+// applied to the surface's picture (the primary's frame, an overlay where it's laid; through
+// pixel shaders, see ColorTransformOf), the rest kept as they were; a value out of its range
+// refused. Sharpness and gamma aren't (not among the flags; kept as they were).
+namespace {
+constexpr DWORD kColorFlags = DDCOLOR_BRIGHTNESS | DDCOLOR_CONTRAST | DDCOLOR_HUE | DDCOLOR_SATURATION | DDCOLOR_COLORENABLE;
+
+DDCOLORCONTROL DefaultColorControls() {
+    DDCOLORCONTROL c = {};
+    c.dwSize = sizeof(c);
+    c.dwFlags = kColorFlags;
+    c.lBrightness = 750;  // (7.5 IRE)
+    c.lContrast = 10000;
+    c.lSaturation = 10000;
+    c.lSharpness = 5;
+    c.lGamma = 1;
+    c.lColorEnable = 1;
+    return c;
+}
+}  // namespace
+
+HRESULT ColorControl::QueryInterface(REFIID r, void** out) { return surface->QueryInterface(r, out); }
+ULONG ColorControl::AddRef() { return surface->AddRef(Surface::kRefColor); }
+ULONG ColorControl::Release() { return surface->Release(Surface::kRefColor); }
+
+HRESULT ColorControl::GetColorControls(LPDDCOLORCONTROL c) {
+    Guard l;
+    if (!c || IsBadWritePtr(c, sizeof(DDCOLORCONTROL)) || c->dwSize != sizeof(DDCOLORCONTROL)) return DDERR_INVALIDPARAMS;
+    *c = surface->colorControls ? *surface->colorControls : DefaultColorControls();
+    return DD_OK;
+}
+
+HRESULT ColorControl::SetColorControls(LPDDCOLORCONTROL c) {
+    Guard l;
+    if (!c || IsBadReadPtr(c, sizeof(DDCOLORCONTROL)) || c->dwSize != sizeof(DDCOLORCONTROL)) return DDERR_INVALIDPARAMS;
+    const DWORD f = c->dwFlags;
+    if (((f & DDCOLOR_BRIGHTNESS) && (c->lBrightness < 0 || c->lBrightness > 10000)) ||
+        ((f & DDCOLOR_CONTRAST) && (c->lContrast < 0 || c->lContrast > 20000)) ||
+        ((f & DDCOLOR_HUE) && (c->lHue < -180 || c->lHue > 180)) ||
+        ((f & DDCOLOR_SATURATION) && (c->lSaturation < 0 || c->lSaturation > 20000)) ||
+        ((f & DDCOLOR_COLORENABLE) && c->lColorEnable != 0 && c->lColorEnable != 1))
+        return DDERR_INVALIDPARAMS;
+    DDCOLORCONTROL now = surface->colorControls ? *surface->colorControls : DefaultColorControls();
+    if (f & DDCOLOR_BRIGHTNESS) now.lBrightness = c->lBrightness;
+    if (f & DDCOLOR_CONTRAST) now.lContrast = c->lContrast;
+    if (f & DDCOLOR_HUE) now.lHue = c->lHue;
+    if (f & DDCOLOR_SATURATION) now.lSaturation = c->lSaturation;
+    if (f & DDCOLOR_COLORENABLE) now.lColorEnable = c->lColorEnable;
+    if (!surface->colorControls && !(surface->colorControls = new (std::nothrow) DDCOLORCONTROL)) return DDERR_OUTOFMEMORY;
+    *surface->colorControls = now;
+    if (surface->dd->primary == surface) {
+        surface->dd->ApplyGamma();
+        surface->dd->MarkDirty();
+    } else if (surface->OverlayShown()) {
+        surface->overlayDest->dd->MarkOverlayDirty();
     }
     return DD_OK;
 }

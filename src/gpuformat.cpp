@@ -1,7 +1,10 @@
 // Direct3D's GPU copies: formats, and pixels between the CPU copies and the GPU's (see gpuint.h).
 #include "gpuint.h"
 
+#include <emmintrin.h>
+
 #include <algorithm>
+#include <climits>
 
 namespace dd2d9 {
 
@@ -84,6 +87,31 @@ void RowFromGpu(Buffer* b, int y, const uint8_t* src, bool convert, PaletteMap* 
         return;
     }
     for (int x = 0; x < b->w; x++, dst += bytes) WritePixel(dst, bytes, to ? (*to)(in[x]) : ARGBToPixel(b->fmt, in[x]));
+}
+
+// Four entries at a time: each one's red and green differences squared and summed by one
+// _mm_madd_epi16, its blue's by another. A lane keeps the lowest of its entries (4n + lane)
+// at its smallest distance; the lanes' smallest then decides, the lowest entry on a tie.
+int16_t PaletteMap::Nearest(uint32_t key) const {
+    const int r = int((key >> 10) << 3 | 4), g = int(((key >> 5) & 31) << 3 | 4), b = int((key & 31) << 3 | 4);
+    const __m128i crg = _mm_set1_epi32(r | g << 16), cb = _mm_set1_epi32(b), four = _mm_set1_epi32(4);
+    __m128i best = _mm_set1_epi32(INT_MAX), bestAt = _mm_setzero_si128(), at = _mm_setr_epi32(0, 1, 2, 3);
+    for (int i = 0; i < 512; i += 8) {
+        const __m128i drg = _mm_sub_epi16(crg, _mm_loadu_si128(reinterpret_cast<const __m128i*>(rg + i)));
+        const __m128i db = _mm_sub_epi16(cb, _mm_loadu_si128(reinterpret_cast<const __m128i*>(bz + i)));
+        const __m128i dist = _mm_add_epi32(_mm_madd_epi16(drg, drg), _mm_madd_epi16(db, db));
+        const __m128i nearer = _mm_cmplt_epi32(dist, best);
+        best = _mm_or_si128(_mm_and_si128(nearer, dist), _mm_andnot_si128(nearer, best));
+        bestAt = _mm_or_si128(_mm_and_si128(nearer, at), _mm_andnot_si128(nearer, bestAt));
+        at = _mm_add_epi32(at, four);
+    }
+    alignas(16) int32_t dists[4], entries[4];
+    _mm_store_si128(reinterpret_cast<__m128i*>(dists), best);
+    _mm_store_si128(reinterpret_cast<__m128i*>(entries), bestAt);
+    int k = 0;
+    for (int l = 1; l < 4; l++)
+        if (dists[l] < dists[k] || (dists[l] == dists[k] && entries[l] < entries[k])) k = l;
+    return int16_t(entries[k]);
 }
 
 // The Z buffer's bits in its CPU format: mask, shift, largest value.

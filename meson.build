@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.8.6',
+  version : '1.9.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -28,12 +28,12 @@ ddraw = shared_library('ddraw',
     'src/d3d6drv.cpp', 'src/d3d6exec.cpp', 'src/d3d6obj.cpp', 'src/d3d6vp.cpp', 'src/d3d6xform.cpp',
     'src/d3d7draw.cpp', 'src/d3d7obj.cpp', 'src/d3d7pipe.cpp', 'src/d3d7sb.cpp', 'src/d3d7state.cpp',
     'src/d3dxlate.cpp', 'src/ddcaps.cpp', 'src/ddcreate.cpp', 'src/ddgdi.cpp', 'src/ddhook.cpp',
-    'src/ddmode.cpp', 'src/ddraw.cpp', 'src/ddscreen.cpp', 'src/ddtiming.cpp', 'src/ddwindow.cpp',
-    'src/format.cpp', 'src/fourcc.cpp', 'src/gpu.cpp', 'src/gpucontext.cpp', 'src/gpudepth.cpp',
-    'src/gpudraw.cpp', 'src/gpuformat.cpp', 'src/gpusurf.cpp', 'src/gputex.cpp', 'src/hooks.cpp',
-    'src/input.cpp', 'src/inputpaint.cpp', 'src/lock.cpp', 'src/log.cpp', 'src/overlay.cpp',
-    'src/palette.cpp', 'src/presentconv.cpp', 'src/presenter.cpp', 'src/presentpass.cpp', 'src/quadpass.cpp',
-    'src/surface.cpp', 'src/util.cpp', 'src/video.cpp',
+    'src/ddmode.cpp', 'src/ddraw.cpp', 'src/ddscreen.cpp', 'src/ddtiming.cpp', 'src/ddvideoport.cpp',
+    'src/ddwindow.cpp', 'src/format.cpp', 'src/fourcc.cpp', 'src/gpu.cpp', 'src/gpucontext.cpp',
+    'src/gpudepth.cpp', 'src/gpudraw.cpp', 'src/gpuformat.cpp', 'src/gpusurf.cpp', 'src/gputex.cpp',
+    'src/hooks.cpp', 'src/input.cpp', 'src/inputpaint.cpp', 'src/lock.cpp', 'src/log.cpp',
+    'src/overlay.cpp', 'src/palette.cpp', 'src/presentconv.cpp', 'src/presenter.cpp', 'src/presentpass.cpp',
+    'src/quadpass.cpp', 'src/surface.cpp', 'src/util.cpp', 'src/video.cpp',
   name_prefix : '',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,
@@ -87,6 +87,18 @@ executable('fmtprobe', 'tests/fmtprobe.cpp', 'tests/fmtprobe2.cpp',
                   cpp.find_library('advapi32')],
   cpp_args : ['-march=pentium', '-mno-sse2', '-mno-sse', '-mno-mmx', '-mfpmath=387'],
   link_args : static_link + ['-mwindows'],
+  install : false)
+# fmtprobe's gamma calibrator (tests/fmtcal.cpp), put beside it.
+shared_library('fmtcal', 'tests/fmtcal.cpp',
+  name_prefix : '',
+  cpp_args : ['-march=pentium', '-mno-sse2', '-mno-sse', '-mno-mmx', '-mfpmath=387'],
+  link_args : static_link + ['-Wl,--kill-at'],
+  install : false)
+
+# A Direct3D 9 with DF24 and DF16 but no INTZ (tests/dfshim.cpp), for dd2d9's Z buffers there.
+shared_library('dfshim', 'tests/dfshim.cpp',
+  name_prefix : '',
+  link_args : static_link + ['-Wl,--kill-at'],
   install : false)
 
 # Shim test: dd2d9 under a stand-in for Windows' compatibility shims (fakeshim.dll hooks

@@ -21,6 +21,8 @@ bool OverlaysOffered(const DDraw* dd);
 // Every overlay surface of the process, front to back, as ddraw.dll keeps the device's
 // z-order list (g_lock). A new overlay goes in front.
 std::vector<Surface*>& OverlayZOrder();
+// `s` was drawn into: an overlay shown that takes its alpha from it is shown again (g_lock).
+void OverlayAlphaDrawn(const Surface* s);
 // What the presenter lays over the primary: the overlays shown on it, back to front,
 // taken under g_lock (buffers referenced), drawn without it into the frame converted from
 // the primary (`frame`: X8R8G8B8, the primary's area `area`, `pitch` pixels a row);

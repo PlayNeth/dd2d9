@@ -3,7 +3,7 @@
 // saved first and put back after, so the game's Direct3D context finds its state as it
 // left it (rather than sending all of it again, some 450 calls, every frame). Only the
 // states those draws set are kept: render target 0 and the depth buffer, the viewport,
-// the shaders and vertex declaration, stages 0-2's textures and samplers, a few stage states
+// the shaders and vertex declaration, stages 0-3's textures and samplers, a few stage states
 // of stages 0-1 and the render states in kStates. Include after d3d9.h.
 #pragma once
 
@@ -61,7 +61,8 @@ private:
         D3DRS_ALPHATESTENABLE, D3DRS_FOGENABLE,         D3DRS_STENCILENABLE,    D3DRS_SCISSORTESTENABLE,
         D3DRS_COLORWRITEENABLE, D3DRS_FILLMODE,         D3DRS_SRGBWRITEENABLE,  D3DRS_CLIPPLANEENABLE,
         D3DRS_WRAP0,           D3DRS_SPECULARENABLE,    D3DRS_TEXTUREFACTOR,    D3DRS_LIGHTING,
-        D3DRS_DEPTHBIAS,       D3DRS_SLOPESCALEDEPTHBIAS, D3DRS_ZFUNC};
+        D3DRS_DEPTHBIAS,       D3DRS_SLOPESCALEDEPTHBIAS, D3DRS_ZFUNC,           D3DRS_SRCBLEND,
+        D3DRS_DESTBLEND,       D3DRS_BLENDOP};
     static constexpr DWORD kStateCount = sizeof(kStates) / sizeof(kStates[0]);
     static constexpr D3DSAMPLERSTATETYPE kSamplers[] = {D3DSAMP_MINFILTER, D3DSAMP_MAGFILTER,  D3DSAMP_MIPFILTER,
                                                         D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,   D3DSAMP_SRGBTEXTURE};
@@ -70,10 +71,14 @@ private:
         DWORD stage;
         D3DTEXTURESTAGESTATETYPE type;
     };
-    static constexpr Stage kStages[] = {{0, D3DTSS_COLOROP},       {0, D3DTSS_COLORARG1}, {0, D3DTSS_ALPHAOP},
-                                        {0, D3DTSS_ALPHAARG1},     {0, D3DTSS_TEXCOORDINDEX},
-                                        {0, D3DTSS_TEXTURETRANSFORMFLAGS}, {1, D3DTSS_COLOROP}, {1, D3DTSS_ALPHAOP}};
-    static constexpr DWORD kTexStages = 3;  // textures and samplers kept (the overlays' pass uses three)
+    static constexpr Stage kStages[] = {
+        {0, D3DTSS_COLOROP}, {0, D3DTSS_COLORARG1}, {0, D3DTSS_ALPHAOP}, {0, D3DTSS_ALPHAARG1}, {1, D3DTSS_COLOROP},
+        {1, D3DTSS_ALPHAOP},
+        // (the four stages' texture coordinates, which QuadPass sets)
+        {0, D3DTSS_TEXCOORDINDEX}, {0, D3DTSS_TEXTURETRANSFORMFLAGS}, {1, D3DTSS_TEXCOORDINDEX},
+        {1, D3DTSS_TEXTURETRANSFORMFLAGS}, {2, D3DTSS_TEXCOORDINDEX}, {2, D3DTSS_TEXTURETRANSFORMFLAGS},
+        {3, D3DTSS_TEXCOORDINDEX}, {3, D3DTSS_TEXTURETRANSFORMFLAGS}};
+    static constexpr DWORD kTexStages = 4;  // textures and samplers kept (the palette and overlay passes use four)
     static constexpr DWORD kStageCount = sizeof(kStages) / sizeof(kStages[0]);
 
     IDirect3DDevice9* d_;

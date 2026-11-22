@@ -232,7 +232,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
         }
         if (apart) return drawEach();
     }
-    if (MsaaType(p.dev) != D3DMULTISAMPLE_NONE) {
+    if (MsaaType(p.gpu, p.dev) != D3DMULTISAMPLE_NONE) {
         if (!segs) {
             p.ClampCutouts(fvf, verts, stride, vertexCount);
         } else {  // each draw's address modes for the cut-outs: the same, or one by one
@@ -414,7 +414,7 @@ void GpuContext::Draw(DWORD primType, DWORD fvf, const void* verts, UINT stride,
     }
     p.rt->buf->cpuStale = true;
     p.rt->buf->gpuStale = false;
-    if (p.z && p.boundZ && zEnabled && p.zWriteSet && p.z->buf->gpu && p.z->buf->gpu->ztex)
+    if (p.z && p.boundZ && zEnabled && p.zWriteSet && p.z->buf->gpu && p.z->buf->gpu->Readable())
         p.z->buf->cpuStale = true;  // a writable Z buffer: read back when DirectDraw reads it
     GpuSurf* g = p.rt->buf->gpu;
     if (flat2d && g->ms) {  // drawn into `surf`: the multisampled image lacks it there

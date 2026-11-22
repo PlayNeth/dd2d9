@@ -33,9 +33,9 @@ void GpuCpuAccess(Surface* s, bool write, const RECT* area = nullptr);  // (neve
 // A Blt DDBLT_DEPTHFILL into a Z buffer with a GPU copy: done there, or left to the CPU
 // copy's pending upload (true); no GPU copy (false).
 bool GpuDepthFill(Surface* s, const RECT& r, DWORD value);
-// A Z buffer whose GPU copy DirectDraw can read and write (INTZ): DDBLT_DEPTHFILL then
-// needs no read back first.
-bool GpuDepthWritable(const Buffer* b);
+// A Z buffer with a GPU copy: DDBLT_DEPTHFILL reaches it there (GpuDepthFill), with no read
+// back first.
+bool GpuDepthFillable(const Buffer* b);
 // A plain Blt (no keys, effects or conversion) from a render target Direct3D drew into (its
 // newest pixels on the GPU) into another render target or the primary, done there with
 // StretchRect (`clips`: the destination's parts, of `d`; unclipped if stretched). false: not
@@ -44,6 +44,18 @@ bool GpuBlt(Surface* dst, const RECT& d, Surface* src, const RECT& s, const std:
 // The buffer's render target when its GPU copy is the newest (Direct3D drew there since
 // the CPU copy was last read back), for presenting it as it is; null otherwise. Gpu lock held.
 IDirect3DSurface9* GpuNewestSurface(Buffer* b);
+// A palettized primary's frame from its render target (rt, Direct3D drew there), on the GPU:
+// the part `r` through the palette pass (gputex.cpp), each colour made the palette entry
+// ReadBack would make it and shown in that entry's colour, as the CPU copy read back would be
+// shown. The result (r's size) lasts until the next call; null where it can't be done (no pixel
+// shaders: read back then). The state is the presenter's (New/Delete; Release with the device's
+// resources). Gpu lock held.
+struct PaletteFrame;
+PaletteFrame* NewPaletteFrame();  // (throws std::bad_alloc)
+void DeletePaletteFrame(PaletteFrame* f);
+void ReleasePaletteFrame(PaletteFrame* f);
+bool PaletteFrameFailed(const PaletteFrame* f);
+IDirect3DSurface9* PaletteFrameGpu(Gpu& gpu, PaletteFrame* f, IDirect3DSurface9* rt, const RECT& r, const PALETTEENTRY* entries);
 // A texture's texels carry alpha: an alpha channel, or an 8-bit texture's palette made with
 // DDPCAPS_ALPHA. g_lock held.
 bool TextureHasAlpha(const Surface* s);

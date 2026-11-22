@@ -14,7 +14,6 @@
 #include <d3d9.h>
 
 #include <algorithm>
-#include <climits>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -35,15 +34,20 @@ void RowToGpu(const Buffer* b, int y, uint8_t* dst, const RowConverter* conv);
 struct PaletteMap {
     PALETTEENTRY pal[256] = {};
     bool valid = false;
+    unsigned version = 0;  // counts the palettes it has had (a GPU copy made through it is current while equal)
     static constexpr uint32_t kSlots = 1024, kEmpty = 0xFFFFFFFF;  // (no colour is: 24 bits)
     uint32_t slotRgb[kSlots];
     uint8_t slotIndex[kSlots];
+    int16_t rg[512], bz[512];      // each entry's red and green, and its blue and 0 (Nearest's pairs)
     std::vector<int16_t> nearest;  // 32768 entries, -1 until computed
     static uint32_t Slot(uint32_t rgb) { return (rgb * 0x9E3779B1u) >> 22; }
+    // The 15-bit colour a 24-bit one is in (its channels' top five bits).
+    static uint32_t Bucket(uint32_t rgb) { return ((rgb >> 9) & 0x7C00) | ((rgb >> 6) & 0x3E0) | ((rgb >> 3) & 0x1F); }
     void Set(const PALETTEENTRY* p) {
         if (valid && !memcmp(pal, p, sizeof(pal))) return;
         memcpy(pal, p, sizeof(pal));
         valid = true;
+        version++;
         std::fill(slotRgb, slotRgb + kSlots, kEmpty);
         for (int i = 255; i >= 0; i--) {  // (from the top: the lowest entry of a colour stays)
             const uint32_t rgb = (uint32_t(p[i].peRed) << 16) | (uint32_t(p[i].peGreen) << 8) | p[i].peBlue;
@@ -52,24 +56,27 @@ struct PaletteMap {
             slotRgb[k] = rgb;
             slotIndex[k] = uint8_t(i);
         }
+        for (int i = 0; i < 256; i++) {
+            rg[2 * i] = p[i].peRed, rg[2 * i + 1] = p[i].peGreen;
+            bz[2 * i] = p[i].peBlue, bz[2 * i + 1] = 0;
+        }
         nearest.assign(32768, -1);
     }
     uint8_t Index(uint32_t argb) {
         const uint32_t rgb = argb & 0xFFFFFF;
         for (uint32_t k = Slot(rgb); slotRgb[k] != kEmpty; k = (k + 1) % kSlots)
             if (slotRgb[k] == rgb) return slotIndex[k];
-        const uint32_t key = ((rgb >> 9) & 0x7C00) | ((rgb >> 6) & 0x3E0) | ((rgb >> 3) & 0x1F);
-        if (nearest[key] < 0) {  // from the bucket's centre: the same answer whatever comes first
-            const int r = int((key >> 10) << 3 | 4), g = int(((key >> 5) & 31) << 3 | 4), b = int((key & 31) << 3 | 4);
-            int best = 0, bestD = INT_MAX;
-            for (int i = 0; i < 256; i++) {
-                const int dr = r - pal[i].peRed, dg = g - pal[i].peGreen, db = b - pal[i].peBlue;
-                const int dist = dr * dr + dg * dg + db * db;
-                if (dist < bestD) bestD = dist, best = i;
-            }
-            nearest[key] = int16_t(best);
-        }
+        const uint32_t key = Bucket(rgb);
+        if (nearest[key] < 0) nearest[key] = Nearest(key);
         return uint8_t(nearest[key]);
+    }
+    // The entry nearest the centre of 15-bit colour `key` (squared RGB distance, the lowest
+    // entry on a tie): the same answer whatever colour of it comes first (gpuformat.cpp).
+    int16_t Nearest(uint32_t key) const;
+    // Every 15-bit colour's, for a GPU copy of the mapping (gputex.cpp).
+    void FillNearest() {
+        for (uint32_t k = 0; k < 32768; k++)
+            if (nearest[k] < 0) nearest[k] = Nearest(k);
     }
 };
 
@@ -139,11 +146,19 @@ struct GpuSurf final : Gpu::Owner {
     static constexpr int kUploads = 3;
     IDirect3DSurface9* upload[kUploads] = {};
     int uploadNext = 0;  // the one to try first (the least recently used)
-    // Z buffers DirectDraw can read and write (where the GPU has INTZ, without antialiasing):
-    // `surf` is the depth texture's level, read by drawing it into the R32F target `zrt`
-    // (read back through `zsys`), written by drawing `zup` (filled through `zupSys`) with a
-    // shader writing depth. Without, as before: only DDBLT_DEPTHFILL reaches the GPU.
+    // Z buffers DirectDraw can read and write (where the GPU has depth textures it samples,
+    // ReadableDepth): `surf` is the depth texture's level, read by drawing it into the R32F
+    // target `zrt` (read back through `zsys`), written by drawing `zup` (filled through
+    // `zupSys`) with a shader writing depth. With antialiasing, `surf` is multisampled
+    // (msDepth): read from `zres`, the INTZ texture it is resolved into first (RESZ, where the
+    // GPU has that), written with the multisampled colour target `zrtMs` bound. Without
+    // either, as before: only DDBLT_DEPTHFILL reaches the GPU.
     IDirect3DTexture9* ztex = nullptr;
+    IDirect3DTexture9* zres = nullptr;
+    IDirect3DSurface9* zrtMs = nullptr;
+    bool msDepth = false;
+    bool Readable() const { return ztex || zres; }
+    IDirect3DTexture9* ZRead() const { return ztex ? ztex : zres; }
     IDirect3DSurface9* zrt = nullptr;
     IDirect3DSurface9* zsys = nullptr;
     IDirect3DTexture9* zup = nullptr;
@@ -207,7 +222,8 @@ struct GpuSurf final : Gpu::Owner {
         if (msCopy) msCopy->Release();
         surf = sysmem = ms = nullptr;
         msCopy = nullptr;
-        for (IUnknown** u : {reinterpret_cast<IUnknown**>(&ztex), reinterpret_cast<IUnknown**>(&zrt),
+        for (IUnknown** u : {reinterpret_cast<IUnknown**>(&ztex), reinterpret_cast<IUnknown**>(&zres),
+                             reinterpret_cast<IUnknown**>(&zrtMs), reinterpret_cast<IUnknown**>(&zrt),
                              reinterpret_cast<IUnknown**>(&zsys), reinterpret_cast<IUnknown**>(&zup),
                              reinterpret_cast<IUnknown**>(&zupSys), reinterpret_cast<IUnknown**>(&zreadPs),
                              reinterpret_cast<IUnknown**>(&zwritePs), reinterpret_cast<IUnknown**>(&ztile),
@@ -215,8 +231,10 @@ struct GpuSurf final : Gpu::Owner {
             if (*u) (*u)->Release();
             *u = nullptr;
         }
-        msNewer = msStale = false;
+        msNewer = msStale = msDepth = false;
     }
+    // Antialiasing goes off on the device (gpusurf.cpp).
+    void MultisamplingOff(IDirect3DDevice9* d) override;
     // Device reset: D3DPOOL_DEFAULT goes, and what only the GPU had with it. A reset may come
     // from the presenter thread, which holds the Gpu lock alone, while the Buffer's stale
     // flags are g_lock's (a game thread may be marking a write at that moment): only `lost`
@@ -243,12 +261,21 @@ struct GpuSurf final : Gpu::Owner {
     }
 };
 
-// The depth texture format of the Z buffers DirectDraw reads and writes (ReadableDepth).
+// The depth texture formats of the Z buffers DirectDraw reads and writes (ReadableDepth): INTZ
+// (24 bits of depth, 8 of stencil), AMD's DF24 and DF16 (no stencil); RESZ, the render state
+// value that resolves the multisampled Z buffer bound into the INTZ texture at stage 0.
 constexpr D3DFORMAT kIntz = D3DFORMAT(MAKEFOURCC('I', 'N', 'T', 'Z'));
+constexpr D3DFORMAT kDf24 = D3DFORMAT(MAKEFOURCC('D', 'F', '2', '4'));
+constexpr D3DFORMAT kDf16 = D3DFORMAT(MAKEFOURCC('D', 'F', '1', '6'));
+constexpr D3DFORMAT kResz = D3DFORMAT(MAKEFOURCC('R', 'E', 'S', 'Z'));
+constexpr DWORD kReszCode = 0x7FA05000;
+inline bool HasStencil(D3DFORMAT f) { return f == D3DFMT_D24S8 || f == kIntz; }
 
 // gpusurf.cpp
-D3DMULTISAMPLE_TYPE MsaaType(IDirect3DDevice9* d);
-bool ReadableDepth(IDirect3DDevice9* d);
+D3DMULTISAMPLE_TYPE MsaaType(const Gpu& gpu, IDirect3DDevice9* d);
+D3DFORMAT ReadableDepth(IDirect3DDevice9* d, const Format& z);  // D3DFMT_UNKNOWN: none
+bool ResolvableDepth(IDirect3DDevice9* d);
+void MultisamplingOff(Gpu& gpu, IDirect3DDevice9* d);
 GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth);
 void CopyToMs(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g);
 void Resolve(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g);
@@ -259,6 +286,33 @@ bool ReadBackDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g, const RECT* part =
 void UploadDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g);
 
 // ---------------------------------------------------------------- textures (gputex.cpp)
+
+// The palette pass (kPalPs, gputex.cpp): each colour of a texture copy of what Direct3D drew
+// made the palette entry ReadBack makes it (PaletteMap::Index, by `colors` and `exact`, made for
+// the palette in `made`), shown as that entry's texel (`texels`). For a palettized texture
+// Direct3D drew into (GpuTex) and a palettized primary (the presenter). Gpu lock held.
+struct PalettePass {
+    IDirect3DTexture9* colors = nullptr;  // 1024x32: a texel per 15-bit colour
+    IDirect3DTexture9* exact = nullptr;   // 512x256 L8: the palette's own colours' entries
+    IDirect3DTexture9* texels = nullptr;  // 256x1: each entry's texel
+    IDirect3DPixelShader9* ps = nullptr;
+    PALETTEENTRY made[256] = {};
+    bool madeOk = false;
+    bool Shader(IDirect3DDevice9* d);
+    bool Tables(IDirect3DDevice9* d, PaletteMap& m);  // made again when the palette changed
+    // Each entry's texel as WriteLevel makes it in `fmt` (keyed, key and palAlpha: RowConverter's).
+    bool Texels(IDirect3DDevice9* d, const Format& fmt, const PALETTEENTRY* entries, bool keyed, DWORD key, bool palAlpha);
+    // `src` (the colours, w x h) through it into `target` (its size).
+    bool Draw(Gpu& gpu, IDirect3DDevice9* d, IDirect3DTexture9* src, IDirect3DSurface9* target, UINT w, UINT h);
+    void Release() {
+        for (IUnknown** u : {reinterpret_cast<IUnknown**>(&colors), reinterpret_cast<IUnknown**>(&exact),
+                             reinterpret_cast<IUnknown**>(&texels), reinterpret_cast<IUnknown**>(&ps)}) {
+            if (*u) (*u)->Release();
+            *u = nullptr;
+        }
+        madeOk = false;
+    }
+};
 
 // A texture's managed GPU copy and what it was made from.
 struct GpuTexCopy {
@@ -302,16 +356,23 @@ struct GpuTex final : Gpu::Owner, GpuTexCopy {
     // level from its render target (`rtLevelSrc` the GpuSurf as its serial was) or, for one
     // the GPU doesn't have newer, its CPU copy (the Buffer as its cpuSerial was) through
     // `rtSys`. Colour-keyed: the key made transparent by a shader pass from `rtTmp`.
+    // Palettized: from `rtTmp` through the palette pass (`palPass`), each entry's texel as
+    // WriteLevel makes it.
     IDirect3DTexture9* rtTex = nullptr;
     IDirect3DTexture9* rtSys = nullptr;  // SYSTEMMEM, the CPU levels on their way up
-    IDirect3DTexture9* rtTmp = nullptr;  // a level's render target as a texture (keyed only)
+    IDirect3DTexture9* rtTmp = nullptr;  // a level's render target as a texture (keyed or palettized)
     IDirect3DPixelShader9* keyPs = nullptr;
+    PalettePass palPass;
     std::vector<const void*> rtLevelSrc;
     std::vector<unsigned> rtLevelSerial;
+    std::vector<unsigned> rtLevelMap;  // a palettized level's: its PaletteMap's version then
     UINT rtW = 0, rtH = 0, rtLevels = 0, tmpW = 0, tmpH = 0;
     D3DFORMAT rtFmt = D3DFMT_UNKNOWN, tmpFmt = D3DFMT_UNKNOWN;
+    // The look the copy was made with (TexLook).
     bool rtKeyed = false;
     DWORD rtKey = 0;
+    const Palette* rtPal = nullptr;
+    DWORD rtPalVersion = 0;
     void DropRt() {
         if (rtTex) rtTex->Release();
         if (rtSys) rtSys->Release();
@@ -319,6 +380,7 @@ struct GpuTex final : Gpu::Owner, GpuTexCopy {
         rtTex = rtSys = rtTmp = nullptr;
         rtLevelSrc.clear();
         rtLevelSerial.clear();
+        rtLevelMap.clear();
     }
 
     // The other managed copy of a texture drawn with the colour key on and off by turns: the
@@ -347,6 +409,7 @@ struct GpuTex final : Gpu::Owner, GpuTexCopy {
         DropRt();
         if (keyPs) keyPs->Release();
         keyPs = nullptr;
+        palPass.Release();
     }
     void ReleaseGpuResources() override { DropAll(); }
     void GpuReleased() override {

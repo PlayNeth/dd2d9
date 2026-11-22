@@ -324,13 +324,14 @@ HRESULT Surface::GetAttachedSurface(const DDSCAPS2& caps, Surface** out, int ver
     return DDERR_NOTFOUND;
 }
 
-HRESULT Surface::Flip(Surface* target, DWORD flags) {
+HRESULT Surface::Flip(Surface* target, DWORD flags, bool own) {
     uint64_t seq = 0;
     bool wait = false;
     {
         Guard l;
         // Checks in ddraw.dll's order (spec: re/spec/surface-flip-key-palette.md, section 1).
-        // DDFLIP_EVEN/ODD only for overlays (and then like any flip); no stereo surfaces here.
+        // DDFLIP_EVEN/ODD only for overlays, both at once too (measured on XP): the field the
+        // overlay then holds, for bob (see DrawOverlays); no stereo surfaces here.
         const DWORD kIntervals = 0x07000000;
         const bool overlay = (desc.ddsCaps.dwCaps & DDSCAPS_OVERLAY) != 0;
         if ((flags & ~(0x3Fu | kIntervals)) || ((flags & (DDFLIP_EVEN | DDFLIP_ODD)) && !overlay) ||
@@ -387,14 +388,18 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
             }
             chain[target ? k : 1]->BltLocked(nullptr, chain[0], nullptr, DDBLT_WAIT, nullptr, false, false);
         }
+        if (overlay) {
+            const DWORD field = flags & (DDFLIP_EVEN | DDFLIP_ODD);
+            overlayField = field == DDFLIP_EVEN ? 0 : field == DDFLIP_ODD ? 1 : -1;
+        }
         if (OverlayShown()) overlayDest->dd->MarkOverlayDirty();
         if (isPrimary) {
             Presenter* p = dd->GetPresenter();
-            wait = g_config.vsync == kVSyncOn || (g_config.vsync == kVSyncAuto && !(flags & DDFLIP_NOVSYNC));
+            wait = !own && (g_config.vsync == kVSyncOn || (g_config.vsync == kVSyncAuto && !(flags & DDFLIP_NOVSYNC)));
             // (A buffer Direct3D draws into, which has a GPU copy: only its frames wait for the
             // presents, on the device they share. A 2D game's flips never do.)
             const Buffer* shown = chain[0]->buf;
-            if (g_config.vsync == kVSyncAuto) dd->CountFlip(!wait && shown && shown->gpu);
+            if (g_config.vsync == kVSyncAuto && !own) dd->CountFlip(!wait && shown && shown->gpu);
             seq = p ? p->ConvertSeq() : 0;
             dd->MarkDirty();
         }
@@ -406,7 +411,7 @@ HRESULT Surface::Flip(Surface* target, DWORD flags) {
         dd->PaceFlip();
         for (int i = 1; i < intervals; i++) dd->PaceFlip();
     }
-    if (isPrimary) RunWhenUnlocked([](void*) { LimitFrame(); }, nullptr);  // not under a game's thread lock
+    if (isPrimary && !own) RunWhenUnlocked([](void*) { LimitFrame(); }, nullptr);  // not under a game's thread lock
     return DD_OK;
 }
 

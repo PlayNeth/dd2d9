@@ -2,9 +2,8 @@
 // DDSCL_CREATEDEVICEWINDOW's device window.
 #include "ddint.h"
 
-#include <windowsx.h>
-
 #include <algorithm>
+#include <atomic>
 
 namespace dd2d9 {
 
@@ -61,6 +60,68 @@ bool DDraw::WindowChanges() const {
     return DisplayKind() == kDisplayBorderless;
 }
 
+// As ddraw.dll while a fullscreen game holds exclusive mode in front (FUN_7375ac27, undone by
+// FUN_7375aa94 on a focus loss, on leaving exclusive mode and on the release), as measured on
+// XP: no system error boxes (SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, the error mode
+// before put back), no cursor shadow, no hot tracking and no IME status window (each put back
+// as it was), and the semaphore CheckFullscreen looks for, in any process. ddraw.dll also sets
+// SPI_SETSCREENSAVERRUNNING, which changed nothing that could be seen there (the
+// SPI_GETSCREENSAVERRUNNING it answered stayed FALSE): left out. Changed for the system, not
+// saved (fWinIni 0); not in display=window, an ordinary window (OnActivate, SetCooperativeLevel).
+namespace {
+struct Settings {
+    bool on = false;
+    UINT errorMode = 0;
+    BOOL cursorShadow = FALSE, hotTracking = FALSE, imeUi = FALSE;
+    HANDLE semaphore = nullptr;
+};
+Settings g_settings;  // g_displayLock
+// The IME status window's setting to make once the display lock is let go: ddraw.dll makes it
+// outside its own lock, the IME's windows hearing of it. 0 none, otherwise the setting + 1.
+std::atomic<UINT> g_imeUi{0};
+}  // namespace
+
+void ExclusiveSettings(bool on) {
+    Settings& s = g_settings;
+    if (s.on == on) return;
+    s.on = on;
+    if (on) {
+        if (s.semaphore) CloseHandle(s.semaphore);
+        s.semaphore = CreateSemaphoreA(nullptr, 0, 1, "DDrawCheckFullscreenSemaphore");
+        s.errorMode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+        SystemParametersInfoA(SPI_GETCURSORSHADOW, 0, &s.cursorShadow, 0);
+        SystemParametersInfoA(SPI_SETCURSORSHADOW, 0, nullptr, 0);
+        SystemParametersInfoA(SPI_GETHOTTRACKING, 0, &s.hotTracking, 0);
+        SystemParametersInfoA(SPI_GETSHOWIMEUI, 0, &s.imeUi, 0);
+        SystemParametersInfoA(SPI_SETHOTTRACKING, 0, nullptr, 0);
+        g_imeUi.store(1);
+    } else {
+        SetErrorMode(s.errorMode);
+        if (s.semaphore) {
+            ReleaseSemaphore(s.semaphore, 1, nullptr);
+            CloseHandle(s.semaphore);
+            s.semaphore = nullptr;
+        }
+        SystemParametersInfoA(SPI_SETCURSORSHADOW, 0, reinterpret_cast<PVOID>(INT_PTR(s.cursorShadow)), 0);
+        SystemParametersInfoA(SPI_SETHOTTRACKING, 0, reinterpret_cast<PVOID>(INT_PTR(s.hotTracking)), 0);
+        g_imeUi.store(UINT(s.imeUi != FALSE) + 1);
+    }
+}
+
+void ApplyImeUi() {
+    if (const UINT v = g_imeUi.exchange(0)) SystemParametersInfoA(SPI_SETSHOWIMEUI, v - 1, nullptr, 0);
+}
+
+// Whether a focus loss minimizes the window (OnActivate, MinimizeGameWindow): it covers the
+// screen, dd2d9 may change it, minimize= says so, and it is shown (with an owner shown too).
+// Read without the display lock too (the window procedure: plain fields and window state).
+bool DDraw::FocusLossMinimizes() const {
+    if (DisplayKind() == kDisplayWindow || !WindowChanges() || !MinimizeOnFocusLoss() || !hwnd_ || !IsWindowVisible(hwnd_))
+        return false;
+    const HWND owner = GetAncestor(hwnd_, GA_ROOTOWNER);
+    return !owner || owner == hwnd_ || IsWindowVisible(owner);
+}
+
 // Called with g_displayLock held.
 void DDraw::KeepTopmost() {
     if (!Exclusive() || !alive || applying_ || suspended_ || deviceState_ == kDevLost || !hwnd_ ||
@@ -89,6 +150,16 @@ void DDraw::KeepTopmost() {
 //   taskbar skips too), or one Windows minimized onto the desktop, where it puts a window it
 //   has no button for (with a button, off the screen). Pal95's window (Visual Basic 4),
 //   unowned and of no special style, had none and couldn't be reached again.
+// minimize=off leaves the window as it is, and so does minimize=auto under i3 and sway, which
+// don't minimize windows (MinimizeOnFocusLoss): i3 answers a request to minimize one by
+// showing it again, and hides the windows of a workspace switched away from by marking them
+// withdrawn, still mapped. Under Wine the window, minimized there, was asked for as minimized
+// from withdrawn, which i3 never answers; back on the game's workspace Wine, still waiting,
+// took i3's showing it for a passing state and ignored the keyboard focus i3 gave it, without
+// which Wine's DirectInput gets no mouse movement: in Need for Speed III the mouse stood
+// still, until the workspace was switched away and back a few times. Other window managers
+// get it minimized: under Openbox the window, left as it is, came back in front as soon as
+// another desktop was switched to.
 void DDraw::MinimizeGameWindow() {
     const HWND owner = GetAncestor(hwnd_, GA_ROOTOWNER);
     const LONG ex = GetWindowLongW(hwnd_, GWL_EXSTYLE);
@@ -126,7 +197,14 @@ void DDraw::MinimizeGameWindow() {
 
 // Called with g_displayLock held.
 void DDraw::OnActivate(bool active, DWORD thread) {
-    if (applying_ || !Exclusive() || !alive) return;
+    if (!Exclusive() || !alive) return;
+    // In the middle of dd2d9's own window work (ApplyWindow: its SetWindowPos and mode switch
+    // send activations): taken up once that is done, as the foreground is then, so that the
+    // user's Alt+Tab at that moment isn't lost and dd2d9's own activations change nothing.
+    if (applying_) {
+        DeferActivation(hwnd_, thread);
+        return;
+    }
     // Before SetDisplayMode, the window covers the screen at the desktop mode (see ApplyWindow).
     const int display = DisplayKind();
     if (!active) {
@@ -138,15 +216,29 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         // neither minimized nor made non-topmost; spec: re/spec/window-procedure.md), unless
         // borderless covered it anyway (WindowChanges).
         const bool windowChanges = WindowChanges();
+        const bool minimize = windowChanges && MinimizeOnFocusLoss();  // (minimize=: see MinimizeGameWindow)
         if (cover) {
-            DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
-            suspended_ = true;      // first: the presenter must not create a new device from here on
+            // Why the window is left as it is, if it is (logged).
+            const char* kept = !windowChanges ? "DDSCL_NOWINDOWCHANGES"
+                               : g_config.minimize == kMinimizeOff ? "minimize=off"
+                               : !minimize ? "minimize=auto, under "
+                               : IsWindowVisible(hwnd_) ? nullptr : "hidden";
+            if (!kept)
+                DD2D9_LOG("focus lost: %s", switched_ ? "restoring the desktop display mode" : "minimizing");
+            else
+                DD2D9_LOG("focus lost: %snot minimizing (%s%s)", switched_ ? "restoring the desktop display mode, " : "", kept,
+                          windowChanges && g_config.minimize == kMinimizeAuto && !minimize ? g_tilingWm : "");
+            // As ddraw.dll, first: the primary's flip chain back to the GDI surface (measured on
+            // XP: afterwards GetGDISurface is the front buffer).
+            FlipToGDISurface(true);
+            suspended_ = true;      // the presenter must not create a new device from here on
             GameImageChanged();
             if (switched_) {
                 ChangeDisplay(nullptr, 0);
                 switched_ = false;
                 UpdateRefreshRate();
             }
+            ExclusiveSettings(false);
             if (windowChanges) SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
         // From here on (as in ddraw.dll, once the desktop mode is back) the surfaces are
@@ -156,8 +248,14 @@ void DDraw::OnActivate(bool active, DWORD thread) {
             InterlockedExchange(&deviceState_, kDevLost);
             focusLossOnly_ = true;  // unless a mode change comes on top (InvalidateSurfaces)
         }
-        // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost.
-        if (cover && windowChanges && IsWindowVisible(hwnd_)) MinimizeGameWindow();  // a hidden one stays so
+        // Minimizing takes the keyboard focus away (WM_KILLFOCUS): the game sees it lost. As
+        // ddraw.dll, the popup of the game's that was active is noted first: back in front, it
+        // gets the focus again.
+        if (cover && minimize && IsWindowVisible(hwnd_)) {  // a hidden one stays so
+            lastPopup_ = GetLastActivePopup(hwnd_);
+            if (lastPopup_ == hwnd_) lastPopup_ = nullptr;
+            MinimizeGameWindow();
+        }
         if (cover) UpdateDeviceWindow();  // hidden
         if (cover) LogFocusThief(thread, GetForegroundWindow());
         return;
@@ -165,13 +263,17 @@ void DDraw::OnActivate(bool active, DWORD thread) {
     InterlockedCompareExchange(&deviceState_, kDevNotRestored, kDevLost);
     if (suspended_) {
         DD2D9_LOG("focus regained: setting up %lux%lu again", modeW_, modeH_);
+        ExclusiveSettings(true);  // as ddraw.dll, first
         // The game's screen from here on, for what it asks while its window comes back (see
         // ImageOnScreen): Heroes of the Three Kingdoms 3, handling its restore, read the
         // monitor's size and blitted its movie centred in a 1920x1080 screen.
         restoring_ = true;
         GameImageChanged();
         if (WindowChanges()) {
-            if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+            // (Shown as ddraw.dll shows it, without activating it: the activation is under way.
+            // Activated while minimized, the game isn't told until its window is restored, see
+            // HookProc: here only when its owner was minimized, or from RunWindowWork.)
+            if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
             // Its owner, minimized on focus loss (MinimizeGameWindow), back too, and the
             // window with it; restored from its taskbar button, the owner passes the focus on
             // to the window, as clicking the window would.
@@ -202,6 +304,11 @@ void DDraw::OnActivate(bool active, DWORD thread) {
         MarkDirty();
     } else {
         OnWindowActivate(true);
+    }
+    // As ddraw.dll: the popup that was active when the focus went gets it back.
+    if (lastPopup_) {
+        if (IsWindow(lastPopup_)) SetFocus(lastPopup_);
+        lastPopup_ = nullptr;
     }
 }
 
@@ -619,6 +726,12 @@ void DDraw::ApplyWindow() {
 // A style dd2d9 didn't change isn't set again: ddraw.dll never touches it, and the window
 // would be told of a change (WM_STYLECHANGING, WM_STYLECHANGED) that didn't happen.
 void DDraw::RestoreSavedWindow(bool windowChanges) {
+    struct Working {
+        bool& flag;
+        bool was;
+        explicit Working(bool& f) : flag(f), was(f) { flag = true; }
+        ~Working() { flag = was; }
+    } working(windowWork_);
     Uncover();
     if (windowSaved_ && IsWindow(savedHwnd_)) {
         const LONG keep = WS_VISIBLE | WS_MINIMIZE | WS_MAXIMIZE;
@@ -648,32 +761,11 @@ void DDraw::SaveWindow() {
     windowSaved_ = true;
 }
 
-// DDSCL_CREATEDEVICEWINDOW's window, as ddraw.dll registers and makes it: WM_CREATE keeps the
-// focus window (its extra bytes), WM_SETFOCUS passes the focus there, no cursor over it.
-// Unlike ddraw.dll's, mouse messages go on to the focus window (in its client coordinates;
-// the wheel's are the screen's already): the game handles them there, as it does when it
-// covers the screen itself.
+// DDSCL_CREATEDEVICEWINDOW's window, as ddraw.dll registers and makes it (FUN_7375e1c9):
+// WM_CREATE keeps the focus window (its extra bytes), WM_SETFOCUS passes the focus there, no
+// cursor over it; everything else, mouse messages included, goes to DefWindowProc: a click on
+// the window covering the screen doesn't reach the focus window.
 static LRESULT CALLBACK DeviceWndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) {
-        const HWND focus = reinterpret_cast<HWND>(GetWindowLongPtrA(w, 0));
-        if (IsWindow(focus)) {
-            // This class takes double-clicks; a focus window's without CS_DBLCLKS gets the
-            // second click as a plain one, as its own clicks come.
-            if (!(GetClassLongPtrA(focus, GCL_STYLE) & CS_DBLCLKS)) {
-                if (msg == WM_LBUTTONDBLCLK) msg = WM_LBUTTONDOWN;
-                else if (msg == WM_RBUTTONDBLCLK) msg = WM_RBUTTONDOWN;
-                else if (msg == WM_MBUTTONDBLCLK) msg = WM_MBUTTONDOWN;
-                else if (msg == WM_XBUTTONDBLCLK) msg = WM_XBUTTONDOWN;
-            }
-            if (msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL) {
-                POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-                MapWindowPoints(w, focus, &pt, 1);
-                lp = MAKELPARAM(pt.x, pt.y);
-            }
-            PostMessageA(focus, msg, wp, lp);
-            return 0;
-        }
-    }
     if (msg == WM_CREATE) {
         SetWindowLongPtrA(w, 0, LONG_PTR(reinterpret_cast<CREATESTRUCTA*>(lp)->lpCreateParams));
     } else if (msg == WM_SETFOCUS) {

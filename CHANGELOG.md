@@ -3,6 +3,153 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.9.0
+What dd2d9 still lacked of DirectDraw: as XP's `ddraw.dll` has it with the Voodoo3's driver
+(measured with new sections of `fmtprobe`), and as the DirectX 7 SDK describes it where that
+driver has nothing to show.
+- **Z buffers with antialiasing on are read and written by DirectDraw.** Where the GPU
+  resolves a multisampled Z buffer (`RESZ`: most do, Wine's Direct3D too), locks and blits of
+  one see what Direct3D drew, as without antialiasing. Where it can't, antialiasing goes off
+  the first time DirectDraw reads or writes a Z buffer (logged): what had been drawn in that
+  one is lost, as after a device loss, and from then on all is as without antialiasing. A
+  depth fill alone doesn't turn it off. Before, such a Z buffer could only be filled.
+- **Without `INTZ`, Z buffers without stencil are read and written through AMD's `DF24` and
+  `DF16`** depth textures (older Radeons, Intel's).
+- **A Z buffer the GPU can't give back** (one with stencil without `INTZ`, any without depth
+  textures, `zaccess=off`) **shows Direct3D's clears when locked:** `Clear` writes its depth
+  into the buffer's memory too, as it wrote the stencil. What Direct3D draws there is still
+  not seen.
+- **Colour-key ranges** (`DDCKEY_COLORSPACE`), as XP has them. In video memory `SetColorKey`
+  takes a range, `CreateSurface` too (keeping its low value alone), and blits compare one
+  colour by colour, not as a number: 5-6-5 `0x0841`–`0x2104` keys red 1–4, green 2–8 and blue
+  1–4, so `0x1000`, between the two as a number, isn't keyed. In system memory, the emulation
+  layer's, there are none: `SetColorKey` and `CreateSurface` with a range are
+  `DDERR_NOCOLORKEYHW`, a source override's range keys its low colour alone and a destination
+  override's is `DDERR_NOCOLORKEYHW`. The caps add `DDCKEYCAPS_SRCBLTCLRSPACE` and
+  `DESTBLTCLRSPACE`. Before, every range was refused.
+- **Overlays:** colour-key ranges for the destination and the source, compared colour by
+  colour; bob (`DDOVER_BOB`), of fields interleaved in the surface too (`DDOVER_INTERLEAVED`):
+  the field `Flip` names (`DDFLIP_EVEN`, `DDFLIP_ODD`) shown, the odd one half a line lower;
+  alpha as the DirectX 7 SDK has it (the Voodoo3 has none): the overlay's own, alpha surfaces
+  for it and for the destination (`lpDDSAlphaSrc`, `lpDDSAlphaDest`: any surface with alpha in
+  its format, its whole area over the overlay's or the screen's), constants for both, their
+  `NEG` flags, and edge blending (`DDOVER_ALPHAEDGEBLEND`: its constant where the overlay
+  borders its source key); colour controls (below). `UpdateOverlay` takes
+  `DDOVER_BOBHARDWARE` alone and refuses it with `DDOVER_BOB`, as XP does; `DDOVER_AUTOFLIP`
+  stays refused (no video port feeds the overlay). The caps add bob, field flips, the key
+  ranges and the alpha.
+- **Overlays are laid over the frame on the GPU on Windows too:** the overlay pass's shader
+  read the frame's coordinates through a swizzle ps_2_0 doesn't have (`.zwzw`), which
+  Direct3D 9 refuses, so the CPU did it there, a frame Direct3D drew read back for it.
+- **The video port container** (`IDDVideoPortContainer`) is handed out from any of the
+  object's interfaces, counted apart from them, as by `ddraw.dll`: the Voodoo3's one port, its
+  caps, four connections and status as XP reported them, and `ddraw.dll`'s checks in their
+  order. A port can't be made (`E_FAIL`, the Voodoo3 driver's answer too): there is nothing to
+  capture from. The caps add `DDCAPS2_VIDEOPORT` and `AUTOFLIPOVERLAY`, and one port. Before,
+  `E_NOINTERFACE`.
+- **`IDirectDrawColorControl`** on the primary and on overlays, as the DirectX 7 SDK has it
+  (the Voodoo3 has none): brightness, contrast, hue, saturation and colour on or off, applied
+  to the picture through pixel shaders, or where there are none by the CPU (a frame Direct3D
+  drew read back for them), the overlay's to it alone; values out of their ranges refused.
+  The caps add `DDCAPS2_COLORCONTROLPRIMARY` and `COLORCONTROLOVERLAY`.
+- **A gamma calibrator** registered as for `ddraw.dll` (`Path` under
+  `HKLM\Software\Microsoft\DirectDraw\GammaCalibrator`) calibrates the ramps set with
+  `DDSGR_CALIBRATE`: called with a copy of the ramp and the driver's name, what it makes of it
+  is the ramp, and its failure is returned. With one, the caps add
+  `DDCAPS2_CANCALIBRATEGAMMA`; without, `DDSGR_CALIBRATE` stays unsupported. The identity ramp
+  `GetGammaRamp` gives where the display has none is XP's (`i << 8`).
+- **YUV surfaces are made where XP's `ddraw.dll` makes them:** offscreen surfaces and overlays
+  of them in video memory only (`DDERR_INVALIDPIXELFORMAT` in system memory), YUV textures not
+  there (`DDERR_UNSUPPORTEDFORMAT`), YUY2 and UYVY ones in system memory (where no memory is
+  named, there), YV12 ones nowhere, and I420 and IYUV, which `GetFourCCCodes` doesn't list,
+  not at all. A YUV colour fill writes the value in video memory only; in system memory it is
+  `DDERR_UNSUPPORTED`.
+- **Palettized textures Direct3D drew into are copied on the GPU,** each colour made the
+  palette entry the CPU's copy would give it (the exact colour's lowest entry, else the one
+  nearest its 15-bit colour), instead of read back and uploaded again each time.
+- **An 8-bit primary Direct3D drew into is shown through its palette on the GPU,** each
+  colour made its entry in the same way, instead of read back and converted each frame (where
+  there are no pixel shaders, it still is).
+- **Without pixel shaders, the gamma ramp applies to frames Direct3D drew too:** they are
+  read back and the CPU applies it, as it applies the colour controls there. Before, they were
+  shown without it.
+- **`DDSCL_CREATEDEVICEWINDOW`'s window keeps its mouse messages,** as `ddraw.dll`'s does:
+  they went on to the focus window.
+- **PrintScreen copies the primary to the clipboard** where `EnablePrintScreen` is set (a
+  value other than 0 under `HKLM\Software\Microsoft\DirectDraw`, read as each DirectDraw
+  object is made), as `ddraw.dll` does: let go in the window of a game in exclusive mode, the
+  key puts the primary there as a DIB of its own bits, 5-6-5 and 32-bit ones with their masks,
+  8-bit ones with their palette, or without one of their own GDI's palette of the screen
+  (below). The game gets the key as before.
+- **`GetSystemPaletteEntries` and `GetSystemPaletteUse` answer for an 8-bit mode,** as XP's
+  GDI answered beside `ddraw.dll`: a palette put on the primary is the screen's
+  (`SYSPAL_NOSTATIC256`), `SetEntries` on it shows as given, and with the palette taken off or
+  the primary gone the 20 static colours are back at the ends, the rest as it was. dd2d9 already told games an 8-bit mode's screen is a palette device, and
+  these calls then failed, the real screen having none. The screen's colour resolution there
+  is XP's 24 bits (it was 18).
+- **A palette's entries read back as XP's once it has been on the primary.** In exclusive
+  mode `ddraw.dll` realizes the primary's palette and marks its entries: from then on, off the
+  primary too, `GetEntries` gives each `peFlags` with its low four bits 5 (`PC_RESERVED |
+  PC_NOCOLLAPSE`), for the entries `SetEntries` writes while it is there as well. On the
+  primary of a flip chain the first and last entries also become black and white, with
+  `DDPCAPS_ALLOW256` too (as `ddraw.dll` does, testing the surface's flags for the palette's),
+  and are shown so, until `SetEntries` writes them. dd2d9 gave the entries back as set.
+- **Z buffers with stencil in 16 bits are made in video memory, in any layout,** as the
+  Voodoo3's driver makes them on XP (15 bits with 1 of stencil either way round, 8 with 8, 12
+  with 4), and go there when no memory is named, so a hardware device takes them. Before, they
+  were made in system memory only (`DDERR_INVALIDPIXELFORMAT` in video memory).
+- **Z buffers whose depth and stencil share bits,** or with the stencil outside the word, are
+  made as XP makes them: 16-bit ones in video memory, as above, the others in system memory; a
+  depth fill writes `dwFillDepth` as it is. Before, `DDERR_UNSUPPORTED`.
+- **`DDSCAPS_OWNDC`** surfaces (in system memory only, as on XP) keep the DC `GetDC` gave:
+  asked again, the same one, with the colours of the first; locked, filled and blitted with it
+  out, the DC and the memory seeing each other's pixels; released any number of times (another
+  DC: `DDERR_INVALIDPARAMS`, even through `IDirectDrawSurface`). Before, a second `GetDC` was
+  `DDERR_DCALREADYCREATED` and a lock with the DC out `DDERR_SURFACEBUSY`.
+- **Exclusive mode's activation as `ddraw.dll`'s:** the game's window restored in front gets a
+  posted `WM_ACTIVATEAPP(TRUE)`; one sent to the window while it is minimized is held back
+  until then; with another of the program's windows in front the game is told it isn't active
+  and set aside (fullscreen: `display=window` is an ordinary window); Alt+Tab's Tab let go
+  (not that of the Alt+Tab that brought the game back) and Alt+Esc's Esc set it aside at once,
+  and so does a suspend request (`WM_POWER`) before the game hears of it (these three only
+  where the focus loss minimizes the window); the popup that was active when the focus went
+  gets it back. Surfaces stay lost while the window is minimized. Mega Man X, which minimizes
+  and shows itself again after its first Alt+Tab, is still told it's back.
+- **While a fullscreen game holds exclusive mode in front,** the system's error boxes, the
+  cursor shadow, hot tracking and the IME status window are off, as with `ddraw.dll`, and put
+  back on a focus loss; the semaphore `CheckFullscreen` looks for is held, and
+  `CheckFullscreen` answers as `ddraw.dll`'s does (resetting the display when a game holds
+  it).
+- **A focus loss flips the primary's chain back to the GDI surface first,** as `ddraw.dll`
+  does.
+- **A focus change while dd2d9 itself moves or sizes the window** (taking exclusive mode, a
+  mode switch) is taken up once that is done, as the foreground is then. It was dropped: a
+  focus loss at that moment left the game set up in the background, a return left it set aside
+  in front.
+- ddtest checks all of the above (XP's answers where XP has them, the SDK's for the rest), and
+  its fuzz test blits with key ranges in video memory too, against a reference comparing them
+  colour by colour; `fmtprobe` gains the sections that measured them, with `fmtcal.dll`, a
+  calibrator for its calibrator section. `dfshim.dll`, a Direct3D 9 with `DF24` and `DF16` but
+  no `INTZ`, runs the tests on the path for GPUs without `INTZ`.
+- **`minimize=`: under i3 and sway the fullscreen window is no longer minimized when the
+  game loses the focus** (`auto`, the default; `off` leaves it as it is under any window
+  manager, `on` minimizes everywhere, as before). Under Wine with i3, Need for Speed III's
+  mouse stood still after switching back to the game's workspace, until the workspace was
+  switched away and back a few times. i3 doesn't minimize windows (it answers a request to
+  minimize one by showing it again), and hides the windows of a workspace switched away
+  from by marking them withdrawn while they stay mapped; Wine, asked to minimize the window
+  there, waited for an answer that never came, took i3's showing the window again for a
+  passing state, and ignored the keyboard focus i3 then gave it, without which Wine's
+  DirectInput gets no mouse movement. Left as it is, the window comes back with the focus;
+  Wine refuses a game's own `SetForegroundWindow` from the background, so a game that takes
+  the foreground back whenever its window isn't minimized (Need for Speed III's message
+  loop) stays away until brought back. i3 and sway are found by the `I3SOCK` and `SWAYSOCK`
+  variables they give the programs they start. Window managers that minimize still get the
+  window minimized: under Openbox, left as it is, it came back in front as soon as another
+  desktop was switched to. ddtest's focus-loss checks follow the setting, as they follow
+  `display=window`.
+- `dd2d9.ini.example` explains `safeterminate=`, and describes `cpus=` as 1.8.6 has it.
+
 ## 1.8.6
 - **`cpus=` pins the game's threads, not the whole process.** A machine of the time had one
   processor, but the game had it to itself: the sound was mixed in the kernel and the

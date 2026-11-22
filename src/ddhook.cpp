@@ -10,8 +10,8 @@ namespace dd2d9 {
 
 // Like ddraw.dll, exclusive mode subclasses the game's window: losing focus
 // undoes the display mode switch (or the borderless cover) and minimizes the
-// game, regaining it sets them up again. The screensaver and monitor power-off
-// are blocked while exclusive.
+// game (minimize=), regaining it sets them up again. The screensaver and
+// monitor power-off are blocked while exclusive.
 //
 // Locking: window and display-mode changes run under g_displayLock, never under
 // g_lock, because they send messages to the window's thread, whose window
@@ -45,15 +45,28 @@ struct HookView {
     bool quietMove = false;  // (see CheckCover)
     bool covered = false;    // CoverMonitor sized it past the screen: coverSize
     SIZE coverSize = {};
+    bool ownWork = false;    // dd2d9 moving, sizing or showing the window itself
+    bool fullscreen = false;  // display isn't window
+    bool minimizes = false;  // a focus loss minimizes the window (FocusLossMinimizes)
+    int front = -1;          // which of the game's windows the foreground is (GameWindowInFront)
+    HWND lastPopup = nullptr;  // the popup that was active when the focus went (LastPopup)
+    bool away = false;       // in the background, not coming back yet (Away)
 };
 HookView ViewHook(HWND h) {
     HookView v;
+    const HWND fg = GetForegroundWindow();
     AcquireSRWLockShared(&g_windowHookLock);
     if (const DDraw* o = g_hook.owner; o && h == g_hook.hwnd) {
         v.owned = true;
         v.exclusive = o->Exclusive();
         v.quietMove = o->QuietMove();
         v.covered = o->CoverSize(h, &v.coverSize);
+        v.ownWork = o->OwnWindowWork();
+        v.fullscreen = o->FullscreenDisplay();
+        v.minimizes = o->FocusLossMinimizes();
+        v.front = o->GameWindowInFront(fg);
+        v.lastPopup = o->LastPopup();
+        v.away = o->Away();
     }
     ReleaseSRWLockShared(&g_windowHookLock);
     return v;
@@ -76,6 +89,23 @@ std::atomic<unsigned> g_windowWork{0};
 std::atomic<DWORD> g_workThread{0};   // kWorkActivate: WM_ACTIVATEAPP's lParam (for the log)
 std::atomic<HWND> g_workWindow{nullptr};
 std::atomic<bool> g_workPosted{false};  // the message is on its way: no other is needed
+
+// ddraw.dll's activation (FUN_7375dcdc), as its window procedure keeps it (see HookProc;
+// set anew when exclusive mode is taken, ActivationTaken):
+// - the program is still the active one, but the game wasn't told so (activated while
+//   minimized) or was told it isn't (another of its windows in front, its Tab let go): told
+//   once its window is restored and in front;
+// - dd2d9 posted WM_ACTIVATEAPP(TRUE) to it, not handled yet (no second one meanwhile);
+// - Alt was held when it was activated (Alt+Tab into the game): that Tab's key-up isn't
+//   Alt+Tab out of it;
+// - the last WM_ACTIVATEAPP the game was told (taking exclusive mode counts as TRUE);
+// - the game is handling WM_ACTIVATEAPP: its own restores there post nothing (the window
+//   thread's).
+std::atomic<bool> g_activationPending{false};
+std::atomic<bool> g_activationPosted{false};
+std::atomic<bool> g_altAtActivation{false};
+std::atomic<bool> g_appActive{true};
+bool g_inActivation = false;
 
 UINT WindowWorkMsg() {
     static UINT msg = RegisterWindowMessageW(L"DD2D9_WindowWork");
@@ -120,11 +150,21 @@ void RunWindowWork(HWND h) {
         if (work & kWorkDisplay) DisplayChanged(owner);
         if (work & kWorkActivate) {
             // As it is now, not as the message said: a deactivation noted behind a later
-            // activation would otherwise minimize a game in front.
+            // activation would otherwise minimize a game in front. And as HookProc takes
+            // WM_ACTIVATEAPP: minimized, nothing until the window is restored; another of the
+            // game's windows in front, set aside.
             DWORD pid = 0;
             const HWND fg = GetForegroundWindow();
-            const bool active = fg && (GetWindowThreadProcessId(fg, &pid), pid == GetCurrentProcessId());
-            owner->OnActivate(active, g_workThread.load());
+            bool active = fg && (GetWindowThreadProcessId(fg, &pid), pid == GetCurrentProcessId());
+            if (active && IsIconic(h)) {
+                g_activationPending.store(true);
+            } else {
+                if (active && owner->FullscreenDisplay() && owner->GameWindowInFront(fg) == 0) {
+                    active = false;
+                    g_activationPending.store(true);
+                }
+                owner->OnActivate(active, g_workThread.load());
+            }
         }
         if (work & kWorkWindowActivate) owner->OnWindowActivate();
         if (work & (kWorkCoverMoved | kWorkCoverFrame)) owner->CheckCover(h, !(work & kWorkCoverFrame));
@@ -179,6 +219,18 @@ LRESULT CallOrig(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 }  // namespace
 
+void DeferActivation(HWND h, DWORD thread) {
+    g_workThread.store(thread);
+    RequestWindowWork(h, kWorkActivate);
+}
+
+void ActivationTaken() {
+    g_activationPending.store(false);
+    g_activationPosted.store(false);
+    g_altAtActivation.store(false);
+    g_appActive.store(true);
+}
+
 // The size the game's window procedure was last told (WM_SIZE's lParam), and telling it the
 // mode's when that differs. With a real switch Windows sizes the fullscreen window to the new
 // mode and the game hears of it; a covering window already the monitor's size doesn't change,
@@ -188,12 +240,14 @@ LRESULT CallOrig(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 volatile LONG g_toldSize = -1;
 
 namespace {
-// The game minimized its own window in exclusive mode with it still in front; the last
-// WM_ACTIVATEAPP Windows sent; dd2d9 telling the game it's active (the window thread's: see
-// HookProc).
-bool g_minimizedInFront = false;
-bool g_appActive = true;
-bool g_tellingActive = false;
+// WM_ACTIVATEAPP(TRUE) posted to the game, as ddraw.dll posts it, with the window's own
+// thread for the other one (see HookProc).
+void PostActivation(HWND h, const char* why) {
+    if (g_activationPosted.load()) return;
+    g_activationPending.store(false);
+    g_activationPosted.store(PostMessageW(h, WM_ACTIVATEAPP, TRUE, LPARAM(GetCurrentThreadId())) != FALSE);
+    if (why) DD2D9_LOG("%s: WM_ACTIVATEAPP(TRUE) posted to the game", why);
+}
 
 LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (LogLevel() >= 2) TraceMessage(h, msg, wp, lp);
@@ -218,24 +272,108 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                          (reinterpret_cast<const WINDOWPOS*>(lp)->flags & (SWP_NOSIZE | SWP_NOMOVE)) != (SWP_NOSIZE | SWP_NOMOVE);
     HookView view;
     if (msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED || msg == WM_SIZE || msg == WM_MOVE ||
-        msg == WM_STYLECHANGED || msg == WM_GETMINMAXINFO || msg == WM_SYSCOMMAND)
+        msg == WM_STYLECHANGED || msg == WM_GETMINMAXINFO || msg == WM_SYSCOMMAND || msg == WM_ACTIVATEAPP ||
+        msg == WM_ACTIVATE || msg == WM_SETFOCUS || msg == WM_SYSKEYUP || msg == WM_POWER)
         view = ViewHook(h);
     if ((frameChanged || resized) && view.owned && view.exclusive && !view.quietMove)
         RequestWindowWork(h, frameChanged ? kWorkCoverFrame : kWorkCoverMoved);
+    // ddraw.dll's activation in exclusive mode (FUN_7375dcdc), as measured on XP: its window
+    // restored (or maximized) while in front, not by ddraw.dll itself nor while the game
+    // handles WM_ACTIVATEAPP, the game is told it's active, by a posted WM_ACTIVATEAPP(TRUE)
+    // (Windows told it nothing: the program never stopped being the active one). So a game
+    // activated while minimized hears of it once it is restored (WM_ACTIVATEAPP below), and
+    // one that minimized itself in front and showed itself again is told it's back: Mega Man
+    // X, back from its first Alt+Tab, minimizes and maximizes itself once (its SC_RESTORE);
+    // minimized, it marks its surfaces to be restored and draws nothing until WM_ACTIVATEAPP
+    // has restored them (Windows 9x took the activation away from a minimized window and gave
+    // it back; Windows 11 and Wine leave it in front throughout: its screen stood still, black
+    // or the intro's text, until the next Alt+Tab). dd2d9's own addition: an activation still
+    // owed is also told once the window is in front another way (WM_ACTIVATE, WM_SETFOCUS: the
+    // game's dialog closed, a window manager that restores before it activates).
+    if (view.owned && view.exclusive && !g_inActivation && !view.ownWork && !DisplayLockHeldByMe()) {
+        if (msg == WM_SIZE && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && GetForegroundWindow() == h) {
+            static bool logged;  // (each time an activation was owed, otherwise once)
+            PostActivation(h, g_activationPending.load() || !logged ? "the game's window restored in front" : nullptr);
+            logged = true;
+        } else if (g_activationPending.load() && view.front == 1 && !IsIconic(h) &&
+                   ((msg == WM_ACTIVATE && LOWORD(wp) != WA_INACTIVE) || msg == WM_SETFOCUS)) {
+            PostActivation(h, "the game's window in front again");
+        }
+    }
     if (msg == WM_ACTIVATEAPP) {
+        g_activationPosted.store(false);  // (dd2d9's or not, one has come)
+        if (wp && view.owned && view.exclusive) {
+            // As ddraw.dll: activated while minimized, the game hears nothing (nor does dd2d9
+            // set it up) until its window is restored (see above).
+            if (IsIconic(h)) {
+                g_activationPending.store(true);
+                DD2D9_LOG("WM_ACTIVATEAPP(TRUE) to the minimized window: the game is told once it is restored");
+                return 0;
+            }
+            // Activated with another of its windows in front (a dialog), it's told it isn't, and
+            // set aside, as ddraw.dll does: a fullscreen game owns the screen only from its own
+            // window. (Not in display=window, an ordinary window.)
+            if (view.fullscreen && view.front == 0) {
+                DD2D9_LOG("WM_ACTIVATEAPP(TRUE) with another of the game's windows in front (%p): passed on as FALSE",
+                          static_cast<void*>(GetForegroundWindow()));
+                wp = FALSE;
+            }
+        }
+        // Set aside with one of its windows still in front: the program is still the active
+        // one, and Windows won't say when it's back.
+        g_activationPending.store(!wp && view.owned && view.exclusive && view.front >= 0);
+        if (wp && !g_appActive.load()) g_altAtActivation.store(GetAsyncKeyState(VK_MENU) < 0);
+        g_appActive.store(wp != 0);
+        const bool outer = !g_inActivation;
+        g_inActivation = true;
         // (The display lock busy: see RequestWindowWork.)
         if (TryEnterCriticalSection(&g_displayLock)) {
             if (h == g_hook.hwnd && g_hook.owner) g_hook.owner->OnActivate(wp != 0, DWORD(lp));
             LeaveDisplayLock();
         } else {
-            g_workThread.store(DWORD(lp));
-            RequestWindowWork(h, kWorkActivate);
+            DeferActivation(h, DWORD(lp));
         }
+        const LRESULT r = CallOrig(h, msg, wp, lp);
+        if (outer) g_inActivation = false;
+        return r;
     } else if (msg == WM_ACTIVATE && h == g_hook.hwnd) {
         // Another of the game's windows in front, or the game's back (no WM_ACTIVATEAPP):
         // the cursor let go or confined again (OnWindowActivate). Posted: it runs as things are
         // once the activation is done.
         RequestWindowWork(h, kWorkWindowActivate);
+    } else if (msg == WM_SYSKEYUP && h == g_hook.hwnd) {
+        // As ddraw.dll in exclusive mode: Alt+Tab's Tab let go (not the one that switched to
+        // the game), or Alt+Esc's Esc, sets the game aside at once, by a posted
+        // WM_ACTIVATEAPP(FALSE): on XP the switcher showed over the desktop, not under the
+        // game's screen. Only where the focus loss minimizes the window: one left as it is
+        // (minimize=off, i3, sway, DDSCL_NOWINDOWCHANGES) would stay set aside in front where
+        // nothing switches (a window manager that lets the game have Alt+Tab), with nothing
+        // to restore it from.
+        const bool tab = wp == VK_TAB && (lp & (1 << 29)) && !g_altAtActivation.load();
+        g_altAtActivation.store(false);
+        if ((tab || wp == VK_ESCAPE) && view.owned && view.exclusive && view.minimizes) {
+            DD2D9_LOG("%s let go with Alt: the game set aside (WM_ACTIVATEAPP(FALSE) posted)", tab ? "Tab" : "Esc");
+            PostMessageW(h, WM_ACTIVATEAPP, FALSE, LPARAM(GetCurrentThreadId()));
+        }
+    } else if (msg == WM_POWER && wp == PWR_SUSPENDREQUEST && h == g_hook.hwnd) {
+        // As ddraw.dll in exclusive mode: a suspend request sets the game aside first (a sent
+        // WM_ACTIVATEAPP(FALSE) with its own thread), then the game gets the request. Only
+        // where the focus loss minimizes the window, as the key-ups above.
+        if (view.owned && view.exclusive && view.minimizes) {
+            DD2D9_LOG("WM_POWER(PWR_SUSPENDREQUEST): the game set aside (WM_ACTIVATEAPP(FALSE) sent)");
+            SendMessageW(h, WM_ACTIVATEAPP, FALSE, LPARAM(GetCurrentThreadId()));
+        }
+    } else if (msg == WM_KEYUP && wp == VK_SNAPSHOT && h == g_hook.hwnd && PrintScreenEnabled() && ViewHook(h).exclusive) {
+        // As ddraw.dll with EnablePrintScreen set: PrintScreen let go in the exclusive window
+        // copies the primary to the clipboard (ddgdi.cpp), then the game gets the key-up as
+        // ever. (The display lock busy: not copied.)
+        if (TryEnterCriticalSection(&g_displayLock)) {
+            if (h == g_hook.hwnd && g_hook.owner) {
+                Guard l;
+                CopyPrimaryToClipboard(g_hook.owner, h);
+            }
+            LeaveDisplayLock();
+        }
     } else if (msg == WM_DISPLAYCHANGE) {
         // The owner only under the display lock: TearDown unhooks under it, then frees it.
         // (Busy: usually dd2d9 changing the mode, but also the topmost timer or
@@ -270,9 +408,10 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // SetForegroundWindow in its WM_PAINT while fullscreen), and switching away paints
         // the window (Alt+Tab's switcher over it): the desktop flashed and the game came
         // back. Also where the window stays visible in the background (DDSCL_NOWINDOWCHANGES,
-        // a hidden owner): ddraw.dll would let the game paint it, but what a fullscreen game
-        // paints is its screen, shown again when it is back (invalidated then: see
-        // OnActivate). Not while coming back (restoring_): its own paints then are the game's.
+        // a hidden owner, minimize=off): ddraw.dll would let the game paint it, but what a
+        // fullscreen game paints is its screen, shown again when it is back (invalidated then:
+        // see OnActivate). Not while coming back (restoring_): its own paints then are the
+        // game's.
         // (The display busy: the game's, as before.)
         bool away = false;
         if (TryEnterCriticalSection(&g_displayLock)) {
@@ -306,6 +445,10 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // As ddraw.dll (FUN_7375dcdc): no screensaver in exclusive mode. The monitor may
         // still power down (SC_MONITORPOWER goes through).
         if (view.owned && view.exclusive) return 0;
+    } else if (msg == WM_SYSCOMMAND && wp == SC_RESTORE && view.owned && view.exclusive && view.lastPopup) {
+        // As ddraw.dll: restored with a popup of the game's active when the focus went (see
+        // OnActivate), the window itself is restored first.
+        ShowWindow(h, SW_RESTORE);
     }
     // The game's window in a display mode of dd2d9's own: the mode's size at 0,0, as
     // GetClientRect and GetSystemMetrics answer it (input.cpp) and as after a real mode switch,
@@ -317,43 +460,12 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         int mw, mh;
         if (ShownDisplaySize(&mw, &mh)) lp = msg == WM_SIZE ? MAKELPARAM(mw, mh) : 0;
     }
+    // (What the game was last told: see ApplyWindow. A window restored in the background, before
+    // the game is back (see WM_ACTIVATEAPP above), isn't in the game's mode yet: once back, the
+    // game is told the mode's size again, as ddraw.dll's mode switch told it. Heroes of the Three
+    // Kingdoms 3 centres its movie by the screen it reads then.)
     if (msg == WM_SIZE && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && h == g_hook.hwnd)
-        InterlockedExchange(&g_toldSize, LONG(lp));  // (what the game was last told: see ApplyWindow)
-    // The game minimizing its own window in exclusive mode and showing it again, with no
-    // WM_ACTIVATEAPP between: told it's active once it's back. On Windows 9x the minimized
-    // window lost the activation and got it back when shown; Windows 11 and Wine leave it in
-    // front throughout. Mega Man X, back from its first Alt+Tab, minimizes and maximizes
-    // itself once (its SC_RESTORE); minimized, it marks its surfaces to be restored and draws
-    // nothing until WM_ACTIVATEAPP has restored them: its screen stood still, black or the
-    // intro's text, until the next Alt+Tab. Only the game's procedure hears it: for dd2d9
-    // nothing changed. (Not dd2d9's own minimizing: that follows WM_ACTIVATEAPP (FALSE). And
-    // not while the game handles the one dd2d9 sends: a game that minimizes and restores
-    // itself there isn't told again.)
-    if (msg == WM_ACTIVATEAPP) {
-        g_appActive = wp != 0;
-        g_minimizedInFront = false;
-    } else if (msg == WM_NCDESTROY) {
-        g_minimizedInFront = false;
-    } else if (msg == WM_SIZE && h == g_hook.hwnd && !g_tellingActive) {
-        if (wp == SIZE_MINIMIZED) {
-            g_minimizedInFront = view.owned && view.exclusive && g_appActive && GetForegroundWindow() == h;
-        } else if ((wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && g_minimizedInFront) {
-            g_minimizedInFront = false;
-            const LRESULT r = CallOrig(h, msg, wp, lp);
-            if (view.exclusive && GetForegroundWindow() == h && !IsIconic(h)) {
-                static bool logged;
-                if (!logged) {
-                    logged = true;
-                    DD2D9_LOG("the game minimized its window and showed it again while in front: told it's active "
-                              "again (WM_ACTIVATEAPP)");
-                }
-                g_tellingActive = true;
-                CallOrig(h, WM_ACTIVATEAPP, TRUE, 0);
-                g_tellingActive = false;
-            }
-            return r;
-        }
-    }
+        InterlockedExchange(&g_toldSize, view.owned && view.away ? -1 : LONG(lp));
     if (msg == WM_NCDESTROY && h == g_hook.hwnd) {
         // As ddraw.dll: the window is going, and the hook with it. The game's procedure
         // gets the message first; the window's procedure is put back (a later message
@@ -381,7 +493,9 @@ LONG_PTR SetProc(HWND h, bool unicode, LONG_PTR proc) {
 
 void LeaveDisplayLock() {
     LeaveCriticalSection(&g_displayLock);
-    if (g_windowWork.load() && !DisplayLockHeldByMe()) PostWindowWork();
+    if (DisplayLockHeldByMe()) return;
+    if (g_windowWork.load()) PostWindowWork();
+    ApplyImeUi();  // (see ExclusiveSettings)
 }
 
 // As ddraw.dll's timer: about every 1.5 s while a game holds exclusive mode in front, its

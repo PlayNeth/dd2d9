@@ -24,6 +24,25 @@ static int g_fail;
         fflush(g_out);                                      \
     } while (0)
 
+// Whether the GPU reads antialiased Z buffers as dd2d9 does (INTZ textures it resolves a
+// multisampled one into with RESZ), asked of Direct3D 9 through its vtable (d3d9.h and d3d.h
+// don't go together; IDirect3D9::CheckDeviceFormat is its 11th entry).
+static bool GpuResolvesDepth() {
+    HMODULE m = LoadLibraryA("d3d9.dll");
+    using Create = void*(WINAPI*)(UINT);
+    const auto create = m ? reinterpret_cast<Create>(reinterpret_cast<void*>(GetProcAddress(m, "Direct3DCreate9"))) : nullptr;
+    void* d3d = create ? create(32) : nullptr;  // (D3D_SDK_VERSION)
+    if (!d3d) return false;
+    void** vt = *static_cast<void***>(d3d);
+    using Check = HRESULT(WINAPI*)(void*, UINT, DWORD, DWORD, DWORD, DWORD, DWORD);
+    const auto check = reinterpret_cast<Check>(vt[10]);
+    // (Adapter 0, HAL, X8R8G8B8: INTZ as a depth-stencil texture, RESZ as a render target surface.)
+    const bool has = SUCCEEDED(check(d3d, 0, 1, 22, 2, 3, MAKEFOURCC('I', 'N', 'T', 'Z'))) &&
+                     SUCCEEDED(check(d3d, 0, 1, 22, 1, 1, MAKEFOURCC('R', 'E', 'S', 'Z')));
+    reinterpret_cast<ULONG(WINAPI*)(void*)>(vt[2])(d3d);
+    return has;
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) PostQuitMessage(0);
     return DefWindowProcA(h, m, w, l);
@@ -1157,7 +1176,9 @@ static int Run(int w, int h, int bpp) {
             // The Z buffer read and written through DirectDraw in small locks (a lens flare's
             // occlusion test; dd2d9 reads back only the rectangle then) and in a whole one,
             // and drawing against what was written. Where DirectDraw can't reach the GPU's Z
-            // buffer (antialiasing on, zaccess=off) the CPU copy is what DirectDraw itself wrote: noted only.
+            // buffer (zaccess=off; antialiasing on a GPU without RESZ, where the first lock
+            // turns it off and the depth drawn before is lost) the CPU copy is what DirectDraw
+            // itself wrote: noted only.
             {
                 dev->SetRenderState(D3DRENDERSTATE_ZENABLE, D3DZB_TRUE);
                 dev->SetRenderState(D3DRENDERSTATE_ZFUNC, D3DCMP_LESSEQUAL);
@@ -1182,7 +1203,8 @@ static int Run(int w, int h, int bpp) {
                 // depth fills above wrote.)
                 char za[16] = "";
                 GetPrivateProfileStringA("dd2d9", "zaccess", "on", za, sizeof(za), ".\\dd2d9.ini");
-                const bool readable = GetPrivateProfileIntA("dd2d9", "antialiasing", 0, ".\\dd2d9.ini") < 2 &&
+                const bool antialiased = GetPrivateProfileIntA("dd2d9", "antialiasing", 0, ".\\dd2d9.ini") >= 2;
+                const bool readable = (!antialiased || GpuResolvesDepth()) &&
                                       !(!_stricmp(za, "off") || !strcmp(za, "0") || !_stricmp(za, "false") || !_stricmp(za, "no"));
                 DDSURFACEDESC2 l = {};
                 l.dwSize = sizeof(l);
@@ -1200,8 +1222,11 @@ static int Run(int w, int h, int bpp) {
                           wz = zat(nullptr, 504, 304, DDLOCK_READONLY);
                 const bool ok = std::abs(zq - 16384) <= 2 && zc == 0xFFFF && blocked == 0 && passed == 0xFF0000 &&
                                 std::abs(wq - 16384) <= 2 && std::abs(wf - 32768) <= 2 && wz == 0;
-                CHECK(ok || !readable, "Z buffer through DirectDraw%s: 8x8 locks read %d and %d, written 0 blocks 0x%06lx (beside 0x%06lx), whole lock reads %d, %d, %d",
-                      readable ? "" : " (not readable here: antialiasing or zaccess=off)", zq, zc, blocked, passed, wq, wf, wz);
+                CHECK(ok || !readable,
+                      "Z buffer through DirectDraw%s: 8x8 locks read %d and %d, written 0 blocks 0x%06lx (beside 0x%06lx), whole "
+                      "lock reads %d, %d, %d",
+                      readable ? "" : " (not readable here: antialiasing without RESZ, or zaccess=off)", zq, zc, blocked, passed, wq,
+                      wf, wz);
             }
             // A 2D label drawn with the depth test passing always but writing depth, then a
             // translucent panel behind it (NFS Porsche Unleashed's menu): the label's depth keeps

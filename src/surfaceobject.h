@@ -84,6 +84,7 @@ public:
     Palette* self = this;
 
     void ReserveSystemEntries();
+    void Realized(bool ends);
     Palette(DDraw* dd, DWORD caps, const PALETTEENTRY* entries);
     static Palette* From(void* iface) { return static_cast<Palette*>(ImplFromIface(iface)); }
 
@@ -163,6 +164,21 @@ public:
     STDMETHOD(SetGammaRamp)(DWORD flags, LPDDGAMMARAMP ramp) override;
 };
 
+// ---------------------------------------------------------------- ColorControl
+// The primary's and overlays' colour controls (surface.cpp).
+class ColorControl final : public IDirectDrawColorControl {
+public:
+    uint32_t magic = kMagic;
+    Surface* surface;
+
+    explicit ColorControl(Surface* s) : surface(s) { WritableVtbl(this); }
+    STDMETHOD(QueryInterface)(REFIID riid, void** out) override;
+    STDMETHOD_(ULONG, AddRef)() override;
+    STDMETHOD_(ULONG, Release)() override;
+    STDMETHOD(GetColorControls)(LPDDCOLORCONTROL c) override;
+    STDMETHOD(SetColorControls)(LPDDCOLORCONTROL c) override;
+};
+
 // ---------------------------------------------------------------- Surface
 enum { kCkDestBlt, kCkDestOverlay, kCkSrcBlt, kCkSrcOverlay };
 
@@ -175,12 +191,12 @@ public:
 
     // version: the surface interface called (Direct3D 1-6 objects count their references there).
     HRESULT QueryInterface(REFIID riid, void** out, int version = 7);
-    // As in ddraw.dll, every interface (IDirectDrawSurface .. 7, the gamma control)
+    // As in ddraw.dll, every interface (IDirectDrawSurface .. 7, the gamma and colour controls)
     // counts its own references, and AddRef/Release return that count; the surface
     // lives while any is left. A complex surface's root holds its members through the
     // interface they were created with (as ddraw.dll counts it); dd2d9's own references
     // (Direct3D render targets) have a count of their own.
-    enum RefSlot { kRefV1, kRefV2, kRefV3, kRefV4, kRefV7, kRefGamma, kRefInternal, kRefSlots };
+    enum RefSlot { kRefV1, kRefV2, kRefV3, kRefV4, kRefV7, kRefGamma, kRefColor, kRefInternal, kRefSlots };
     // The interface GetAttachedSurface and EnumAttachedSurfaces hand out through `version`:
     // IDirectDrawSurface2/3 give IDirectDrawSurface (v1) ones, as ddraw.dll does.
     static int HandedOut(int version) { return version >= 4 ? version : 1; }
@@ -208,7 +224,9 @@ public:
     HRESULT BltLocked(RECT* dst, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
                       bool destKeyFromSource = false);
     HRESULT CopyRowsFrom(Surface* src);  // g_lock held
-    HRESULT Flip(Surface* target, DWORD flags);
+    // own: dd2d9's flip, not the game's (FlipToGDISurface on a focus loss): neither paced nor
+    // counted as one of its frames.
+    HRESULT Flip(Surface* target, DWORD flags, bool own = false);
     HRESULT GetCaps(DDSCAPS2* caps);
     HRESULT GetClipper(IDirectDrawClipper** out);
     HRESULT SetClipper(IDirectDrawClipper* c);
@@ -319,6 +337,11 @@ public:
     bool dcCounted = false;   // the DC out is part of lockCount (Unlock through version 1/2 can drop it)
     RECT lockArea = {0, 0, 0, 0};  // union of the areas locked now (with lockCount > 0)
     HDC dcOut = nullptr;
+    // DDSCAPS_OWNDC: the DC GetDC gave is the surface's for good, as with ddraw.dll (not a
+    // lock; ReleaseDC only checks it), kept in step with the memory at each use (SyncKeptDc).
+    bool dcKept = false;
+    void SyncKeptDc();
+    void KeptDcWritten();
     DWORD uniqueness = 1, priority = 0, lod = 0;
     // The contents changed. As ddraw.dll: 0 (OWNDC surfaces, after SetSurfaceDesc) stays 0,
     // and counting skips 0.
@@ -326,6 +349,8 @@ public:
         if (uniqueness && !++uniqueness) uniqueness = 1;
     }
     GammaControl* gamma = nullptr;
+    ColorControl* color = nullptr;
+    DDCOLORCONTROL* colorControls = nullptr;  // set through ColorControl (null: the defaults)
     DDGAMMARAMP* gammaRamp = nullptr;  // the primary's ramp (SetGammaRamp), applied while exclusive
     HRESULT ManagedTextureCheck() const;  // Set/GetPriority, Set/GetLOD
     GpuTex* gpuTex = nullptr;    // Direct3D's GPU copy of this texture and its mip levels (gpures.h)
@@ -338,8 +363,14 @@ public:
     // (g_lock); DDSCAPS_VISIBLE in desc says it is shown.
     Surface* overlayDest = nullptr;  // the surface overlaid, referenced (kRefInternal) as ddraw.dll does
     RECT overlaySrc = {}, overlayDst = {};
-    DWORD overlayFlags = 0;          // DDOVER_* (keys, DDOVER_DDFX)
+    DWORD overlayFlags = 0;          // DDOVER_* (keys, DDOVER_DDFX, bob)
+    int overlayField = -1;           // the field the last Flip named (DDFLIP_EVEN 0, ODD 1; -1 neither)
     DDOVERLAYFX overlayFx = {};      // with DDOVER_DDFX: the mirroring; the override keys
+    // The alpha surfaces DDOVER_ALPHASRCSURFACEOVERRIDE and ALPHADESTSURFACEOVERRIDE named, found
+    // among the DirectDraw object's surfaces (null: none, or no surface): not referenced, but
+    // let go of as they go (OverlayGone).
+    Surface* overlayAlphaSrc = nullptr;
+    Surface* overlayAlphaDest = nullptr;
     bool OverlayShown() const {
         return (desc.ddsCaps.dwCaps & (DDSCAPS_OVERLAY | DDSCAPS_VISIBLE)) == (DDSCAPS_OVERLAY | DDSCAPS_VISIBLE) &&
                overlayDest;

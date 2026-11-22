@@ -14,6 +14,7 @@ namespace {
 // guid: DDCREATE_HARDWAREONLY / DDCREATE_EMULATIONONLY limit the caps reported to one side.
 HRESULT CreateDDraw(REFIID riid, void** out, bool initialized, const GUID* guid = nullptr) {
     InstallCompatHooks(false);
+    if (initialized) ReadPrintScreenSetting();  // (Initialize reads it for the class factory's)
     DDraw* dd;
     try {
         dd = new DDraw();
@@ -89,6 +90,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
         InitializeCriticalSection(&g_lock);
         InitializeCriticalSection(&g_displayLock);
         LoadConfig(inst);
+        ReadGammaCalibrator();
         LogInit();
         InstallCompatHooks(true);
         if (!PinsThreads()) DisableThreadLibraryCalls(inst);  // (threads announced only for cpus=)
@@ -255,7 +257,20 @@ void WINAPI DD2D9_ReleaseDDThreadLock() {
 // Internal exports for d3dim.dll and display drivers. dd2d9's Direct3D is its own and nothing
 // else of a real driver stack loads, so nothing calls these: they keep the export table as
 // ddraw.dll's. Stack sizes match the original XP SP3 ddraw.dll.
-HRESULT WINAPI DD2D9_CheckFullscreen() { return 0; }
+// As ddraw.dll's (ordinal 2): whether a game holds exclusive mode in front, in any process
+// (the semaphore ExclusiveSettings makes, ddraw.dll's too); if so, the display is reset to the
+// registry's mode. The semaphore is counted up by the wait that found it taken, as in
+// ddraw.dll: asked again, it answers no.
+HRESULT WINAPI DD2D9_CheckFullscreen() {
+    const HANDLE h = CreateSemaphoreA(nullptr, 1, 1, "DDrawCheckFullscreenSemaphore");
+    if (!h) return 0;
+    const DWORD r = WaitForSingleObject(h, 0);
+    ReleaseSemaphore(h, 1, nullptr);
+    CloseHandle(h);
+    if (r != WAIT_TIMEOUT) return 0;
+    ChangeDisplaySettingsA(nullptr, CDS_RESET);
+    return 1;
+}
 HRESULT WINAPI DD2D9_CompleteCreateSysmemSurface(void*) { return DDERR_UNSUPPORTED; }
 HRESULT WINAPI DD2D9_D3DParseUnknownCommand(void*, void**) { return DDERR_UNSUPPORTED; }
 HRESULT WINAPI DD2D9_DDGetAttachedSurfaceLcl(void*, void*, void**) { return DDERR_UNSUPPORTED; }

@@ -118,7 +118,7 @@ static HRESULT CheckCaps(DWORD C, DWORD C2, DWORD C3, DWORD C4, int ddVersion) {
 // FUN_73737235 and its validator FUN_73736cad). `in` loses what the interface version
 // doesn't take (the pitch through IDirectDraw/2, or without client memory).
 // overlays: OverlaysOffered for the object.
-static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD displayBpp, bool overlays) {
+static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD displayBpp, bool overlays, bool emulationOnly) {
     DWORD& F = in.dwFlags;
     const DWORD C2 = in.ddsCaps.dwCaps2, C3 = in.ddsCaps.dwCaps3, C4 = in.ddsCaps.dwCaps4;
     DWORD C = in.ddsCaps.dwCaps;
@@ -209,12 +209,10 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
                 !(pf.dwFlags & DDPF_ZBUFFER) || !pf.dwZBitMask)
                 return DDERR_INVALIDPARAMS;
             // With stencil: its depth and mask given, and then any layout (which memory takes
-            // it is CreateSurface's business), but for depth and stencil sharing bits, which
-            // dd2d9 can't keep apart.
-            if (pf.dwFlags & DDPF_STENCILBUFFER) {
-                if (!pf.dwStencilBitDepth || !pf.dwStencilBitMask) return DDERR_INVALIDPARAMS;
-                if (pf.dwZBitMask & pf.dwStencilBitMask) return DDERR_UNSUPPORTED;
-            }
+            // it is CreateSurface's business): depth and stencil sharing bits too, or the stencil
+            // outside the word, as ddraw.dll takes them (measured on XP).
+            if ((pf.dwFlags & DDPF_STENCILBUFFER) && (!pf.dwStencilBitDepth || !pf.dwStencilBitMask))
+                return DDERR_INVALIDPARAMS;
             depth = pf.dwZBufferBitDepth;
         }
         if (depth < 8) return DDERR_INVALIDPARAMS;
@@ -250,15 +248,36 @@ static HRESULT CheckSurfaceDesc(DDSURFACEDESC2& in, int ddVersion, DWORD display
         if ((f.CopyOnly() || rgb8) && !(C & DDSCAPS_TEXTURE)) return DDERR_INVALIDPIXELFORMAT;
         if (f.BlockCompressed() && ((in.dwWidth | in.dwHeight) & 3)) return DDERR_INVALIDPARAMS;
         // Planar video (YV12, I420): offscreen and overlay surfaces only (no texture format lists it).
-        if (f.Planar() && (C & (DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER))) return DDERR_INVALIDPIXELFORMAT;
+        if (f.Planar() && (C & (DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER))) return DDERR_INVALIDPIXELFORMAT;
+        // Video formats where XP's ddraw.dll takes them (fmtprobe section 33, the Voodoo3's
+        // driver): an offscreen surface or overlay of one in video memory (the emulation layer
+        // makes none: in system memory DDERR_INVALIDPIXELFORMAT, as Wine's
+        // test_block_formats_creation has it on other Windows too); a texture of one not there
+        // (the device takes no textures of them: DDERR_UNSUPPORTEDFORMAT), in system memory YUY2
+        // and UYVY only (where no memory is named, there: see CreateSurfaceImpl). I420 and IYUV,
+        // which GetFourCCCodes doesn't list, not at all.
+        if (f.Yuv() || f.Planar()) {
+            const bool i420 = f.fourCC == MAKEFOURCC('I', '4', '2', '0') || f.fourCC == MAKEFOURCC('I', 'Y', 'U', 'V');
+            if (C & DDSCAPS_TEXTURE) {
+                if (C & DDSCAPS_VIDEOMEMORY) return DDERR_UNSUPPORTEDFORMAT;
+                if (f.Planar()) return DDERR_INVALIDPIXELFORMAT;
+            } else if (i420 || (C & DDSCAPS_SYSTEMMEMORY)) {
+                return DDERR_INVALIDPIXELFORMAT;
+            }
+        }
     }
-    // Color keys, as SetColorKey takes them: no ranges, overlay keys only while overlays are offered.
+    // Color keys, as SetColorKey takes them: overlay keys only while overlays are offered, ranges
+    // only in video memory, where the driver compares them (the surface keeps the low value
+    // alone, as measured on XP: the emulation layer has no ranges).
     static const DWORD kCkFlags[4] = {DDSD_CKDESTOVERLAY, DDSD_CKDESTBLT, DDSD_CKSRCOVERLAY, DDSD_CKSRCBLT};
-    const DDCOLORKEY* keys[4] = {&in.ddckCKDestOverlay, &in.ddckCKDestBlt, &in.ddckCKSrcOverlay, &in.ddckCKSrcBlt};
+    DDCOLORKEY* keys[4] = {&in.ddckCKDestOverlay, &in.ddckCKDestBlt, &in.ddckCKSrcOverlay, &in.ddckCKSrcBlt};
     for (int i = 0; i < 4; i++) {
         if (!(F & kCkFlags[i])) continue;
         if ((kCkFlags[i] & (DDSD_CKDESTOVERLAY | DDSD_CKSRCOVERLAY)) && !overlays) return DDERR_NOCOLORKEYHW;
-        if (keys[i]->dwColorSpaceLowValue != keys[i]->dwColorSpaceHighValue) return DDERR_NOCOLORKEYHW;
+        if (keys[i]->dwColorSpaceLowValue != keys[i]->dwColorSpaceHighValue) {
+            if (!(C & DDSCAPS_VIDEOMEMORY) || emulationOnly) return DDERR_NOCOLORKEYHW;
+            keys[i]->dwColorSpaceHighValue = keys[i]->dwColorSpaceLowValue;
+        }
         // A destination overlay key where SetColorKey takes one: overlays and the primary.
         if (kCkFlags[i] == DDSD_CKDESTOVERLAY && !(C & (DDSCAPS_OVERLAY | DDSCAPS_PRIMARYSURFACE)))
             return DDERR_NOTAOVERLAYSURFACE;
@@ -303,7 +322,8 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
              (in.dwFlags & DDSD_BACKBUFFERCOUNT) ? in.dwBackBufferCount : 0);
     DWORD displayW, displayH, displayBpp;
     DisplayMode(&displayW, &displayH, &displayBpp);
-    if (HRESULT hr = CheckSurfaceDesc(in, ddVersion, displayBpp, OverlaysOffered(this)); FAILED(hr)) return hr;
+    if (HRESULT hr = CheckSurfaceDesc(in, ddVersion, displayBpp, OverlaysOffered(this), capsSide == kEmulationOnly); FAILED(hr))
+        return hr;
     // ddraw.dll reads the caps even without DDSD_CAPS. None at all makes an offscreen
     // surface, whose caps still say nothing but where its memory is.
     const DWORD asked = in.ddsCaps.dwCaps;
@@ -354,15 +374,20 @@ HRESULT DDraw::CreateSurfaceImpl(const void* inDesc, void** out, IUnknown* outer
         }
     }
 
-    // A Z buffer with stencil: in video memory the layouts Direct3D enumerates (24 bits with
-    // 8 of stencil: EnumZBufferFormats), as ddraw.dll's driver takes those it lists. Any other
-    // is the emulation layer's: in system memory, there too when no memory is named (ddraw.dll
-    // tries the driver first), and refused in video memory. Measured on XP: 15+1 either way
-    // round, 8+8, 12+4 and 16+16 are made in system memory; VMware's driver refused 15+1.
-    if (fmt.zbuf && fmt.a && !(fmt.bpp == 32 && __builtin_popcount(fmt.a) == 8 && __builtin_popcount(fmt.r) == 24)) {
+    // A Z buffer with stencil: in video memory any 16-bit layout, as the Voodoo3's driver takes
+    // them on XP (15+1, depth and stencil sharing bits, the stencil outside the word; VMware's
+    // refused 15+1), and in 32 bits 24 with 8 of stencil apart (as Direct3D enumerates it:
+    // EnumZBufferFormats). Any other is the emulation layer's: in system memory, there too when
+    // no memory is named (ddraw.dll tries the driver first), and refused in video memory
+    // (measured on XP: 16+16, 24+9 sharing a bit, 8 of stencil inside 24 or 32 of depth).
+    if (fmt.zbuf && fmt.a && fmt.bpp != 16 &&
+        !(fmt.bpp == 32 && __builtin_popcount(fmt.a) == 8 && __builtin_popcount(fmt.r) == 24 && !(fmt.r & fmt.a))) {
         if (asked & DDSCAPS_VIDEOMEMORY) return DDERR_INVALIDPIXELFORMAT;
         caps |= DDSCAPS_SYSTEMMEMORY;
     }
+    // A texture of YUY2 or UYVY where no memory is named: the emulation layer's, in system
+    // memory, as ddraw.dll goes there once the driver has none (see CheckSurfaceDesc).
+    if (fmt.Yuv() && (caps & DDSCAPS_TEXTURE) && !(caps & DDSCAPS_VIDEOMEMORY)) caps |= DDSCAPS_SYSTEMMEMORY;
     // The emulation layer's Z buffers, which those in system memory are: 16 and 32 bits only
     // (Wine's test_caps; measured on XP).
     if ((caps & DDSCAPS_SYSTEMMEMORY) && fmt.zbuf && fmt.bpp != 16 && fmt.bpp != 32) return DDERR_INVALIDPIXELFORMAT;

@@ -38,13 +38,43 @@ int WINAPI HookGetDeviceCaps(HDC dc, int index) {
         case RASTERCAPS: return real | RC_PALETTE;
         case SIZEPALETTE: return 256;
         case NUMRESERVED: return 20;
-        default: return 18;  // COLORRES: the DAC's 6 bits a channel
+        default: return 24;  // COLORRES (the Voodoo3's on XP)
         }
     }
     if (bpp < 16) return real;
     if (index == BITSPIXEL) return bpp;
     if (index == NUMCOLORS) return -1;  // above 8 bits
     return real;
+}
+
+// GDI's palette of the screen in an 8-bit mode of the game's own, where the real screen has none:
+// as XP's GDI answered beside DirectDraw (ScreenPaletteGet), on any DC of the display. As many
+// entries as fit from `start` (none from 256 on), counted without a buffer too.
+using GetSystemPaletteEntriesFn = UINT(WINAPI*)(HDC, UINT, UINT, PALETTEENTRY*);
+using GetSystemPaletteUseFn = UINT(WINAPI*)(HDC);
+GetSystemPaletteEntriesFn g_getSystemPaletteEntries;
+GetSystemPaletteUseFn g_getSystemPaletteUse;
+
+bool PaletteScreen(HDC dc) {
+    const DWORD type = GetObjectType(dc);
+    return (type == OBJ_DC || type == OBJ_MEMDC) && DD2D9_NEXT(g_getDeviceCaps)(dc, TECHNOLOGY) == DT_RASDISPLAY &&
+           !(DD2D9_NEXT(g_getDeviceCaps)(dc, RASTERCAPS) & RC_PALETTE) && ShownDisplayBpp() == 8;
+}
+
+UINT WINAPI HookGetSystemPaletteEntries(HDC dc, UINT start, UINT count, PALETTEENTRY* out) {
+    if (!PaletteScreen(dc)) return DD2D9_NEXT(g_getSystemPaletteEntries)(dc, start, count, out);
+    if (start >= 256) return 0;
+    const UINT n = count < 256 - start ? count : 256 - start;
+    PALETTEENTRY all[256];
+    ScreenPaletteGet(all);
+    if (out) memcpy(out, all + start, n * sizeof(PALETTEENTRY));
+    return n;
+}
+
+UINT WINAPI HookGetSystemPaletteUse(HDC dc) {
+    if (!PaletteScreen(dc)) return DD2D9_NEXT(g_getSystemPaletteUse)(dc);
+    PALETTEENTRY all[256];
+    return ScreenPaletteGet(all) ? SYSPAL_NOSTATIC256 : SYSPAL_STATIC;
 }
 
 // LockWindowUpdate on the window dd2d9 shows the primary in: not done. ddraw.dll drew a
@@ -232,6 +262,10 @@ ImportHook kWindowHooks[] = {
     {"gdi32", "StretchBlt", reinterpret_cast<void*>(HookStretchBlt), reinterpret_cast<void**>(&g_stretchBlt)},
     {"gdi32", "PatBlt", reinterpret_cast<void*>(HookPatBlt), reinterpret_cast<void**>(&g_patBlt)},
     {"gdi32", "GetDeviceCaps", reinterpret_cast<void*>(HookGetDeviceCaps), reinterpret_cast<void**>(&g_getDeviceCaps)},
+    {"gdi32", "GetSystemPaletteEntries", reinterpret_cast<void*>(HookGetSystemPaletteEntries),
+     reinterpret_cast<void**>(&g_getSystemPaletteEntries)},
+    {"gdi32", "GetSystemPaletteUse", reinterpret_cast<void*>(HookGetSystemPaletteUse),
+     reinterpret_cast<void**>(&g_getSystemPaletteUse)},
     {"gdi32", "CreateBitmap", reinterpret_cast<void*>(HookCreateBitmap), reinterpret_cast<void**>(&g_createBitmap)},
     {"gdi32", "CreateBitmapIndirect", reinterpret_cast<void*>(HookCreateBitmapIndirect),
      reinterpret_cast<void**>(&g_createBitmapIndirect)},

@@ -19,22 +19,21 @@ struct RectText {
 
 std::vector<RECT> g_clips;
 
-KeyRange SourceKeyOf(DWORD flags, const DDBLTFX* fx, const Surface* src) {
-    if (flags & DDBLT_KEYSRCOVERRIDE) {
-        const DWORD v = fx->ddckSrcColorkey.dwColorSpaceLowValue;
-        return {true, v, v};
-    }
-    const DDCOLORKEY& k = src->ck[kCkSrcBlt];
-    if (flags & DDBLT_KEYSRC) return {true, k.dwColorSpaceLowValue, k.dwColorSpaceHighValue};
+// A key's range as the blit into `dst` compares it: the driver's, into video memory, the whole
+// range; the emulation layer's (into system memory) the low value alone (measured on XP: a
+// KEYSRCOVERRIDE range keyed the low colour only there).
+static KeyRange KeyAsCompared(const DDCOLORKEY& k, const Surface* dst) {
+    const DWORD lo = k.dwColorSpaceLowValue;
+    return {true, lo, (dst->desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) ? k.dwColorSpaceHighValue : lo};
+}
+KeyRange SourceKeyOf(DWORD flags, const DDBLTFX* fx, const Surface* src, const Surface* dst) {
+    if (flags & DDBLT_KEYSRCOVERRIDE) return KeyAsCompared(fx->ddckSrcColorkey, dst);
+    if (flags & DDBLT_KEYSRC) return KeyAsCompared(src->ck[kCkSrcBlt], dst);
     return {};
 }
-KeyRange DestKeyOf(DWORD flags, const DDBLTFX* fx, const Surface* owner) {
-    if (flags & DDBLT_KEYDESTOVERRIDE) {
-        const DWORD v = fx->ddckDestColorkey.dwColorSpaceLowValue;
-        return {true, v, v};
-    }
-    const DDCOLORKEY& k = owner->ck[kCkDestBlt];
-    if (flags & DDBLT_KEYDEST) return {true, k.dwColorSpaceLowValue, k.dwColorSpaceHighValue};
+KeyRange DestKeyOf(DWORD flags, const DDBLTFX* fx, const Surface* owner, const Surface* dst) {
+    if (flags & DDBLT_KEYDESTOVERRIDE) return KeyAsCompared(fx->ddckDestColorkey, dst);
+    if (flags & DDBLT_KEYDEST) return KeyAsCompared(owner->ck[kCkDestBlt], dst);
     return {};
 }
 
@@ -88,6 +87,10 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
     if ((flags & DDBLT_KEYSRC) && !src) return DDERR_INVALIDOBJECT;
     if ((flags & DDBLT_KEYSRC) && ((flags & DDBLT_KEYSRCOVERRIDE) || !src->hasCk[kCkSrcBlt])) return DDERR_INVALIDPARAMS;
     if ((flags & DDBLT_KEYDEST) && ((flags & DDBLT_KEYDESTOVERRIDE) || !hasCk[kCkDestBlt])) return DDERR_INVALIDPARAMS;
+    // A destination key range into system memory: the emulation layer has none (measured on XP).
+    if ((flags & DDBLT_KEYDESTOVERRIDE) && !(desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) &&
+        fx->ddckDestColorkey.dwColorSpaceLowValue != fx->ddckDestColorkey.dwColorSpaceHighValue)
+        return DDERR_NOCOLORKEYHW;
     // The operation: the first of these flags decides.
     const DWORD fills = DDBLT_COLORFILL | DDBLT_DEPTHFILL;
     if (flags & DDBLT_ROP) {
@@ -150,7 +153,9 @@ HRESULT Surface::Blt(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DD
 HRESULT Surface::BltLocked(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags, DDBLTFX* fx, bool useClipper,
                            bool destKeyFromSource) {
     try {
-        return BltCore(dstRect, src, srcRect, flags, fx, useClipper, destKeyFromSource);
+        const HRESULT hr = BltCore(dstRect, src, srcRect, flags, fx, useClipper, destKeyFromSource);
+        KeptDcWritten();
+        return hr;
     } catch (const std::bad_alloc&) {
         return DDERR_OUTOFMEMORY;
     }
@@ -165,11 +170,14 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
     if (buf->fmt.palLow || (src && src->buf->fmt.palLow)) return DDERR_UNSUPPORTED;
     // FourCC surfaces (DXT, YUY2, UYVY): copies (stretched, keyed, mirrored as any) through
     // an A8R8G8B8 decoding of either side, the destination's part encoded again after
-    // (BltFourCC). A colour fill of a YUV surface writes the value as it is, as the drivers
-    // did (Wine's test_color_fill); other fills of FourCC surfaces aren't done.
+    // (BltFourCC). A colour fill of a YUV surface in video memory writes the value as it is, as
+    // the drivers did (Wine's test_color_fill; XP's Voodoo3); other fills of FourCC surfaces
+    // aren't done, nor by ddraw.dll's emulation layer any of a texture in system memory (XP).
     const bool fill = (flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL)) ||
                       ((flags & DDBLT_ROP) && (fx->dwROP == BLACKNESS || fx->dwROP == WHITENESS));
-    if (buf->fmt.fourcc && fill && !(buf->fmt.Yuv() && (flags & DDBLT_COLORFILL))) return DDERR_UNSUPPORTED;
+    if (buf->fmt.fourcc && fill &&
+        !(buf->fmt.Yuv() && (flags & DDBLT_COLORFILL) && (desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY)))
+        return DDERR_UNSUPPORTED;
     if (!fill && (buf->fmt.fourcc || src->buf->fmt.fourcc))
         return BltFourCC(dstRect, src, srcRect, flags, fx, useClipper, destKeyFromSource);
     const RECT bounds = {0, 0, buf->w, buf->h};
@@ -191,10 +199,10 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
 
     // What Direct3D drew into either surface is read back first.
     if (sb && src != this) src->CpuAccess(false);
-    // A depth fill into a Z buffer DirectDraw can write on the GPU: no read back first (games
-    // fill every frame); the GPU's copy gets the fill, or, with writes of the CPU's pending
-    // upload, the fill joins them (GpuDepthFill).
-    const bool zfill = (flags & DDBLT_DEPTHFILL) && GpuDepthWritable(buf);
+    // A depth fill into a Z buffer on the GPU: no read back first (games fill every frame); the
+    // GPU's copy gets the fill, or, with writes of the CPU's pending upload, the fill joins
+    // them (GpuDepthFill). (Nor is it a Z lock: an antialiased one stays so, see GpuCpuAccess.)
+    const bool zfill = (flags & DDBLT_DEPTHFILL) && GpuDepthFillable(buf);
     if (!zfill) CpuAccess(true, dstRect ? dstRect : &bounds);  // (the rectangle before clipping: at most that)
     else if (buf->gpuStale) buf->MarkGpuStale(dstRect ? dstRect : &bounds);
 
@@ -215,8 +223,8 @@ HRESULT Surface::BltCore(RECT* dstRect, Surface* src, RECT* srcRect, DWORD flags
     }
 
     BlitParams p;
-    p.srcKey = Masked(SourceKeyOf(flags, fx, src), sb->fmt.KeyMask());
-    p.dstKey = Masked(DestKeyOf(flags, fx, destKeyFromSource ? src : this), buf->fmt.KeyMask());
+    p.srcKey = Masked(SourceKeyOf(flags, fx, src, this), sb->fmt);
+    p.dstKey = Masked(DestKeyOf(flags, fx, destKeyFromSource ? src : this, this), buf->fmt);
     Mirroring(flags, fx, &p);
     p.spal = src->EffectivePalette();
     p.dpal = buf->fmt.pal8 ? EffectivePalette() : nullptr;

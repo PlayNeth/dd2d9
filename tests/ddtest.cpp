@@ -76,17 +76,30 @@ static int g_sizeScreenW = -1;
 static int g_activateTrue;
 static bool g_activeSeen;
 static LONG g_styleChanges;
+static int g_mouseMsgs;  // mouse messages the window got
+// Every WM_ACTIVATEAPP the window got: how many, and the last one's wParam and lParam.
+static int g_appMsgs;
+static WPARAM g_appWp;
+static LPARAM g_appLp;
+static int g_powerAt = -1;  // how many WM_ACTIVATEAPP had come when WM_POWER came
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_ACTIVATEAPP && w) {
         g_activateTrue++;
         g_activeSeen = GetForegroundWindow() == h && !IsIconic(h);
     }
+    if (m == WM_ACTIVATEAPP) {
+        g_appMsgs++;
+        g_appWp = w;
+        g_appLp = l;
+    }
+    if (m == WM_POWER) g_powerAt = g_appMsgs;
     if (m == WM_SIZE && g_keepW && (LOWORD(l) != g_keepW || HIWORD(l) != g_keepH))
         SetWindowPos(h, nullptr, 0, 0, g_keepW, g_keepH, SWP_NOZORDER | SWP_NOACTIVATE);
     if (m == WM_USER + 1) g_userMsgs++;
     if (m == WM_STYLECHANGED) g_styleChanges++;
     if (m == WM_MOUSEMOVE) g_lastMouseMove = l;
+    if (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) g_mouseMsgs++;
     if (m == WM_SIZE && (w == SIZE_RESTORED || w == SIZE_MAXIMIZED)) {
         g_lastSize = l;
         GetClientRect(h, &g_sizeClient);
@@ -142,6 +155,20 @@ static void Pump() {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+}
+
+// The game's window back in front after a focus loss, as the user brings it back: minimized,
+// restored (from its taskbar button) and activated, which ddraw.dll then tells the game (it
+// posts WM_ACTIVATEAPP(TRUE): one sent to a minimized window it holds back, as measured on
+// XP); otherwise told it's active, as Windows would.
+static void BringBack(HWND h) {
+    if (IsIconic(h)) {
+        ShowWindow(h, SW_RESTORE);
+        SetForegroundWindow(h);
+    } else {
+        SendMessageA(h, WM_ACTIVATEAPP, TRUE, 0);
+    }
+    Pump();
 }
 
 static IDirectDrawSurface7* MakeSurface(IDirectDraw7* dd, int w, int h, DWORD bpp, DWORD r, DWORD g, DWORD b) {
@@ -849,7 +876,7 @@ static int RunUnit() {
         DDSURFACEDESC2 d = {};
         d.dwSize = sizeof(d);
         d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
-        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY;  // (where ddraw.dll makes video surfaces)
         d.dwWidth = 64;
         d.dwHeight = 4;
         d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
@@ -1069,12 +1096,12 @@ static int RunUnit() {
                 rgbSurf->Release();
             }
         }
-        // Planar YV12 / I420 (4:2:0): a luma plane, then the chroma planes at half the pitch.
+        // Planar YV12 (4:2:0): a luma plane, then the chroma planes at half the pitch.
         {
             DDSURFACEDESC2 d = {};
             d.dwSize = sizeof(d);
             d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
-            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY;
             d.dwWidth = 4;
             d.dwHeight = 2;
             d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
@@ -1124,25 +1151,6 @@ static int RunUnit() {
                           nearRgb(got[3], 0xFF0000),
                       "YV12 blitted to RGB (0x%08lx): %06lx %06lx %06lx %06lx", hr, got[0] & 0xFFFFFF, got[1] & 0xFFFFFF,
                       got[2] & 0xFFFFFF, got[3] & 0xFFFFFF);
-                // RGB into I420 (U plane first).
-                d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('I', '4', '2', '0');
-                IDirectDrawSurface7* i420 = nullptr;
-                if (SUCCEEDED(dd->CreateSurface(&d, &i420, nullptr))) {
-                    hr = i420->Blt(nullptr, rgb, nullptr, DDBLT_WAIT, nullptr);
-                    DDSURFACEDESC2 q = {};
-                    q.dwSize = sizeof(q);
-                    i420->Lock(nullptr, &q, DDLOCK_WAIT, nullptr);
-                    const BYTE* qb = static_cast<BYTE*>(q.lpSurface);
-                    const BYTE* qu = qb + 2 * q.lPitch;
-                    const BYTE* qv = qu + q.lPitch / 2;
-                    auto close = [](int a, int c) { return abs(a - c) <= 2; };
-                    const bool ok = close(qb[0], 235) && close(qb[q.lPitch + 3], 81) && close(qu[0], 128) && close(qu[1], 90) &&
-                                    close(qv[0], 128) && close(qv[1], 240);
-                    CHECK(SUCCEEDED(hr) && ok, "RGB blitted into I420 (0x%08lx): Y %u %u, U %u %u, V %u %u", hr, qb[0],
-                          qb[q.lPitch + 3], qu[0], qu[1], qv[0], qv[1]);
-                    i420->Unlock(nullptr);
-                    i420->Release();
-                }
                 // YV12 to YV12: copied as it is, plane by plane.
                 d.ddpfPixelFormat.dwFourCC = MAKEFOURCC('Y', 'V', '1', '2');
                 IDirectDrawSurface7* yv2 = nullptr;
@@ -1665,8 +1673,7 @@ static int RunFullscreen8(int modeW, int modeH) {
         CHECK(hr == DDERR_SURFACELOST && !bd.lpSurface, "back buffer not lockable in the background (0x%08lx)", hr);
         if (SUCCEEDED(hr)) back->Unlock(nullptr);
     }
-    SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
-    Pump();
+    BringBack(hwnd);
     CHECK(!IsIconic(hwnd), "window restored after focus returns (was minimized: %d)", minimized);
     // The surfaces were lost meanwhile, as in ddraw.dll: the game restores them (display=switch,
     // even where the test display lacks the mode and dd2d9 shows it scaled).
@@ -2422,6 +2429,279 @@ static int RunTargetGone() {
     return 0;
 }
 
+// An 8-bit palettized texture Direct3D drew into (a Direct3D 3 RGB device's target: a
+// gradient, and the colour of two entries, 10 and 200), then drawn texel for pixel onto a
+// 32-bit target: each texel its palette entry's colour, the entry a lock of the texture then
+// shows, every time it is drawn (dd2d9 makes the first copy on the GPU, the next from what the
+// lock read back). Then colour-keyed, entry 10 the key: the background where that entry is.
+static int RunPalTarget() {
+    IDirectDraw* dd1 = nullptr;
+    if (FAILED(DirectDrawCreate(nullptr, &dd1, nullptr))) return 1;
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    dd1->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    IDirectDraw4* dd = nullptr;
+    IDirect3D3* d3d = nullptr;
+    dd1->QueryInterface(IID_IDirectDraw4, reinterpret_cast<void**>(&dd));
+    dd1->QueryInterface(IID_IDirect3D3, reinterpret_cast<void**>(&d3d));
+    PALETTEENTRY pe[256];
+    for (int i = 0; i < 256; i++) pe[i] = {BYTE(i * 37), BYTE(i * 91), BYTE(i * 53), 0};
+    pe[200] = pe[10];
+    IDirectDrawPalette* pal = nullptr;
+    if (dd) dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, pe, &pal, nullptr);
+    DDSURFACEDESC2 sd = {};
+    sd.dwSize = sizeof(sd);
+    sd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    sd.dwWidth = sd.dwHeight = 64;
+    sd.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY;
+    sd.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    sd.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+    sd.ddpfPixelFormat.dwRGBBitCount = 8;
+    IDirectDrawSurface4 *tex = nullptr, *rt = nullptr;
+    if (pal) dd->CreateSurface(&sd, &tex, nullptr);
+    if (tex) tex->SetPalette(pal);
+    sd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY;
+    sd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    sd.ddpfPixelFormat.dwRGBBitCount = 32;
+    sd.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    sd.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    sd.ddpfPixelFormat.dwBBitMask = 0xFF;
+    if (tex) dd->CreateSurface(&sd, &rt, nullptr);
+    IDirect3DTexture2* tex2 = nullptr;
+    if (tex) tex->QueryInterface(IID_IDirect3DTexture2, reinterpret_cast<void**>(&tex2));
+    // A device on each, its viewport all of it.
+    IDirect3DDevice3 *into = nullptr, *with = nullptr;
+    IDirect3DViewport3 *vpInto = nullptr, *vpWith = nullptr;
+    auto device = [&](IDirectDrawSurface4* s, IDirect3DDevice3** dev, IDirect3DViewport3** vp) {
+        if (!d3d || !s || FAILED(d3d->CreateDevice(IID_IDirect3DRGBDevice, s, dev, nullptr))) return false;
+        if (FAILED(d3d->CreateViewport(vp, nullptr)) || FAILED((*dev)->AddViewport(*vp))) return false;
+        D3DVIEWPORT2 vd = {};
+        vd.dwSize = sizeof(vd);
+        vd.dwWidth = vd.dwHeight = 64;
+        vd.dvClipX = -1.0f, vd.dvClipY = 1.0f, vd.dvClipWidth = vd.dvClipHeight = 2.0f;
+        vd.dvMaxZ = 1.0f;
+        return SUCCEEDED((*vp)->SetViewport2(&vd)) && SUCCEEDED((*dev)->SetCurrentViewport(*vp));
+    };
+    const bool made = tex2 && rt && device(tex, &into, &vpInto) && device(rt, &with, &vpWith);
+    CHECK(made, "an 8-bit palettized texture as a Direct3D 3 RGB device's target, and a 32-bit target to draw it onto");
+    if (made) {
+        auto quad = [](IDirect3DDevice3* dev, float x0, float y0, float x1, float y1, const DWORD c[4]) {
+            D3DTLVERTEX v[4] = {{{x0}, {y0}, {0.5f}, {1}, {c[0]}, {0}, {0}, {0}}, {{x1}, {y0}, {0.5f}, {1}, {c[1]}, {0}, {1}, {0}},
+                                {{x0}, {y1}, {0.5f}, {1}, {c[2]}, {0}, {0}, {1}}, {{x1}, {y1}, {0.5f}, {1}, {c[3]}, {0}, {1}, {1}}};
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_TLVERTEX, v, 4, 0);
+        };
+        auto rgb = [&](int i) { return DWORD(pe[i].peRed) << 16 | DWORD(pe[i].peGreen) << 8 | pe[i].peBlue; };
+        auto drawInto = [&] {
+            const DWORD gradient[4] = {0xFF000000, 0xFFFF8000, 0xFF00FFFF, 0xFFFFFFFF};
+            const DWORD c10[4] = {0xFF000000 | rgb(10), 0xFF000000 | rgb(10), 0xFF000000 | rgb(10), 0xFF000000 | rgb(10)};
+            into->BeginScene();
+            quad(into, 0, 0, 64, 64, gradient);
+            quad(into, 0, 0, 16, 16, c10);
+            into->EndScene();
+        };
+        // The texture texel for pixel (each pixel centre on a texel's), what it shows read.
+        auto drawWith = [&](bool keyed, DWORD* shown) {
+            DDBLTFX fx = {};
+            fx.dwSize = sizeof(fx);
+            fx.dwFillColor = 0x123456;
+            rt->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+            const DWORD white[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
+            with->SetTexture(0, tex2);
+            with->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, keyed);
+            with->BeginScene();
+            quad(with, -0.5f, -0.5f, 63.5f, 63.5f, white);
+            with->EndScene();
+            with->SetRenderState(D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+            with->SetTexture(0, nullptr);
+            DDSURFACEDESC2 l = {};
+            l.dwSize = sizeof(l);
+            if (FAILED(rt->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return false;
+            for (int y = 0; y < 64; y++) {
+                const DWORD* row = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(l.lpSurface) + y * l.lPitch);
+                for (int x = 0; x < 64; x++) shown[y * 64 + x] = row[x] & 0xFFFFFF;
+            }
+            rt->Unlock(nullptr);
+            return true;
+        };
+        auto entries = [&](BYTE* e) {
+            DDSURFACEDESC2 l = {};
+            l.dwSize = sizeof(l);
+            if (FAILED(tex->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return false;
+            for (int y = 0; y < 64; y++) memcpy(e + y * 64, static_cast<const BYTE*>(l.lpSurface) + y * l.lPitch, 64);
+            tex->Unlock(nullptr);
+            return true;
+        };
+        static DWORD first[4096], again[4096];
+        static BYTE e[4096];
+        for (int keyed = 0; keyed < 2; keyed++) {
+            if (keyed) {
+                DDCOLORKEY k = {10, 10};
+                tex->SetColorKey(DDCKEY_SRCBLT, &k);
+            }
+            drawInto();
+            const bool ok = drawWith(keyed, first) && entries(e) && drawWith(keyed, again);
+            int wrong = 0, differ = 0, colours = 0, at = -1;
+            bool seen[256] = {};
+            for (int i = 0; ok && i < 4096; i++) {
+                const DWORD want = keyed && e[i] == 10 ? 0x123456 : rgb(e[i]);
+                if (first[i] != want && wrong++ == 0) at = i;
+                if (again[i] != first[i]) differ++;
+                if (!seen[e[i]]) seen[e[i]] = true, colours++;
+            }
+            CHECK(ok && !wrong && !differ && e[0] == 10 && colours > 20,
+                  "a palettized texture Direct3D drew into, drawn%s: %d of 4096 texels not their entry's colour (the first at "
+                  "%d: 0x%06lx, entry %u: 0x%06lx), %d differing when drawn again; the colour of entries 10 and 200 entry %u "
+                  "(10), %d entries in all",
+                  keyed ? " colour-keyed (entry 10 the key)" : "", wrong, at, at >= 0 ? first[at] : 0, at >= 0 ? e[at] : 0,
+                  at >= 0 ? rgb(e[at]) : 0, differ, e[0], colours);
+        }
+    }
+    if (vpWith) vpWith->Release();
+    if (with) with->Release();
+    if (vpInto) vpInto->Release();
+    if (into) into->Release();
+    if (tex2) tex2->Release();
+    if (rt) rt->Release();
+    if (tex) tex->Release();
+    if (pal) pal->Release();
+    if (d3d) d3d->Release();
+    if (dd) dd->Release();
+    dd1->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// A primary Direct3D drew into (a Direct3D 3 RGB device on the back buffer of a flip chain, in
+// the desktop's size, at 8 and at 32 bits), once flipped: each colour shown as drawn, or at 8
+// bits as the palette entry a lock of the front buffer then reads (dd2d9 shows the render
+// target through the palette on the GPU; the lock reads it back through the CPU's mapping):
+// two of the palette's own colours (entry 10's, which entry 200 has too) and four it hasn't.
+// Then the same through an inverting gamma ramp.
+static int RunDrawnPrimary(DWORD bpp) {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    IDirectDraw* dd1 = nullptr;
+    if (FAILED(DirectDrawCreate(nullptr, &dd1, nullptr))) return 1;
+    HWND hwnd = MakeWindow(WS_POPUP | WS_VISIBLE, sw, sh);
+    IDirectDraw4* dd = nullptr;
+    IDirect3D3* d3d = nullptr;
+    dd1->QueryInterface(IID_IDirectDraw4, reinterpret_cast<void**>(&dd));
+    dd1->QueryInterface(IID_IDirect3D3, reinterpret_cast<void**>(&d3d));
+    if (!dd || !d3d) return 1;
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const HRESULT hm = dd->SetDisplayMode(sw, sh, bpp, 0, 0);
+    Pump();
+    PALETTEENTRY pe[256];
+    for (int i = 0; i < 256; i++) pe[i] = {BYTE(i * 37), BYTE(i * 91), BYTE(i * 53), 0};
+    pe[200] = pe[10];
+    IDirectDrawPalette* pal = nullptr;
+    if (bpp == 8) dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, pe, &pal, nullptr);
+    DDSURFACEDESC2 fd = {};
+    fd.dwSize = sizeof(fd);
+    fd.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+    fd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE;
+    fd.dwBackBufferCount = 1;
+    IDirectDrawSurface4 *front = nullptr, *back = nullptr;
+    dd->CreateSurface(&fd, &front, nullptr);
+    DDSCAPS2 bc = {DDSCAPS_BACKBUFFER, 0, 0, {0}};
+    if (front) front->GetAttachedSurface(&bc, &back);
+    if (front && pal) front->SetPalette(pal);
+    if (back && pal) back->SetPalette(pal);  // (an 8-bit target needs one of its own)
+    IDirect3DDevice3* dev = nullptr;
+    IDirect3DViewport3* vp = nullptr;
+    bool made = SUCCEEDED(hm) && back && (pal || bpp != 8) &&
+                SUCCEEDED(d3d->CreateDevice(IID_IDirect3DRGBDevice, back, &dev, nullptr)) &&
+                SUCCEEDED(d3d->CreateViewport(&vp, nullptr)) && SUCCEEDED(dev->AddViewport(vp));
+    if (made) {
+        D3DVIEWPORT2 vd = {};
+        vd.dwSize = sizeof(vd);
+        vd.dwWidth = DWORD(sw);
+        vd.dwHeight = DWORD(sh);
+        vd.dvClipX = -1.0f, vd.dvClipY = 1.0f, vd.dvClipWidth = vd.dvClipHeight = 2.0f;
+        vd.dvMaxZ = 1.0f;
+        made = SUCCEEDED(vp->SetViewport2(&vd)) && SUCCEEDED(dev->SetCurrentViewport(vp));
+    }
+    CHECK(made, "%lu bits: a flip chain with a Direct3D 3 RGB device on its back buffer (%dx%d: 0x%08lx)", bpp, sw, sh, hm);
+    if (made) {
+        auto rgb = [&](int i) { return DWORD(pe[i].peRed) << 16 | DWORD(pe[i].peGreen) << 8 | pe[i].peBlue; };
+        COLORREF before = CLR_INVALID;  // what the last frame showed
+        // `c` drawn over the back buffer and flipped: what the middle of the screen shows, and
+        // what the front buffer holds there (at 8 bits its entry, then -1 if it can't be read).
+        auto show = [&](DWORD c, int* entry) {
+            const float x1 = float(sw), y1 = float(sh);
+            const DWORD v = 0xFF000000 | c;
+            D3DTLVERTEX q[4] = {{{0}, {0}, {0.5f}, {1}, {v}, {0}, {0}, {0}}, {{x1}, {0}, {0.5f}, {1}, {v}, {0}, {0}, {0}},
+                                {{0}, {y1}, {0.5f}, {1}, {v}, {0}, {0}, {0}}, {{x1}, {y1}, {0.5f}, {1}, {v}, {0}, {0}, {0}}};
+            dev->BeginScene();
+            dev->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_TLVERTEX, q, 4, 0);
+            dev->EndScene();
+            front->Flip(nullptr, DDFLIP_WAIT);
+            // The new frame, once it has shown the same three times (or after two seconds:
+            // the same colour as the last one, or the first frame waiting for its shaders).
+            COLORREF shown = CLR_INVALID;
+            for (int i = 0, same = 0; i < 80 && same < 3; i++) {
+                Pump();
+                Sleep(25);
+                HDC sdc = GetDC(nullptr);
+                const COLORREF now = GetPixel(sdc, sw / 2, sh / 2) & 0xFFFFFF;
+                ReleaseDC(nullptr, sdc);
+                same = now != before && now == shown ? same + 1 : 0;
+                shown = now;
+            }
+            before = shown;
+            *entry = -1;
+            DDSURFACEDESC2 l = {};
+            l.dwSize = sizeof(l);
+            if (bpp == 8 && SUCCEEDED(front->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                *entry = static_cast<const BYTE*>(l.lpSurface)[(sh / 2) * l.lPitch + sw / 2];
+                front->Unlock(nullptr);
+            }
+            return DWORD(GetRValue(shown)) << 16 | DWORD(GetGValue(shown)) << 8 | GetBValue(shown);
+        };
+        const DWORD colours[] = {rgb(10), rgb(77), 0x808080, 0xFF0000, 0x00FF00, 0x123456};
+        int warm;
+        show(0x00FFFF, &warm);  // (a first frame, not checked: it may come late, the device's first)
+        int wrong = 0;
+        char seen[320] = "";
+        for (DWORD c : colours) {
+            int entry;
+            const DWORD got = show(c, &entry);
+            const DWORD want = bpp != 8 ? c : entry >= 0 ? rgb(entry) : 0xFFFFFFFF;
+            if (got != want) wrong++;
+            snprintf(seen + strlen(seen), sizeof(seen) - strlen(seen), "%s%06lx: ", seen[0] ? "; " : "", c);
+            if (bpp == 8) snprintf(seen + strlen(seen), sizeof(seen) - strlen(seen), "entry %d, ", entry);
+            snprintf(seen + strlen(seen), sizeof(seen) - strlen(seen), "shown %06lx", got);
+        }
+        CHECK(!wrong, "%lu bits: a primary Direct3D drew into, flipped: each colour shown %s (%s)", bpp,
+              bpp == 8 ? "as the entry a lock reads" : "as drawn", seen);
+        // Through an inverting gamma ramp (each channel 255 less itself).
+        IDirectDrawGammaControl* gc = nullptr;
+        front->QueryInterface(IID_IDirectDrawGammaControl, reinterpret_cast<void**>(&gc));
+        DDGAMMARAMP ramp;
+        for (int i = 0; i < 256; i++) ramp.red[i] = ramp.green[i] = ramp.blue[i] = WORD((255 - i) * 257);
+        const HRESULT gh = gc ? gc->SetGammaRamp(0, &ramp) : E_FAIL;
+        int entry;
+        const DWORD got = show(rgb(77), &entry);
+        const DWORD want = (bpp != 8 ? rgb(77) : entry >= 0 ? rgb(entry) : 0) ^ 0xFFFFFF;
+        CHECK(gh == DD_OK && got == want && (bpp != 8 || entry >= 0),
+              "%lu bits: the same through an inverting gamma ramp (0x%08lx): %06lx shown %06lx (%06lx)", bpp, gh, rgb(77), got, want);
+        if (gc) {
+            gc->SetGammaRamp(0, nullptr);
+            gc->Release();
+        }
+    }
+    if (vp) vp->Release();
+    if (dev) dev->Release();
+    if (back) back->Release();
+    if (front) front->Release();
+    if (pal) pal->Release();
+    d3d->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    dd1->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 // A texture format as a short name ("565", "P4", "A8L8"), and a device's list of them in order.
 static void ListFormat(const DDPIXELFORMAT& f, std::string* list) {
     const char* name = "?";
@@ -2966,6 +3246,377 @@ static int RunDesktop8() {
     return 0;
 }
 
+// DDSCAPS_OWNDC, as measured on XP (fmtprobe section 31): system memory only; the DC GetDC
+// gives stays the surface's (the same one asked again, and after ReleaseDC), it can be locked
+// and filled with the DC out, ReleaseDC only checks the DC (any interface), and the
+// uniqueness value stays 0. What GDI draws on the DC is in the memory at the next lock.
+// YUV surfaces as measured on XP (fmtprobe section 33, the Voodoo3): where each video format is
+// made, as an offscreen surface, an overlay and a texture, and its colour fills (dwFillColor's
+// low 16 bits repeated where the driver fills it).
+static int RunYuvSurfaces() {
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+    const HRESULT ok = DD_OK, bad = DDERR_INVALIDPIXELFORMAT, tex = DDERR_UNSUPPORTEDFORMAT;
+    struct Case {
+        const char* name;
+        DWORD fourcc;
+        HRESULT made[5];  // offscreen video, offscreen system, overlay video, texture video, texture system
+        bool filled;      // video memory filled (otherwise DDERR_UNSUPPORTED)
+    };
+    static const Case kCases[] = {{"YUY2", MAKEFOURCC('Y', 'U', 'Y', '2'), {ok, bad, ok, tex, ok}, true},
+                                  {"UYVY", MAKEFOURCC('U', 'Y', 'V', 'Y'), {ok, bad, ok, tex, ok}, true},
+                                  {"YV12", MAKEFOURCC('Y', 'V', '1', '2'), {ok, bad, ok, tex, bad}, false},
+                                  {"I420", MAKEFOURCC('I', '4', '2', '0'), {bad, bad, bad, tex, bad}, false},
+                                  {"IYUV", MAKEFOURCC('I', 'Y', 'U', 'V'), {bad, bad, bad, tex, bad}, false}};
+    static const DWORD kKinds[5] = {DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+                                    DDSCAPS_OVERLAY | DDSCAPS_VIDEOMEMORY, DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY,
+                                    DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY};
+    static const char* const kKindNames[5] = {"offscreen, video memory", "offscreen, system memory", "overlay, video memory",
+                                              "texture, video memory", "texture, system memory"};
+    for (const Case& c : kCases)
+        for (int k = 0; k < 5; k++) {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = kKinds[k];
+            d.dwWidth = 8;
+            d.dwHeight = 4;
+            d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+            d.ddpfPixelFormat.dwFlags = DDPF_FOURCC;
+            d.ddpfPixelFormat.dwFourCC = c.fourcc;
+            IDirectDrawSurface7* sf = nullptr;
+            const HRESULT hr = dd->CreateSurface(&d, &sf, nullptr);
+            HRESULT fill = E_FAIL;
+            bool repeated = true;
+            if (sf) {
+                DDBLTFX fx = {};
+                fx.dwSize = sizeof(fx);
+                fx.dwFillColor = 0x12345678;
+                fill = sf->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (SUCCEEDED(fill) && SUCCEEDED(sf->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                    for (int i = 0; i < 16; i++) repeated &= static_cast<const BYTE*>(l.lpSurface)[i] == (i & 1 ? 0x56 : 0x78);
+                    sf->Unlock(nullptr);
+                }
+                sf->Release();
+            }
+            const bool video = k != 1 && k != 4;
+            const HRESULT wantFill = c.filled && video ? DD_OK : DDERR_UNSUPPORTED;
+            CHECK(hr == c.made[k] && (FAILED(hr) || (fill == wantFill && repeated)),
+                  "%s, %s: 0x%08lx; a colour fill 0x%08lx (the low 16 bits repeated %d)", c.name, kKindNames[k], hr, fill, repeated);
+        }
+    dd->Release();
+    return 0;
+}
+
+static int RunOwnDc() {
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+    auto make = [&](DWORD caps, HRESULT* hr) {
+        DDSURFACEDESC2 d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        d.ddsCaps.dwCaps = caps;
+        d.dwWidth = d.dwHeight = 64;
+        d.ddpfPixelFormat.dwSize = sizeof(d.ddpfPixelFormat);
+        d.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        d.ddpfPixelFormat.dwRGBBitCount = 16;
+        d.ddpfPixelFormat.dwRBitMask = 0xF800;
+        d.ddpfPixelFormat.dwGBitMask = 0x07E0;
+        d.ddpfPixelFormat.dwBBitMask = 0x001F;
+        IDirectDrawSurface7* s = nullptr;
+        *hr = dd->CreateSurface(&d, &s, nullptr);
+        return s;
+    };
+    HRESULT hv, hn, ht, hr;
+    IDirectDrawSurface7* v = make(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_OWNDC | DDSCAPS_VIDEOMEMORY, &hv);
+    IDirectDrawSurface7* n = make(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_OWNDC, &hn);
+    IDirectDrawSurface7* t = make(DDSCAPS_TEXTURE | DDSCAPS_OWNDC | DDSCAPS_SYSTEMMEMORY, &ht);
+    CHECK(hv == DDERR_UNSUPPORTED && hn == DDERR_UNSUPPORTED && ht == DD_OK,
+          "OWNDC: video memory 0x%08lx, no memory named 0x%08lx, a system-memory texture 0x%08lx", hv, hn, ht);
+    if (v) v->Release();
+    if (n) n->Release();
+    if (t) t->Release();
+    IDirectDrawSurface7* s = make(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_OWNDC | DDSCAPS_SYSTEMMEMORY, &hr);
+    if (!s) return 1;
+    DWORD u0 = 99, u1 = 99, u2 = 99;
+    s->GetUniquenessValue(&u0);
+    HDC dc1 = nullptr, dc2 = nullptr;
+    const HRESULT g1 = s->GetDC(&dc1), g2 = s->GetDC(&dc2);
+    DDSURFACEDESC2 l = {};
+    l.dwSize = sizeof(l);
+    const HRESULT lk = s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr);
+    const HRESULT ul = SUCCEEDED(lk) ? s->Unlock(nullptr) : E_FAIL;
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0x1234;
+    const HRESULT fill = s->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    s->GetUniquenessValue(&u1);
+    CHECK(SUCCEEDED(hr) && g1 == DD_OK && g2 == DD_OK && dc1 && dc2 == dc1 && lk == DD_OK && ul == DD_OK && fill == DD_OK &&
+              !u0 && !u1,
+          "OWNDC: GetDC 0x%08lx, again 0x%08lx (the same DC: %d), locked 0x%08lx and filled 0x%08lx with it out, uniqueness "
+          "%lu and %lu",
+          g1, g2, dc1 && dc2 == dc1, lk, fill, u0, u1);
+    // The DC and the memory see each other's pixels with the DC still out (no GdiFlush), as on
+    // XP (fmtprobe section 31): the fill above on the DC, GDI's drawing at the next lock, a
+    // lock's write on the DC.
+    const COLORREF fillOnDc = GetPixel(dc1, 0, 0);
+    SetPixelV(dc1, 3, 2, RGB(255, 0, 0));
+    WORD px = 0;
+    l = {};
+    l.dwSize = sizeof(l);
+    if (SUCCEEDED(s->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+        px = reinterpret_cast<const WORD*>(static_cast<const BYTE*>(l.lpSurface) + 2 * l.lPitch)[3];
+        s->Unlock(nullptr);
+    }
+    l = {};
+    l.dwSize = sizeof(l);
+    if (SUCCEEDED(s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) {
+        static_cast<WORD*>(l.lpSurface)[5] = 0x001F;
+        s->Unlock(nullptr);
+    }
+    const COLORREF blueOnDc = GetPixel(dc1, 5, 0);
+    CHECK(fillOnDc == 0xA54510 && px == 0xF800 && blueOnDc == 0xFF0000,
+          "OWNDC, the DC out: the fill on it (0x%06lx), what GDI drew on it at the next lock (0x%04x), a lock's write on it "
+          "(0x%06lx)",
+          DWORD(fillOnDc), px, DWORD(blueOnDc));
+    {
+        // 8 bits with a palette (GDI draws on a copy there), with OWNDC and without, as on XP: the
+        // same both ways with the DC out; a palette change while it's out not on it, nor, with
+        // OWNDC, on the DC kept (the colours of its first GetDC); without, on the next DC.
+        PALETTEENTRY e[256] = {};
+        for (int i = 0; i < 256; i++) e[i] = {BYTE(i), BYTE(255 - i), BYTE(i * 7), 0};
+        const COLORREF e9 = RGB(e[9].peRed, e[9].peGreen, e[9].peBlue);
+        for (const bool own : {true, false}) {
+            DDSURFACEDESC2 d = {};
+            d.dwSize = sizeof(d);
+            d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | (own ? DWORD(DDSCAPS_OWNDC) : 0);
+            d.dwWidth = d.dwHeight = 16;
+            d.ddpfPixelFormat.dwSize = sizeof(d.ddpfPixelFormat);
+            d.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_PALETTEINDEXED8;
+            d.ddpfPixelFormat.dwRGBBitCount = 8;
+            IDirectDrawSurface7* p8 = nullptr;
+            dd->CreateSurface(&d, &p8, nullptr);
+            IDirectDrawPalette* pal = nullptr;
+            dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, e, &pal, nullptr);
+            if (!p8 || !pal || FAILED(p8->SetPalette(pal))) return 1;
+            auto at = [&](int x, int y) {  // an index through a lock, -1 where it fails
+                DDSURFACEDESC2 pl = {};
+                pl.dwSize = sizeof(pl);
+                if (FAILED(p8->Lock(nullptr, &pl, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return -1;
+                const int v = static_cast<const BYTE*>(pl.lpSurface)[y * pl.lPitch + x];
+                p8->Unlock(nullptr);
+                return v;
+            };
+            auto put = [&](int x, BYTE v) {  // an index written through a lock, on row 0
+                DDSURFACEDESC2 pl = {};
+                pl.dwSize = sizeof(pl);
+                const HRESULT h = p8->Lock(nullptr, &pl, DDLOCK_WAIT, nullptr);
+                if (SUCCEEDED(h)) {
+                    static_cast<BYTE*>(pl.lpSurface)[x] = v;
+                    p8->Unlock(nullptr);
+                }
+                return h;
+            };
+            put(2, 9);
+            HDC pdc = nullptr;
+            const HRESULT g = p8->GetDC(&pdc);
+            if (FAILED(g)) return 1;
+            const COLORREF first = GetPixel(pdc, 2, 0);
+            SetPixelV(pdc, 1, 1, RGB(e[5].peRed, e[5].peGreen, e[5].peBlue));
+            const HRESULT lk = put(3, 9);
+            const int gdiOut = SUCCEEDED(lk) ? at(1, 1) : -1;
+            const COLORREF written = SUCCEEDED(lk) ? GetPixel(pdc, 3, 0) : CLR_INVALID;
+            PALETTEENTRY n = {1, 2, 3, 0};
+            pal->SetEntries(0, 9, 1, &n);
+            const COLORREF changed = GetPixel(pdc, 2, 0);
+            const HRESULT rl = p8->ReleaseDC(pdc);
+            const int gdi = at(1, 1);
+            HDC again = nullptr;
+            p8->GetDC(&again);
+            const COLORREF next = again ? GetPixel(again, 2, 0) : CLR_INVALID;
+            if (again) p8->ReleaseDC(again);
+            CHECK(first == e9 && (own ? lk == DD_OK && gdiOut == 5 && written == e9 : lk == DDERR_SURFACEBUSY) && changed == e9 &&
+                      rl == DD_OK && gdi == 5 && next == (own ? e9 : RGB(1, 2, 3)),
+                  "8 bits%s: on the DC 0x%06lx; with it out a lock 0x%08lx (GDI's pixel %d, the lock's on the DC 0x%06lx); "
+                  "entry 9 changed with it out, on it 0x%06lx; released 0x%08lx (GDI's pixel %d); on the next DC 0x%06lx",
+                  own ? " with OWNDC" : "", DWORD(first), lk, gdiOut, DWORD(written), DWORD(changed), rl, gdi, DWORD(next));
+            pal->Release();
+            p8->Release();
+        }
+    }
+    HDC other = CreateCompatibleDC(nullptr);
+    const HRESULT ro = s->ReleaseDC(other);
+    DeleteDC(other);
+    const HRESULT r1 = s->ReleaseDC(dc1), r2 = s->ReleaseDC(dc1);
+    s->GetUniquenessValue(&u2);
+    HDC dc3 = nullptr;
+    const HRESULT g3 = s->GetDC(&dc3);
+    const HRESULT r3 = s->ReleaseDC(dc3);
+    HRESULT v1g = E_FAIL, v1r = E_FAIL;
+    IDirectDrawSurface* s1 = nullptr;
+    s->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<void**>(&s1));
+    if (s1) {
+        HDC dc4 = nullptr;
+        v1g = s1->GetDC(&dc4);
+        v1r = s1->ReleaseDC(nullptr);
+        s1->Release();
+    }
+    CHECK(ro == DDERR_INVALIDPARAMS && r1 == DD_OK && r2 == DD_OK && !u2 && g3 == DD_OK && dc3 == dc1 && r3 == DD_OK &&
+              v1g == DD_OK && v1r == DDERR_INVALIDPARAMS,
+          "OWNDC: ReleaseDC of another DC 0x%08lx, of its own 0x%08lx and again 0x%08lx (uniqueness %lu); GetDC after 0x%08lx "
+          "(the same DC: %d); through IDirectDrawSurface GetDC 0x%08lx, ReleaseDC(NULL) 0x%08lx",
+          ro, r1, r2, u2, g3, dc3 == dc1, v1g, v1r);
+    s->Release();
+    dd->Release();
+    return 0;
+}
+
+// Colour-key ranges (DDCKEY_COLORSPACE), as measured on XP (fmtprobe section 26): in video
+// memory set, made with (kept as the low value alone) and blitted with, compared colour by
+// colour; in system memory, the emulation layer's, none (a source override's low value alone,
+// a destination override's range refused).
+static int RunKeyRanges() {
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+    DDCAPS drv = {}, hel = {};
+    drv.dwSize = hel.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&drv, &hel);
+    const DWORD clr = DDCKEYCAPS_SRCBLTCLRSPACE | DDCKEYCAPS_DESTBLTCLRSPACE;
+    CHECK((drv.dwCKeyCaps & clr) == clr && hel.dwCKeyCaps == DDCKEYCAPS_SRCBLT,
+          "key ranges: the driver's key caps 0x%lx (colour-space blit keys), the emulation's 0x%lx", drv.dwCKeyCaps, hel.dwCKeyCaps);
+    struct Case {
+        const char* name;
+        DWORD bits, r, g, b, low, high, marker, solid;
+        DWORD px[8];
+        DWORD keyed[8], destKeyed[8], lowOnly[8];
+    };
+    static const Case kCases[] = {
+        {"5-6-5", 16, 0xF800, 0x07E0, 0x001F, 0x0841, 0x2104, 0xF81F, 0x07E0,
+         {0x0840, 0x0841, 0x1000, 0x1082, 0x2104, 0x2105, 0x1FFF, 0x0001},
+         {0x0840, 0xF81F, 0x1000, 0xF81F, 0xF81F, 0x2105, 0x1FFF, 0x0001},
+         {0x0840, 0x07E0, 0x1000, 0x07E0, 0x07E0, 0x2105, 0x1FFF, 0x0001},
+         {0x0840, 0xF81F, 0x1000, 0x1082, 0x2104, 0x2105, 0x1FFF, 0x0001}},
+        {"8-8-8 in 32 bits", 32, 0xFF0000, 0xFF00, 0xFF, 0x102030, 0x405060, 0xFF00FF, 0xFF00,
+         {0x10202F, 0x102030, 0x300000, 0x203040, 0x405060, 0x405061, 0x3FFFFF, 0x000001},
+         {0x10202F, 0xFF00FF, 0x300000, 0xFF00FF, 0xFF00FF, 0x405061, 0x3FFFFF, 0x000001},
+         {0x10202F, 0x00FF00, 0x300000, 0x00FF00, 0x00FF00, 0x405061, 0x3FFFFF, 0x000001},
+         {0x10202F, 0xFF00FF, 0x300000, 0x203040, 0x405060, 0x405061, 0x3FFFFF, 0x000001}}};
+    for (const Case& c : kCases) {
+        for (DWORD memory : {DWORD(DDSCAPS_VIDEOMEMORY), DWORD(DDSCAPS_SYSTEMMEMORY)}) {
+            const bool video = memory == DDSCAPS_VIDEOMEMORY;
+            auto make = [&](DWORD flags, const DDCOLORKEY* key, HRESULT* hr) {
+                DDSURFACEDESC2 d = {};
+                d.dwSize = sizeof(d);
+                d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | flags;
+                d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | memory;
+                d.dwWidth = 8;
+                d.dwHeight = 1;
+                d.ddpfPixelFormat.dwSize = sizeof(d.ddpfPixelFormat);
+                d.ddpfPixelFormat.dwFlags = DDPF_RGB;
+                d.ddpfPixelFormat.dwRGBBitCount = c.bits;
+                d.ddpfPixelFormat.dwRBitMask = c.r;
+                d.ddpfPixelFormat.dwGBitMask = c.g;
+                d.ddpfPixelFormat.dwBBitMask = c.b;
+                if (key) d.ddckCKSrcBlt = *key;
+                IDirectDrawSurface7* out = nullptr;
+                *hr = dd->CreateSurface(&d, &out, nullptr);
+                return out;
+            };
+            auto put = [&](IDirectDrawSurface7* s, const DWORD* v) {
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (FAILED(s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) return;
+                for (int x = 0; x < 8; x++)
+                    if (c.bits == 16) static_cast<WORD*>(l.lpSurface)[x] = WORD(v[x]);
+                    else static_cast<DWORD*>(l.lpSurface)[x] = v[x];
+                s->Unlock(nullptr);
+            };
+            auto fill = [&](IDirectDrawSurface7* s, DWORD v) {
+                const DWORD row[8] = {v, v, v, v, v, v, v, v};
+                put(s, row);
+            };
+            auto is = [&](IDirectDrawSurface7* s, const DWORD* want) {
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (FAILED(s->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) return false;
+                bool same = true;
+                for (int x = 0; x < 8; x++)
+                    same &= (c.bits == 16 ? static_cast<const WORD*>(l.lpSurface)[x] : static_cast<const DWORD*>(l.lpSurface)[x]) ==
+                            want[x];
+                s->Unlock(nullptr);
+                return same;
+            };
+            HRESULT hs, hd;
+            IDirectDrawSurface7* src = make(0, nullptr, &hs);
+            IDirectDrawSurface7* dst = make(0, nullptr, &hd);
+            if (!src || !dst) return 1;
+            const DWORD markers[8] = {c.marker, c.marker, c.marker, c.marker, c.marker, c.marker, c.marker, c.marker};
+            DDCOLORKEY range = {c.low, c.high}, got = {};
+            const HRESULT sk = src->SetColorKey(DDCKEY_SRCBLT | DDCKEY_COLORSPACE, &range);
+            const HRESULT gk = src->GetColorKey(DDCKEY_SRCBLT, &got);
+            put(src, c.px);
+            fill(dst, c.marker);
+            const HRESULT b1 = dst->Blt(nullptr, src, nullptr, DDBLT_KEYSRC | DDBLT_WAIT, nullptr);
+            const bool r1 = is(dst, video ? c.keyed : markers);
+            fill(dst, c.marker);
+            DDBLTFX fx = {};
+            fx.dwSize = sizeof(fx);
+            fx.ddckSrcColorkey = range;
+            const HRESULT b2 = dst->Blt(nullptr, src, nullptr, DDBLT_KEYSRCOVERRIDE | DDBLT_WAIT, &fx);
+            const bool r2 = is(dst, video ? c.keyed : c.lowOnly);
+            fill(dst, c.marker);
+            RECT all = {0, 0, 8, 1};
+            const HRESULT b3 = dst->BltFast(0, 0, src, &all, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT);
+            const bool r3 = is(dst, video ? c.keyed : markers);
+            CHECK((video ? sk == DD_OK && gk == DD_OK && got.dwColorSpaceLowValue == c.low && got.dwColorSpaceHighValue == c.high
+                         : sk == DDERR_NOCOLORKEYHW && gk == DDERR_NOCOLORKEY) &&
+                      b1 == (video ? DD_OK : DDERR_INVALIDPARAMS) && r1 && b2 == DD_OK && r2 &&
+                      b3 == (video ? DD_OK : DDERR_INVALIDPARAMS) && r3,
+                  "key ranges, %s in %s: SetColorKey(SRCBLT | COLORSPACE) 0x%08lx (GetColorKey 0x%08lx: %lx-%lx); Blt KEYSRC "
+                  "0x%08lx (%s), KEYSRCOVERRIDE 0x%08lx (%s), BltFast SRCCOLORKEY 0x%08lx (%s)",
+                  c.name, video ? "video memory" : "system memory", sk, gk, got.dwColorSpaceLowValue, got.dwColorSpaceHighValue,
+                  b1, r1 ? "as XP" : "not as XP", b2, r2 ? "as XP" : "not as XP", b3, r3 ? "as XP" : "not as XP");
+            fill(src, c.solid);
+            got = {};
+            const HRESULT dk = dst->SetColorKey(DDCKEY_DESTBLT | DDCKEY_COLORSPACE, &range);
+            const HRESULT gdk = dst->GetColorKey(DDCKEY_DESTBLT, &got);
+            put(dst, c.px);
+            const HRESULT b4 = dst->Blt(nullptr, src, nullptr, DDBLT_KEYDEST | DDBLT_WAIT, nullptr);
+            const bool r4 = is(dst, video ? c.destKeyed : c.px);
+            put(dst, c.px);
+            fx.ddckDestColorkey = range;
+            const HRESULT b5 = dst->Blt(nullptr, src, nullptr, DDBLT_KEYDESTOVERRIDE | DDBLT_WAIT, &fx);
+            const bool r5 = is(dst, video ? c.destKeyed : c.px);
+            src->Release();
+            dst->Release();
+            HRESULT hm;
+            IDirectDrawSurface7* made = make(DDSD_CKSRCBLT, &range, &hm);
+            DDCOLORKEY mk = {};
+            const HRESULT gm = made ? made->GetColorKey(DDCKEY_SRCBLT, &mk) : E_FAIL;
+            if (made) made->Release();
+            CHECK((video ? dk == DD_OK && gdk == DD_OK : dk == DDERR_NOCOLORKEYHW && gdk == DDERR_NOCOLORKEY) &&
+                      b4 == (video ? DD_OK : DDERR_INVALIDPARAMS) && r4 && b5 == (video ? DD_OK : DDERR_NOCOLORKEYHW) && r5 &&
+                      (video ? hm == DD_OK && gm == DD_OK && mk.dwColorSpaceLowValue == c.low && mk.dwColorSpaceHighValue == c.low
+                             : hm == DDERR_NOCOLORKEYHW),
+                  "key ranges, %s in %s: SetColorKey(DESTBLT | COLORSPACE) 0x%08lx (GetColorKey 0x%08lx); Blt KEYDEST 0x%08lx "
+                  "(%s), KEYDESTOVERRIDE 0x%08lx (%s); CreateSurface with a CKSRCBLT range 0x%08lx (its key %lx-%lx)",
+                  c.name, video ? "video memory" : "system memory", dk, gdk, b4, r4 ? "as XP" : "not as XP", b5,
+                  r5 ? "as XP" : "not as XP", hm, mk.dwColorSpaceLowValue, mk.dwColorSpaceHighValue);
+        }
+    }
+    dd->Release();
+    return 0;
+}
+
 static int RunLifetime() {
     IDirectDraw7* dd = nullptr;
     HRESULT hr = DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
@@ -3122,6 +3773,18 @@ static int RunLifetime() {
     return 0;
 }
 
+// Whether dd2d9 minimizes a fullscreen window that loses the focus, as its dd2d9.ini has it:
+// display=window is an ordinary window, and minimize=off (or auto under i3 or sway, which
+// pass their programs I3SOCK or SWAYSOCK) leaves it as it is.
+static bool MinimizesOnFocusLoss() {
+    char display[32] = "", minimize[32] = "";
+    GetPrivateProfileStringA("dd2d9", "display", "", display, sizeof(display), ".\\dd2d9.ini");
+    GetPrivateProfileStringA("dd2d9", "minimize", "auto", minimize, sizeof(minimize), ".\\dd2d9.ini");
+    if (!strcmp(display, "window") || !strcmp(minimize, "off")) return false;
+    const bool tiling = GetEnvironmentVariableA("I3SOCK", nullptr, 0) > 1 || GetEnvironmentVariableA("SWAYSOCK", nullptr, 0) > 1;
+    return !strcmp(minimize, "on") || !tiling;
+}
+
 // Leaving exclusive mode: DirectDraw 2+ restores the desktop mode, DirectDraw 1
 // keeps the game's mode (as Windows does; Jazz Jackrabbit 2 relies on it).
 static int RunCoopModes() {
@@ -3260,15 +3923,12 @@ static int RunCoopModes() {
         Pump();
         const bool ownerMin = IsIconic(owner) != FALSE, formMin = IsIconic(form) != FALSE,
                    formShown = IsWindowVisible(form) != FALSE;
-        // (display=window minimizes nothing: an ordinary window.)
-        char display[32] = "";
-        GetPrivateProfileStringA("dd2d9", "display", "", display, sizeof(display), ".\\dd2d9.ini");
-        const bool windowMode = !strcmp(display, "window");
-        CHECK(windowMode ? !ownerMin && !formMin && formShown : ownerMin && !formMin && !formShown,
+        CHECK(!MinimizesOnFocusLoss() ? !ownerMin && !formMin && formShown : ownerMin && !formMin && !formShown,
               "owned exclusive window, focus lost: its owner minimized (%d), it hidden with it (minimized %d, shown %d)",
               ownerMin, formMin, formShown);
-        SendMessageA(form, WM_ACTIVATEAPP, TRUE, 0);
-        Pump();
+        // Back as from its owner's taskbar button: the owner activated, the game told.
+        SetForegroundWindow(owner);
+        BringBack(form);
         CHECK(!IsIconic(owner) && IsWindowVisible(form) && !IsIconic(form),
               "...and both back with the focus (owner minimized %d, form shown %d)", IsIconic(owner) != FALSE,
               IsWindowVisible(form) != FALSE);
@@ -3333,15 +3993,12 @@ static int RunCoopModes() {
         Pump();
         SendMessageA(tool, WM_ACTIVATEAPP, FALSE, 0);
         Pump();
-        char display[32] = "";
-        GetPrivateProfileStringA("dd2d9", "display", "", display, sizeof(display), ".\\dd2d9.ini");
-        const bool windowMode = !strcmp(display, "window");
         const LONG bg = GetWindowLongA(tool, GWL_EXSTYLE);
         const bool min = IsIconic(tool) != FALSE;
-        CHECK(windowMode ? !min && (bg & WS_EX_TOOLWINDOW) : min && (bg & WS_EX_APPWINDOW) && !(bg & WS_EX_TOOLWINDOW),
+        CHECK(!MinimizesOnFocusLoss() ? !min && (bg & WS_EX_TOOLWINDOW)
+                                      : min && (bg & WS_EX_APPWINDOW) && !(bg & WS_EX_TOOLWINDOW),
               "tool window, focus lost: minimized (%d) with a taskbar button (ex style 0x%lx)", min, bg);
-        SendMessageA(tool, WM_ACTIVATEAPP, TRUE, 0);
-        Pump();
+        BringBack(tool);
         const LONG fg = GetWindowLongA(tool, GWL_EXSTYLE);
         CHECK(!IsIconic(tool) && (fg & WS_EX_TOOLWINDOW) && !(fg & WS_EX_APPWINDOW),
               "...and back with the focus, its own style again (ex style 0x%lx)", fg);
@@ -3419,17 +4076,40 @@ static uint32_t Rand() {
 }
 static int RandIn(int lo, int hi) { return lo + int(Rand() % uint32_t(hi - lo + 1)); }
 
+// A colour key as a blit compares it: the masked value in lo..hi, or, a range of an RGB
+// surface in video memory, each colour in its own (chan: the masks; as XP's driver compares one).
+struct FuzzKey {
+    uint32_t lo = 0, hi = 0;
+    const uint32_t* chan = nullptr;
+    bool Hit(uint32_t v, uint32_t keyMask) const {
+        if (!chan) return (v & keyMask) >= lo && (v & keyMask) <= hi;
+        for (int c = 0; c < 3; c++)
+            if ((v & chan[c]) < (lo & chan[c]) || (v & chan[c]) > (hi & chan[c])) return false;
+        return true;
+    }
+    // A value in it (with the bits outside the key mask as `v` has them).
+    uint32_t In(uint32_t v, uint32_t keyMask) const {
+        if (!chan) return (v & ~keyMask) | (lo + Rand() % (hi - lo + 1));
+        v &= ~(chan[0] | chan[1] | chan[2]);
+        for (int c = 0; c < 3; c++) {
+            const uint32_t shift = uint32_t(__builtin_ctz(chan[c])), a = (lo & chan[c]) >> shift, b = (hi & chan[c]) >> shift;
+            v |= (a + Rand() % (b - a + 1)) << shift;
+        }
+        return v;
+    }
+};
+
 // Runs of key-range values and of random values, so that 16-byte chunks are
 // sometimes all transparent, all opaque, or mixed.
 // Bits outside the key mask (alpha, the top bit of 555) are random everywhere.
-static void FuzzFill(FuzzSurface& f, uint32_t valueMask, uint32_t keyMask, uint32_t keyLo, uint32_t keyHi) {
+static void FuzzFill(FuzzSurface& f, uint32_t valueMask, uint32_t keyMask, const FuzzKey& key) {
     size_t i = 0;
     while (i < f.px.size()) {
         const int run = RandIn(1, 48);
-        const bool key = Rand() % 2;
+        const bool keyed = Rand() % 2;
         for (int k = 0; k < run && i < f.px.size(); k++, i++) {
             uint32_t v = Rand() & valueMask;
-            if (key) v = (v & ~keyMask) | (keyLo + Rand() % (keyHi - keyLo + 1));
+            if (keyed) v = key.In(v, keyMask);
             f.px[i] = v & valueMask;
         }
     }
@@ -3454,26 +4134,50 @@ static int RunFuzz() {
         {"16-bit 555", 16, DDPF_RGB, 0x7C00, 0x03E0, 0x001F, 0x7FFF},
         {"32-bit", 32, DDPF_RGB, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF},
     };
-    // Small surfaces; then surfaces as wide and as tall as they come.
+    // Small surfaces; then surfaces as wide and as tall as they come; then small ones in video
+    // memory, where key ranges are taken (ddraw.dll's software blitter, in system memory, has
+    // none) and compared colour by colour.
     const struct {
         const char* name;
         int sizes[2][2];
         int iters, maxSw, maxSh, maxDw;
+        DWORD memory;
     } passes[] = {
-        {"", {{83, 41}, {97, 53}}, 3000, 70, 30, 90},
-        {", 65535 wide", {{65535, 2}, {65535, 3}}, 150, 65535, 3, 65535},
-        {", 65535 tall", {{2, 65535}, {3, 65535}}, 150, 3, 65535, 3},
+        {"", {{83, 41}, {97, 53}}, 3000, 70, 30, 90, DDSCAPS_SYSTEMMEMORY},
+        {", 65535 wide", {{65535, 2}, {65535, 3}}, 150, 65535, 3, 65535, DDSCAPS_SYSTEMMEMORY},
+        {", 65535 tall", {{2, 65535}, {3, 65535}}, 150, 3, 65535, 3, DDSCAPS_SYSTEMMEMORY},
+        {", video memory", {{83, 41}, {97, 53}}, 3000, 70, 30, 90, DDSCAPS_VIDEOMEMORY},
     };
     for (const auto& pass : passes) {
         for (const Fmt& fm : fmts) {
             const uint32_t valueMask = fm.bpp == 32 ? 0xFFFFFFFFu : ((1u << fm.bpp) - 1);
+            const bool video = pass.memory == DDSCAPS_VIDEOMEMORY;
+            const uint32_t chan[3] = {fm.r, fm.g, fm.b};
+            const bool channels = video && fm.r;  // (an RGB format's ranges there)
+            // A key: one colour, or now and then a range: as a number, or (channels) each
+            // colour's own, of up to `spread` steps of it.
+            auto makeKey = [&](int oneIn, uint32_t spread) {
+                FuzzKey k;
+                k.lo = k.hi = Rand() & fm.keyMask;
+                if (Rand() % uint32_t(oneIn)) return k;
+                if (!channels) {
+                    k.hi = std::min<uint32_t>(fm.keyMask, k.lo + Rand() % spread);
+                    return k;
+                }
+                k.chan = chan;
+                for (uint32_t m : chan) {
+                    const uint32_t shift = uint32_t(__builtin_ctz(m)), most = m >> shift, a = (k.lo & m) >> shift;
+                    k.hi = (k.hi & ~m) | (std::min<uint32_t>(most, a + Rand() % (spread / 64 + 2)) << shift);
+                }
+                return k;
+            };
             FuzzSurface surf[2];
             const auto& sizes = pass.sizes;
             for (int k = 0; k < 2; k++) {
                 DDSURFACEDESC2 d = {};
                 d.dwSize = sizeof(d);
                 d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
-                d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+                d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | pass.memory;
                 d.dwWidth = DWORD(sizes[k][0]);
                 d.dwHeight = DWORD(sizes[k][1]);
                 d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
@@ -3497,28 +4201,26 @@ static int RunFuzz() {
             std::vector<uint32_t> got;
             for (int iter = 0; iter < pass.iters; iter++) {
                 // Keys: a single color, or a range (DDCKEY_COLORSPACE).
-                uint32_t skLo = Rand() & fm.keyMask, skHi = skLo;
-                if (Rand() % 4 == 0) skHi = std::min<uint32_t>(fm.keyMask, skLo + Rand() % 300);
-                uint32_t dkLo = Rand() & fm.keyMask, dkHi = dkLo;
-                if (Rand() % 3 == 0) dkHi = std::min<uint32_t>(fm.keyMask, dkLo + Rand() % 5000);
+                FuzzKey sk = makeKey(4, 300), dk = makeKey(3, 5000);
                 if (iter % 40 == 0) {  // new contents now and then
-                    FuzzFill(surf[0], valueMask, fm.keyMask, skLo, skHi);
-                    FuzzFill(surf[1], valueMask, fm.keyMask, dkLo, dkHi);
+                    FuzzFill(surf[0], valueMask, fm.keyMask, sk);
+                    FuzzFill(surf[1], valueMask, fm.keyMask, dk);
                 }
                 const bool same = Rand() % 8 == 0;  // within one surface (overlapping copies)
                 FuzzSurface& src = surf[same ? 1 : 0];
                 FuzzSurface& dst = surf[1];
-                // A range refused (DDERR_NOCOLORKEYHW: ddraw.dll's software blitter has none, nor
-                // has dd2d9): its low value alone, as a game falling back would set it.
-                DDCOLORKEY sk = {skLo, skHi}, dk = {dkLo, dkHi};
-                if (FAILED(src.s->SetColorKey(DDCKEY_SRCBLT | (skHi != skLo ? DDCKEY_COLORSPACE : 0), &sk))) {
-                    sk.dwColorSpaceHighValue = skHi = skLo;
-                    src.s->SetColorKey(DDCKEY_SRCBLT, &sk);
-                }
-                if (FAILED(dst.s->SetColorKey(DDCKEY_DESTBLT | (dkHi != dkLo ? DDCKEY_COLORSPACE : 0), &dk))) {
-                    dk.dwColorSpaceHighValue = dkHi = dkLo;
-                    dst.s->SetColorKey(DDCKEY_DESTBLT, &dk);
-                }
+                // A range refused (DDERR_NOCOLORKEYHW in system memory: ddraw.dll's software
+                // blitter has none): its low value alone, as a game falling back would set it.
+                auto setKey = [&](IDirectDrawSurface7* s, DWORD which, FuzzKey& k) {
+                    DDCOLORKEY c = {k.lo, k.hi};
+                    if (FAILED(s->SetColorKey(which | (k.hi != k.lo ? DDCKEY_COLORSPACE : 0), &c))) {
+                        c.dwColorSpaceHighValue = k.hi = k.lo;
+                        k.chan = nullptr;
+                        s->SetColorKey(which, &c);
+                    }
+                };
+                setKey(src.s, DDCKEY_SRCBLT, sk);
+                setKey(dst.s, DDCKEY_DESTBLT, dk);
 
                 const int sw = RandIn(1, std::min(src.w, pass.maxSw)), sh = RandIn(1, std::min(src.h, pass.maxSh));
                 const bool stretch = Rand() % 4 == 0;
@@ -3533,17 +4235,24 @@ static int RunFuzz() {
                 DDBLTFX fx = {};
                 fx.dwSize = sizeof(fx);
                 bool useSrc = false, useDst = false;
-                uint32_t eLo = skLo, eHi = skHi;
+                FuzzKey used = sk;
                 if (keyMode == 1 || keyMode == 4) {
                     flags |= DDBLT_KEYSRC;
                     useSrc = true;
                 }
                 if (keyMode == 2) {
-                    // An override key is one color: the high value is ignored.
+                    // An override's range in video memory; in system memory one colour, the high
+                    // value ignored.
                     flags |= DDBLT_KEYSRCOVERRIDE;
-                    fx.ddckSrcColorkey.dwColorSpaceLowValue = Rand() % 2 ? skLo : (Rand() & valueMask);
-                    fx.ddckSrcColorkey.dwColorSpaceHighValue = Rand();
-                    eLo = eHi = fx.ddckSrcColorkey.dwColorSpaceLowValue & fm.keyMask;
+                    if (video) {
+                        used = Rand() % 2 ? sk : makeKey(2, 300);
+                        fx.ddckSrcColorkey = {used.lo, used.hi};
+                    } else {
+                        fx.ddckSrcColorkey.dwColorSpaceLowValue = Rand() % 2 ? sk.lo : (Rand() & valueMask);
+                        fx.ddckSrcColorkey.dwColorSpaceHighValue = Rand();
+                        used = FuzzKey();
+                        used.lo = used.hi = fx.ddckSrcColorkey.dwColorSpaceLowValue & fm.keyMask;
+                    }
                     useSrc = true;
                 }
                 if (keyMode == 3 || keyMode == 4) {
@@ -3566,9 +4275,8 @@ static int RunFuzz() {
                     for (int x = dr.left; x < dr.right; x++) {
                         const int sx = sr.left + xmap[size_t(x - dr.left)];
                         const uint32_t v = srcBefore[size_t(sy) * src.w + sx];
-                        if (useSrc && (v & fm.keyMask) >= eLo && (v & fm.keyMask) <= eHi) continue;
-                        const uint32_t d = dst.px[size_t(y) * dst.w + x] & fm.keyMask;
-                        if (useDst && (d < dkLo || d > dkHi)) continue;
+                        if (useSrc && used.Hit(v, fm.keyMask)) continue;
+                        if (useDst && !dk.Hit(dst.px[size_t(y) * dst.w + x], fm.keyMask)) continue;
                         dst.px[size_t(y) * dst.w + x] = v;
                     }
                 }
@@ -4167,8 +4875,7 @@ static int RunMouse() {
             g_lastSize = -1;
             g_sizeClient = RECT{-1, -1, -1, -1};
             g_sizeScreenW = -1;
-            SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
-            Pump();
+            BringBack(hwnd);
             // While its window is restored, the game asks of its screen already in the mode
             // (Heroes of the Three Kingdoms 3 blitted its movie centred in 1920x1080).
             CHECK(g_sizeScreenW == -1 || (g_sizeClient.right == 640 && g_sizeClient.bottom == 480 && g_sizeScreenW == 640),
@@ -4364,6 +5071,769 @@ static int RunOverlayWindowed() {
     return 0;
 }
 
+// IDirectDrawColorControl as the DirectX 7 SDK has it (the Voodoo3 has none: XP's answer was
+// E_NOINTERFACE), on the primary and on overlays: the caps, where it's handed out, the defaults
+// and the flags supported, the checks, and the picture: no saturation (or colour off) grey at
+// BT.601's luma, brightness lifting each channel by its IRE (a hundredth of white each).
+static int RunColorControls() {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd = MakeWindow(WS_POPUP | WS_VISIBLE, sw, sh);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    DDCAPS drv = {}, hel = {};
+    drv.dwSize = hel.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&drv, &hel);
+    const DWORD both = DDCAPS2_COLORCONTROLPRIMARY | DDCAPS2_COLORCONTROLOVERLAY;
+    CHECK((drv.dwCaps2 & both) == both && !(hel.dwCaps2 & both), "colour controls: driver caps2 0x%lx, emulation 0x%lx", drv.dwCaps2,
+          hel.dwCaps2);
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    dd->SetDisplayMode(sw, sh, 32, 0, 0);
+    Pump();
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    IDirectDrawSurface7* ov = MakeOverlay(dd, 16, 16, MAKEFOURCC('Y', 'U', 'Y', '2'));
+    IDirectDrawSurface7* off = Make32(dd, 16, 16);
+    if (!prim || !ov || !off) return 1;
+    IDirectDrawColorControl *pc = nullptr, *oc = nullptr, *xc = nullptr;
+    const HRESULT hp = prim->QueryInterface(IID_IDirectDrawColorControl, reinterpret_cast<void**>(&pc));
+    const HRESULT ho = ov->QueryInterface(IID_IDirectDrawColorControl, reinterpret_cast<void**>(&oc));
+    const HRESULT hx = off->QueryInterface(IID_IDirectDrawColorControl, reinterpret_cast<void**>(&xc));
+    if (xc) xc->Release();
+    CHECK(hp == DD_OK && ho == DD_OK && hx == E_NOINTERFACE,
+          "IDirectDrawColorControl: from the primary 0x%08lx, an overlay 0x%08lx, an offscreen surface 0x%08lx", hp, ho, hx);
+    if (!pc || !oc) return 1;
+    DDCOLORCONTROL c = {};
+    c.dwSize = sizeof(c);
+    const HRESULT g0 = pc->GetColorControls(&c);
+    const DWORD flags = DDCOLOR_BRIGHTNESS | DDCOLOR_CONTRAST | DDCOLOR_HUE | DDCOLOR_SATURATION | DDCOLOR_COLORENABLE;
+    DDCOLORCONTROL bad = {};
+    const HRESULT gz = pc->GetColorControls(&bad), gn = pc->GetColorControls(nullptr);
+    CHECK(g0 == DD_OK && c.dwFlags == flags && c.lBrightness == 750 && c.lContrast == 10000 && !c.lHue && c.lSaturation == 10000 &&
+              c.lSharpness == 5 && c.lGamma == 1 && c.lColorEnable == 1 && gz == DDERR_INVALIDPARAMS && gn == DDERR_INVALIDPARAMS,
+          "GetColorControls: 0x%08lx, flags 0x%lx, brightness %ld, contrast %ld, hue %ld, saturation %ld, sharpness %ld, gamma %ld, "
+          "colour %ld; dwSize 0 0x%08lx, NULL 0x%08lx",
+          g0, c.dwFlags, c.lBrightness, c.lContrast, c.lHue, c.lSaturation, c.lSharpness, c.lGamma, c.lColorEnable, gz, gn);
+    // Out of their ranges: refused, nothing changed.
+    struct Bad {
+        DWORD flag;
+        LONG DDCOLORCONTROL::*member;
+        LONG value;
+    };
+    static const Bad kBad[] = {{DDCOLOR_BRIGHTNESS, &DDCOLORCONTROL::lBrightness, 10001},
+                               {DDCOLOR_BRIGHTNESS, &DDCOLORCONTROL::lBrightness, -1},
+                               {DDCOLOR_CONTRAST, &DDCOLORCONTROL::lContrast, 20001},
+                               {DDCOLOR_HUE, &DDCOLORCONTROL::lHue, 181},
+                               {DDCOLOR_HUE, &DDCOLORCONTROL::lHue, -181},
+                               {DDCOLOR_SATURATION, &DDCOLORCONTROL::lSaturation, 20001},
+                               {DDCOLOR_COLORENABLE, &DDCOLORCONTROL::lColorEnable, 2}};
+    bool refused = true;
+    for (const Bad& b : kBad) {
+        DDCOLORCONTROL x = {};
+        x.dwSize = sizeof(x);
+        x.dwFlags = b.flag;
+        x.*b.member = b.value;
+        refused &= pc->SetColorControls(&x) == DDERR_INVALIDPARAMS;
+    }
+    DDCOLORCONTROL now = {};
+    now.dwSize = sizeof(now);
+    pc->GetColorControls(&now);
+    CHECK(refused && !memcmp(&now, &c, sizeof(c)), "SetColorControls: values out of range refused (%d), the controls as they were",
+          refused);
+    // The picture: the primary filled with 200, 100, 50, shown through its controls.
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0xC86432;
+    prim->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    auto about = [](COLORREF v, int r, int g, int b) {
+        return abs(int(GetRValue(v)) - r) <= 2 && abs(int(GetGValue(v)) - g) <= 2 && abs(int(GetBValue(v)) - b) <= 2;
+    };
+    // The screen there, once it shows r, g, b or after two seconds (the first frame through
+    // the colour pass waits for its shader to be made).
+    auto shown = [&](int x, int y, int r, int g, int b) {
+        COLORREF v = 0;
+        for (int i = 0; i < 100; i++) {
+            Pump();
+            Sleep(20);
+            HDC sdc = GetDC(nullptr);
+            v = GetPixel(sdc, x, y) & 0xFFFFFF;
+            ReleaseDC(nullptr, sdc);
+            if (about(v, r, g, b)) break;
+        }
+        return v;
+    };
+    const COLORREF plain = shown(sw / 2, sh / 2, 200, 100, 50);
+    auto set = [&](IDirectDrawColorControl* cc, DWORD f, LONG v) {
+        DDCOLORCONTROL x = {};
+        x.dwSize = sizeof(x);
+        x.dwFlags = f;
+        x.lBrightness = x.lContrast = x.lHue = x.lSaturation = x.lColorEnable = v;
+        return cc->SetColorControls(&x);
+    };
+    const HRESULT s0 = set(pc, DDCOLOR_SATURATION, 0);
+    const COLORREF grey = shown(sw / 2, sh / 2, 124, 124, 124);  // BT.601's luma of 200, 100, 50: 124
+    const HRESULT s1 = set(pc, DDCOLOR_SATURATION | DDCOLOR_BRIGHTNESS, 10000);  // two at once (the rest left)
+    DDCOLORCONTROL two = {};
+    two.dwSize = sizeof(two);
+    pc->GetColorControls(&two);
+    set(pc, DDCOLOR_SATURATION, 10000);
+    DDCOLORCONTROL lift = {};
+    lift.dwSize = sizeof(lift);
+    lift.dwFlags = DDCOLOR_BRIGHTNESS;
+    lift.lBrightness = 1750;  // 10 IRE more than 7.5: 25.5 a channel
+    const HRESULT s2 = pc->SetColorControls(&lift);
+    const COLORREF lifted = shown(sw / 2, sh / 2, 226, 126, 76);
+    lift.lBrightness = 750;
+    pc->SetColorControls(&lift);
+    const HRESULT s3 = set(pc, DDCOLOR_COLORENABLE, 0);
+    const COLORREF colourless = shown(sw / 2, sh / 2, 124, 124, 124);
+    set(pc, DDCOLOR_COLORENABLE, 1);
+    const COLORREF back = shown(sw / 2, sh / 2, 200, 100, 50);
+    CHECK(about(plain, 200, 100, 50) && s0 == DD_OK && about(grey, 124, 124, 124) && s1 == DD_OK && two.lSaturation == 10000 &&
+              two.lBrightness == 10000 && two.lContrast == 10000 && s2 == DD_OK && about(lifted, 226, 126, 76) && s3 == DD_OK &&
+              about(colourless, 124, 124, 124) && about(back, 200, 100, 50),
+          "the primary's colour controls: shown %06lx; no saturation %06lx; set two at once (0x%08lx: brightness %ld, saturation "
+          "%ld, contrast %ld); 10 IRE brighter %06lx; colour off %06lx; back %06lx",
+          plain, grey, s1, two.lBrightness, two.lSaturation, two.lContrast, lifted, colourless, back);
+    // An overlay of BT.601 red (Y 81, U 90, V 240) over the middle: grey without saturation, as
+    // the primary's own controls (the defaults again) leave it.
+    d = {};
+    d.dwSize = sizeof(d);
+    if (SUCCEEDED(ov->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) {
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 8; x++) reinterpret_cast<DWORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] = 0xF0515A51;
+        ov->Unlock(nullptr);
+    }
+    RECT r = {sw / 2 - 50, sh / 2 - 50, sw / 2 + 50, sh / 2 + 50};
+    const HRESULT up = ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW, nullptr);
+    const COLORREF red = shown(sw / 2, sh / 2, 255, 0, 0);
+    const HRESULT so = set(oc, DDCOLOR_SATURATION, 0);
+    const COLORREF ovGrey = shown(sw / 2, sh / 2, 76, 76, 76);
+    const COLORREF around = shown(sw / 2 - 80, sh / 2, 200, 100, 50);
+    CHECK(up == DD_OK && about(red, 255, 0, 0) && so == DD_OK && about(ovGrey, 76, 76, 76) && about(around, 200, 100, 50),
+          "an overlay's colour controls: red shown %06lx; without saturation %06lx (BT.601's luma of red: 76); the primary "
+          "beside it %06lx",
+          red, ovGrey, around);
+    ov->UpdateOverlay(nullptr, prim, nullptr, DDOVER_HIDE, nullptr);
+    oc->Release();
+    pc->Release();
+    off->Release();
+    ov->Release();
+    prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    // An emulation-only object's primary: none (its caps have no colour controls).
+    IDirectDraw7* emu = nullptr;
+    DirectDrawCreateEx(reinterpret_cast<GUID*>(DDCREATE_EMULATIONONLY), reinterpret_cast<void**>(&emu), IID_IDirectDraw7, nullptr);
+    if (emu) {
+        emu->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+        d = {};
+        d.dwSize = sizeof(d);
+        d.dwFlags = DDSD_CAPS;
+        d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+        IDirectDrawSurface7* ep = nullptr;
+        emu->CreateSurface(&d, &ep, nullptr);
+        IDirectDrawColorControl* ec = nullptr;
+        const HRESULT he = ep ? ep->QueryInterface(IID_IDirectDrawColorControl, reinterpret_cast<void**>(&ec)) : E_FAIL;
+        if (ec) ec->Release();
+        CHECK(he == E_NOINTERFACE, "an emulation-only object's primary: IDirectDrawColorControl 0x%08lx", he);
+        if (ep) ep->Release();
+        emu->Release();
+    }
+    return 0;
+}
+
+// UpdateOverlay's bob, interleaving and effects flags, and field flips, as measured on XP
+// (fmtprobe section 27, a 64x64 YUY2 overlay with a back buffer, in normal mode): hardware bob
+// and bob together refused, autoflipping refused (it needs a video port); the rest taken, and
+// Flip's DDFLIP_ODD and DDFLIP_EVEN, with bob or without.
+static int RunOverlayBob() {
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    IDirectDrawSurface7* ov =
+        MakeOverlay(dd, 64, 64, MAKEFOURCC('Y', 'U', 'Y', '2'), DDSCAPS_VIDEOMEMORY | DDSCAPS_FLIP | DDSCAPS_COMPLEX, 1);
+    if (!prim || !ov) return 1;
+    const RECT dst = {0, 0, 64, 64};
+    auto show = [&](DWORD flags, DDOVERLAYFX* fx) {
+        const HRESULT r = ov->UpdateOverlay(nullptr, prim, const_cast<RECT*>(&dst), DDOVER_SHOW | flags, fx);
+        ov->UpdateOverlay(nullptr, prim, nullptr, DDOVER_HIDE, nullptr);
+        return r;
+    };
+    struct Flag {
+        const char* name;
+        DWORD flags;
+        HRESULT xp;
+    };
+    static const Flag kBob[] = {{"BOB", DDOVER_BOB, DD_OK},
+                                {"BOB | INTERLEAVED", DDOVER_BOB | DDOVER_INTERLEAVED, DD_OK},
+                                {"INTERLEAVED", DDOVER_INTERLEAVED, DD_OK},
+                                {"BOBHARDWARE", DDOVER_BOBHARDWARE, DD_OK},
+                                {"BOB | BOBHARDWARE", DDOVER_BOB | DDOVER_BOBHARDWARE, DDERR_INVALIDPARAMS},
+                                {"OVERRIDEBOBWEAVE", DDOVER_OVERRIDEBOBWEAVE, DD_OK},
+                                {"BOB | OVERRIDEBOBWEAVE", DDOVER_BOB | DDOVER_OVERRIDEBOBWEAVE, DD_OK},
+                                {"AUTOFLIP", DDOVER_AUTOFLIP, DDERR_INVALIDPARAMS}};
+    for (const Flag& f : kBob) {
+        const HRESULT r = show(f.flags, nullptr);
+        CHECK(r == f.xp, "UpdateOverlay(SHOW | %s): 0x%08lx", f.name, r);
+    }
+    for (const bool bob : {true, false}) {
+        const DWORD how = DDOVER_SHOW | (bob ? DDOVER_BOB | DDOVER_INTERLEAVED : 0);
+        const HRESULT shown = ov->UpdateOverlay(nullptr, prim, const_cast<RECT*>(&dst), how, nullptr);
+        const HRESULT odd = ov->Flip(nullptr, DDFLIP_ODD | DDFLIP_WAIT), even = ov->Flip(nullptr, DDFLIP_EVEN | DDFLIP_WAIT);
+        const HRESULT both = ov->Flip(nullptr, DDFLIP_ODD | DDFLIP_EVEN | DDFLIP_WAIT), plain = ov->Flip(nullptr, DDFLIP_WAIT);
+        ov->UpdateOverlay(nullptr, prim, nullptr, DDOVER_HIDE, nullptr);
+        CHECK(shown == DD_OK && odd == DD_OK && even == DD_OK && both == DD_OK && plain == DD_OK,
+              "shown%s (0x%08lx): Flip(ODD) 0x%08lx, Flip(EVEN) 0x%08lx, Flip(ODD | EVEN) 0x%08lx, Flip(0) 0x%08lx",
+              bob ? " with BOB | INTERLEAVED" : "", shown, odd, even, both, plain);
+    }
+    // The alpha flags (8-bit constants of 0x80), and the effects (DDOVERFX_DEINTERLACE, 8, and
+    // the unnamed 0x10 too): all taken.
+    static const Flag kAlpha[] = {{"ALPHADEST", DDOVER_ALPHADEST, DD_OK},
+                                  {"ALPHADESTCONSTOVERRIDE", DDOVER_ALPHADESTCONSTOVERRIDE, DD_OK},
+                                  {"ALPHADESTNEG", DDOVER_ALPHADESTNEG, DD_OK},
+                                  {"ALPHADESTSURFACEOVERRIDE", DDOVER_ALPHADESTSURFACEOVERRIDE, DD_OK},
+                                  {"ALPHAEDGEBLEND", DDOVER_ALPHAEDGEBLEND, DD_OK},
+                                  {"ALPHASRC", DDOVER_ALPHASRC, DD_OK},
+                                  {"ALPHASRCCONSTOVERRIDE", DDOVER_ALPHASRCCONSTOVERRIDE, DD_OK},
+                                  {"ALPHASRCNEG", DDOVER_ALPHASRCNEG, DD_OK},
+                                  {"ALPHASRCSURFACEOVERRIDE", DDOVER_ALPHASRCSURFACEOVERRIDE, DD_OK}};
+    for (const Flag& f : kAlpha) {
+        DDOVERLAYFX fx = {};
+        fx.dwSize = sizeof(fx);
+        fx.dwAlphaDestConstBitDepth = fx.dwAlphaSrcConstBitDepth = 8;
+        fx.dwAlphaDestConst = fx.dwAlphaSrcConst = 0x80;
+        fx.dwAlphaEdgeBlendBitDepth = 8;
+        fx.dwAlphaEdgeBlend = 0x80;
+        const HRESULT r = show(DDOVER_DDFX | f.flags, &fx);
+        CHECK(r == f.xp, "UpdateOverlay(SHOW | DDFX | %s): 0x%08lx", f.name, r);
+    }
+    static const Flag kFx[] = {{"ARITHSTRETCHY", DDOVERFX_ARITHSTRETCHY, DD_OK},
+                               {"MIRRORLEFTRIGHT", DDOVERFX_MIRRORLEFTRIGHT, DD_OK},
+                               {"MIRRORUPDOWN", DDOVERFX_MIRRORUPDOWN, DD_OK},
+                               {"DEINTERLACE", 0x8, DD_OK},
+                               {"0x10", 0x10, DD_OK}};
+    for (const Flag& f : kFx) {
+        DDOVERLAYFX fx = {};
+        fx.dwSize = sizeof(fx);
+        fx.dwDDFX = f.flags;
+        const HRESULT r = show(DDOVER_DDFX, &fx);
+        CHECK(r == f.xp, "UpdateOverlay(SHOW | DDFX), dwDDFX %s: 0x%08lx", f.name, r);
+    }
+    ov->Release();
+    prim->Release();
+    dd->Release();
+    return 0;
+}
+
+// The video port container (dvp.h, not in the headers used here), as measured on XP with the
+// Voodoo3 (fmtprobe section 28): handed out from any interface, one per object with a count of
+// its own; one port, its caps, connections and status; no port made (E_FAIL); the checks.
+struct VpConnect {
+    DWORD dwSize, dwPortWidth;
+    GUID guidTypeID;
+    DWORD dwFlags;
+    ULONG_PTR dwReserved1;
+};
+struct VpCaps {
+    DWORD dwSize, dwFlags, dwMaxWidth, dwMaxVBIWidth, dwMaxHeight, dwVideoPortID, dwCaps, dwFX, dwNumAutoFlipSurfaces,
+        dwAlignVideoPortBoundary, dwAlignVideoPortPrescaleWidth, dwAlignVideoPortCropBoundary, dwAlignVideoPortCropWidth,
+        dwPreshrinkXStep, dwPreshrinkYStep, dwNumVBIAutoFlipSurfaces, dwNumPreferredAutoflip;
+    WORD wNumFilterTapsX, wNumFilterTapsY;
+};
+struct VpDesc {
+    DWORD dwSize, dwFieldWidth, dwVBIWidth, dwFieldHeight, dwMicrosecondsPerField, dwMaxPixelsPerSecond, dwVideoPortID,
+        dwReserved1;
+    VpConnect VideoPortType;
+    ULONG_PTR dwReserved2, dwReserved3;
+};
+struct VpStatus {
+    DWORD dwSize;
+    BOOL bInUse;
+    DWORD dwFlags, dwReserved1;
+    VpConnect VideoPortType;
+    ULONG_PTR dwReserved2, dwReserved3;
+};
+using VpEnumCb = HRESULT(WINAPI*)(VpCaps*, void*);
+struct IVpContainer : IUnknown {
+    virtual HRESULT WINAPI CreateVideoPort(DWORD, VpDesc*, IUnknown**, IUnknown*) = 0;
+    virtual HRESULT WINAPI EnumVideoPorts(DWORD, VpCaps*, void*, VpEnumCb) = 0;
+    virtual HRESULT WINAPI GetVideoPortConnectInfo(DWORD, DWORD*, VpConnect*) = 0;
+    virtual HRESULT WINAPI QueryVideoPortStatus(DWORD, VpStatus*) = 0;
+};
+
+// XP's, word by word: the port's caps as EnumVideoPorts hands them over.
+static const DWORD kVpCaps[18] = {0x48, 0xbf, 0x1000, 0x1000, 0x800, 0, 0x2a0f, 0xf00c9, 0xa, 0, 0, 0, 0, 0, 0, 0xa, 3, 0};
+struct VpSeen {  // what EnumVideoPorts' callback was given
+    int n;
+    bool caps;
+};
+static HRESULT WINAPI VpSeenCb(VpCaps* caps, void* ctx) {
+    auto* s = static_cast<VpSeen*>(ctx);
+    s->n++;
+    s->caps = !memcmp(caps, kVpCaps, sizeof(kVpCaps));
+    return DDENUMRET_OK;
+}
+
+static int RunVideoPorts() {
+    static const GUID kContainer = {0x6C142760, 0xA733, 0x11CE, {0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60}};
+    static const GUID kAccelerators = {0xACA12120, 0x3356, 0x11D1, {0x8F, 0xCF, 0x00, 0xC0, 0x4F, 0xC2, 0x9B, 0x4E}};
+    // XP's connections, word by word.
+    static const DWORD kConn[4][8] = {{0x20, 8, 0x54f39980, 0x11cfda60, 0xa000069b, 0xb8a303c9, 0x1e, 0},
+                                      {0x20, 8, 0x92783220, 0x11cfda60, 0xa000069b, 0xb8a303c9, 0x1e, 0},
+                                      {0x20, 8, 0xa07a02e0, 0x11cfda60, 0xa000069b, 0xb8a303c9, 0x1e, 0},
+                                      {0x20, 8, 0xe09c77e0, 0x11cfda60, 0xa000069b, 0xb8a303c9, 0x1e, 0}};
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(nullptr, DDSCL_NORMAL);
+    DDCAPS drv = {}, hel = {};
+    drv.dwSize = hel.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&drv, &hel);
+    auto refs = [&]() {
+        dd->AddRef();
+        return dd->Release();
+    };
+    IUnknown* va = nullptr;
+    const HRESULT hva = dd->QueryInterface(kAccelerators, reinterpret_cast<void**>(&va));
+    if (va) va->Release();
+    IDirectDraw* dd1 = nullptr;
+    DirectDrawCreate(nullptr, &dd1, nullptr);
+    IVpContainer* c1 = nullptr;
+    const HRESULT h1 = dd1 ? dd1->QueryInterface(kContainer, reinterpret_cast<void**>(&c1)) : E_FAIL;
+    if (c1) c1->Release();
+    if (dd1) dd1->Release();
+    const ULONG before = refs();
+    IVpContainer* c = nullptr;
+    const HRESULT h7 = dd->QueryInterface(kContainer, reinterpret_cast<void**>(&c));
+    const ULONG after = refs();
+    if (!c) return 1;
+    IVpContainer* again = nullptr;
+    dd->QueryInterface(kContainer, reinterpret_cast<void**>(&again));
+    IUnknown* back = nullptr;
+    c->QueryInterface(IID_IDirectDraw7, reinterpret_cast<void**>(&back));
+    CHECK((drv.dwCaps2 & DDCAPS2_VIDEOPORT) && drv.dwMaxVideoPorts == 1 && !drv.dwCurrVideoPorts && hva == E_NOINTERFACE &&
+              h1 == DD_OK && h7 == DD_OK && before == 1 && after == 1 && again == c && back == dd,
+          "video ports: caps (video port %d, %lu ports, %lu in use); the accelerator container 0x%08lx; the port container "
+          "from IDirectDraw 0x%08lx, from IDirectDraw7 0x%08lx (the object's count %lu, then %lu), the same again %d, "
+          "IDirectDraw7 from it the object %d",
+          (drv.dwCaps2 & DDCAPS2_VIDEOPORT) != 0, drv.dwMaxVideoPorts, drv.dwCurrVideoPorts, hva, h1, h7, before, after,
+          again == c, back == reinterpret_cast<IUnknown*>(dd));
+    if (again) again->Release();
+    if (back) back->Release();
+    // The port, enumerated: with no filter, flags 1, an empty filter; a filter of size 0.
+    VpSeen e0 = {}, e1 = {}, e2 = {}, e3 = {};
+    const HRESULT n0 = c->EnumVideoPorts(0, nullptr, &e0, VpSeenCb), n1 = c->EnumVideoPorts(1, nullptr, &e1, VpSeenCb);
+    VpCaps filter = {};
+    filter.dwSize = sizeof(filter);
+    const HRESULT n2 = c->EnumVideoPorts(0, &filter, &e2, VpSeenCb);
+    filter.dwSize = 0;
+    const HRESULT n3 = c->EnumVideoPorts(0, &filter, &e3, VpSeenCb);
+    CHECK(n0 == DD_OK && e0.n == 1 && e0.caps && n1 == DD_OK && e1.n == 1 && e1.caps && n2 == DD_OK && e2.n == 1 && e2.caps &&
+              n3 == DDERR_INVALIDPARAMS && !e3.n,
+          "EnumVideoPorts: 0x%08lx (%d ports, XP's caps %d), flags 1 0x%08lx (%d, %d), an empty filter 0x%08lx (%d, %d), a "
+          "filter of size 0 0x%08lx (%d)",
+          n0, e0.n, e0.caps, n1, e1.n, e1.caps, n2, e2.n, e2.caps, n3, e3.n);
+    // Its connections, and its status.
+    DWORD count = 0;
+    const HRESULT ci = c->GetVideoPortConnectInfo(0, &count, nullptr);
+    VpConnect conn[4] = {};
+    DWORD k = 4;
+    const HRESULT ca = c->GetVideoPortConnectInfo(0, &k, conn);
+    DWORD none = 0;
+    const HRESULT c99 = c->GetVideoPortConnectInfo(99, &none, nullptr);
+    CHECK(ci == DD_OK && count == 4 && ca == DD_OK && k == 4 && !memcmp(conn, kConn, sizeof(kConn)) && c99 == DDERR_INVALIDPARAMS,
+          "GetVideoPortConnectInfo: 0x%08lx, %lu entries; with an array 0x%08lx, %lu (XP's %d); port 99 0x%08lx", ci, count,
+          ca, k, !memcmp(conn, kConn, sizeof(kConn)), c99);
+    VpStatus st;
+    memset(&st, 0xCC, sizeof(st));
+    st.dwSize = sizeof(st);
+    const HRESULT q0 = c->QueryVideoPortStatus(0, &st);
+    VpStatus zero = {};
+    zero.dwSize = sizeof(zero);
+    const bool cleared = !memcmp(&st, &zero, sizeof(st));
+    st = {};
+    st.dwSize = sizeof(st);
+    const HRESULT q99 = c->QueryVideoPortStatus(99, &st);
+    st = {};
+    const HRESULT qs0 = c->QueryVideoPortStatus(0, &st);
+    CHECK(q0 == DD_OK && cleared && q99 == DDERR_INVALIDPARAMS && qs0 == DDERR_INVALIDOBJECT,
+          "QueryVideoPortStatus: 0x%08lx (none in use, all zero %d); port 99 0x%08lx; dwSize 0 0x%08lx", q0, cleared, q99, qs0);
+    // CreateVideoPort: port 0 at 640x240 on its first connection, E_FAIL; the checks.
+    VpDesc d = {};
+    d.dwSize = sizeof(d);
+    d.dwFieldWidth = 640;
+    d.dwFieldHeight = 240;
+    d.dwMicrosecondsPerField = 16683;
+    d.dwMaxPixelsPerSecond = 13500000;
+    d.VideoPortType = conn[0];
+    IUnknown* vp = nullptr;
+    const HRESULT cv = c->CreateVideoPort(0, &d, &vp, nullptr);
+    const HRESULT cn = c->CreateVideoPort(0, nullptr, &vp, nullptr);
+    d.dwVideoPortID = 99;
+    const HRESULT cp = c->CreateVideoPort(0, &d, &vp, nullptr);
+    d.dwVideoPortID = 0;
+    d.dwSize = 0;
+    const HRESULT cz = c->CreateVideoPort(0, &d, &vp, nullptr);
+    const HRESULT co = c->CreateVideoPort(0, &d, nullptr, nullptr);
+    CHECK(cv == E_FAIL && !vp && cn == DDERR_INVALIDPARAMS && cp == DDERR_INVALIDPARAMS && cz == DDERR_INVALIDPARAMS &&
+              co == DDERR_INVALIDPARAMS,
+          "CreateVideoPort: 0x%08lx (made %d); no description 0x%08lx, port 99 0x%08lx, dwSize 0 0x%08lx, no out pointer "
+          "0x%08lx",
+          cv, vp != nullptr, cn, cp, cz, co);
+    if (vp) vp->Release();
+    const HRESULT nc = c->EnumVideoPorts(0, nullptr, nullptr, nullptr);
+    const HRESULT cc = c->GetVideoPortConnectInfo(0, nullptr, nullptr);
+    const HRESULT qn = c->QueryVideoPortStatus(0, nullptr);
+    const ULONG left = c->Release();
+    const ULONG obj = refs();
+    CHECK(nc == DDERR_INVALIDPARAMS && cc == DDERR_INVALIDPARAMS && qn == DDERR_INVALIDOBJECT && left == 0 && obj == 1,
+          "EnumVideoPorts with no callback 0x%08lx, GetVideoPortConnectInfo with no count 0x%08lx, QueryVideoPortStatus with "
+          "none 0x%08lx; the container released: %lu (the object's count %lu)",
+          nc, cc, qn, left, obj);
+    dd->Release();
+    return 0;
+}
+
+// Overlay key ranges: a destination key range on the primary, as measured on XP (fmtprobe
+// section 27: set, and taken by UpdateOverlay through DDOVER_KEYDEST and KEYDESTOVERRIDE), compared
+// colour by colour as the driver's blits compare one (section 26); a source key range on an
+// overlay (the Voodoo3 has no source overlay keys; dd2d9 offers them, and their ranges, as the
+// SDK has them: DDCKEYCAPS_SRCOVERLAYCLRSPACE).
+static int RunOverlayRanges() {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    dd->SetDisplayMode(sw, sh, 32, 0, 0);
+    DDCAPS hal = {};
+    hal.dwSize = sizeof(hal);
+    dd->GetCaps(&hal, nullptr);
+    const DWORD clr = DDCKEYCAPS_DESTOVERLAYCLRSPACE | DDCKEYCAPS_SRCOVERLAYCLRSPACE;
+    CHECK((hal.dwCKeyCaps & clr) == clr, "overlay key ranges: key caps 0x%lx", hal.dwCKeyCaps);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    IDirectDrawSurface7* ov = MakeOverlay(dd, 16, 16, 0);
+    if (!prim || !ov) return 1;
+    // The primary: three areas, one in the range colour by colour (red 0x10-0x30, green 0, blue
+    // 0-0x30), one outside it in blue, one between its ends as a number but outside it in green.
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    const RECT in = {40, 40, 80, 80}, outB = {100, 40, 140, 80}, outG = {160, 40, 200, 80}, all = {0, 0, 240, 120};
+    fx.dwFillColor = 0x000000;
+    prim->Blt(const_cast<RECT*>(&all), nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    fx.dwFillColor = 0x200010;
+    prim->Blt(const_cast<RECT*>(&in), nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    fx.dwFillColor = 0x200040;
+    prim->Blt(const_cast<RECT*>(&outB), nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    fx.dwFillColor = 0x200100;
+    prim->Blt(const_cast<RECT*>(&outG), nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    DDCOLORKEY range = {0x100000, 0x300030}, got = {};
+    const HRESULT sk = prim->SetColorKey(DDCKEY_DESTOVERLAY | DDCKEY_COLORSPACE, &range);
+    const HRESULT gk = prim->GetColorKey(DDCKEY_DESTOVERLAY, &got);
+    // The overlay: white, its middle in a source key range (green 0x10-0x3f in 5-6-5).
+    d = {};
+    d.dwSize = sizeof(d);
+    if (SUCCEEDED(ov->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) {
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+                reinterpret_cast<WORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] =
+                    (x >= 4 && x < 12 && y >= 4 && y < 12) ? WORD(0x0400 + (x - 4) * 0x0020) : 0xFFFF;
+        ov->Unlock(nullptr);
+    }
+    DDCOLORKEY srcRange = {0x0200, 0x07E0};
+    const HRESULT ss = ov->SetColorKey(DDCKEY_SRCOVERLAY | DDCKEY_COLORSPACE, &srcRange);
+    RECT r = {0, 0, 240, 120};
+    const HRESULT u1 = ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_KEYDEST, nullptr);
+    CHECK(sk == DD_OK && gk == DD_OK && got.dwColorSpaceLowValue == range.dwColorSpaceLowValue &&
+              got.dwColorSpaceHighValue == range.dwColorSpaceHighValue && u1 == DD_OK && ss == DD_OK,
+          "overlay key ranges: the primary's SetColorKey(DESTOVERLAY | COLORSPACE) 0x%08lx (GetColorKey 0x%08lx: %lx-%lx), "
+          "UpdateOverlay(SHOW | KEYDEST) 0x%08lx; the overlay's SetColorKey(SRCOVERLAY | COLORSPACE) 0x%08lx",
+          sk, gk, got.dwColorSpaceLowValue, got.dwColorSpaceHighValue, u1, ss);
+    for (int i = 0; i < 5; i++) {
+        Pump();
+        Sleep(100);
+    }
+    HDC sdc = GetDC(nullptr);
+    auto px = [&](int x, int y) { return GetPixel(sdc, x, y) & 0xFFFFFF; };
+    const COLORREF white = RGB(255, 255, 255);
+    CHECK(px(50, 50) == white && px(110, 50) == RGB(0x20, 0, 0x40) && px(170, 50) == RGB(0x20, 1, 0),
+          "overlay key ranges: shown where the primary is in the range colour by colour (%06lx), not outside it (%06lx, "
+          "%06lx: between its ends as a number)",
+          px(50, 50), px(110, 50), px(170, 50));
+    // KEYDESTOVERRIDE with the range, and the source key range: the overlay's middle (in the
+    // range) shows the primary.
+    DDOVERLAYFX ofx = {};
+    ofx.dwSize = sizeof(ofx);
+    ofx.dckDestColorkey = range;
+    const HRESULT u2 = ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | DDOVER_KEYDESTOVERRIDE | DDOVER_KEYSRC, &ofx);
+    for (int i = 0; i < 5; i++) {
+        Pump();
+        Sleep(100);
+    }
+    // (The overlay is 16x16 over 240x120: its middle 8x8 is 60..180 across, 30..90 down.)
+    CHECK(u2 == DD_OK && px(42, 42) == white && px(70, 70) == RGB(0x20, 0, 0x10),
+          "overlay key ranges: KEYDESTOVERRIDE with the range and KEYSRC 0x%08lx: the overlay where the primary is in "
+          "range (%06lx), the primary where the overlay is in its own (%06lx)",
+          u2, px(42, 42), px(70, 70));
+    ReleaseDC(nullptr, sdc);
+    ov->Release();
+    prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// Overlay alpha, as the DirectX 7 SDK has it (the Voodoo3 has none: XP took the flags and showed
+// nothing of them): the caps, and a white overlay over the frame by its weight: a constant
+// (DDOVER_ALPHASRCCONSTOVERRIDE; with ALPHASRCNEG a transparency), its own alpha (an A8R8G8B8
+// overlay, 0x40 on its left half and 0xc0 on its right: DDOVER_ALPHASRC), the destination's
+// constant the frame's opacity over it (ALPHADESTCONSTOVERRIDE, and ALPHADESTNEG); with no
+// alpha flag, as it is. Alpha surfaces, each 2 by 1 and its whole area over what it covers: the
+// overlay's (A8R8G8B8, 0xc0 and 0x40: ALPHASRCSURFACEOVERRIDE), the destination's over the
+// screen (A4R4G4B4, 4 and 12: ALPHADESTSURFACEOVERRIDE); one without alpha, and no surface, give
+// none. Edge blending (ALPHAEDGEBLEND): the overlay's left half its source key, the column
+// beside it shown by the constant.
+static int RunOverlayAlpha() {
+    const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd = MakeWindow(WS_POPUP, sw, sh);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    DDCAPS hal = {};
+    hal.dwSize = sizeof(hal);
+    dd->GetCaps(&hal, nullptr);
+    const DWORD caps = DDFXALPHACAPS_OVERLAYALPHAPIXELS | DDFXALPHACAPS_OVERLAYALPHAPIXELSNEG |
+                       DDFXALPHACAPS_OVERLAYALPHASURFACES | DDFXALPHACAPS_OVERLAYALPHASURFACESNEG |
+                       DDFXALPHACAPS_OVERLAYALPHAEDGEBLEND;
+    CHECK((hal.dwFXAlphaCaps & caps) == caps && (hal.dwAlphaOverlayConstBitDepths & DDBD_8) &&
+              (hal.dwAlphaOverlayPixelBitDepths & DDBD_8) && (hal.dwAlphaOverlaySurfaceBitDepths & DDBD_8),
+          "overlay alpha: caps 0x%lx, constants of 0x%lx bits, pixels of 0x%lx bits, surfaces of 0x%lx bits",
+          hal.dwFXAlphaCaps, hal.dwAlphaOverlayConstBitDepths, hal.dwAlphaOverlayPixelBitDepths,
+          hal.dwAlphaOverlaySurfaceBitDepths);
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    dd->SetDisplayMode(sw, sh, 32, 0, 0);
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&d, &prim, nullptr);
+    d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d.ddsCaps.dwCaps = DDSCAPS_OVERLAY | DDSCAPS_VIDEOMEMORY;
+    d.dwWidth = d.dwHeight = 16;
+    d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+    d.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_ALPHAPIXELS;
+    d.ddpfPixelFormat.dwRGBBitCount = 32;
+    d.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    d.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    d.ddpfPixelFormat.dwBBitMask = 0xFF;
+    d.ddpfPixelFormat.dwRGBAlphaBitMask = 0xFF000000;
+    IDirectDrawSurface7* ov = nullptr;
+    const HRESULT made = dd->CreateSurface(&d, &ov, nullptr);
+    CHECK(prim && ov, "overlay alpha: an A8R8G8B8 overlay 0x%08lx", made);
+    if (!prim || !ov) return 1;
+    DDBLTFX fx = {};
+    fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0x204060;
+    prim->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    d = {};
+    d.dwSize = sizeof(d);
+    if (SUCCEEDED(ov->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) {
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+                reinterpret_cast<DWORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] = (x < 8 ? 0x40FFFFFFu : 0xC0FFFFFFu);
+        ov->Unlock(nullptr);
+    }
+    // The alpha surfaces: 2 by 1, in system memory.
+    auto fill2 = [](IDirectDrawSurface7* s, DWORD bits, DWORD left, DWORD right) {
+        DDSURFACEDESC2 ad = {};
+        ad.dwSize = sizeof(ad);
+        if (!s || FAILED(s->Lock(nullptr, &ad, DDLOCK_WAIT, nullptr))) return;
+        if (bits == 32) {
+            static_cast<DWORD*>(ad.lpSurface)[0] = left;
+            static_cast<DWORD*>(ad.lpSurface)[1] = right;
+        } else {
+            static_cast<WORD*>(ad.lpSurface)[0] = WORD(left);
+            static_cast<WORD*>(ad.lpSurface)[1] = WORD(right);
+        }
+        s->Unlock(nullptr);
+    };
+    auto alphaSurface = [&](DWORD flags, DWORD bits, DWORD alpha, DWORD left, DWORD right) {
+        DDSURFACEDESC2 ad = {};
+        ad.dwSize = sizeof(ad);
+        ad.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        ad.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+        ad.dwWidth = 2;
+        ad.dwHeight = 1;
+        ad.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+        ad.ddpfPixelFormat.dwFlags = flags;
+        ad.ddpfPixelFormat.dwRGBBitCount = bits;
+        ad.ddpfPixelFormat.dwRBitMask = bits == 32 ? 0xFF0000 : 0x0F00;
+        ad.ddpfPixelFormat.dwGBitMask = bits == 32 ? 0xFF00 : 0x00F0;
+        ad.ddpfPixelFormat.dwBBitMask = bits == 32 ? 0xFF : 0x000F;
+        ad.ddpfPixelFormat.dwRGBAlphaBitMask = alpha;
+        IDirectDrawSurface7* s = nullptr;
+        const HRESULT hr = dd->CreateSurface(&ad, &s, nullptr);
+        fill2(s, bits, left, right);
+        CHECK(s, "overlay alpha: an alpha surface (%lu bits, alpha 0x%lx): 0x%08lx", bits, alpha, hr);
+        return s;
+    };
+    IDirectDrawSurface7* srcAlpha = alphaSurface(DDPF_RGB | DDPF_ALPHAPIXELS, 32, 0xFF000000, 0xC0000000, 0x40000000);
+    IDirectDrawSurface7* destAlpha = alphaSurface(DDPF_RGB | DDPF_ALPHAPIXELS, 16, 0xF000, 0x4000, 0xC000);
+    IDirectDrawSurface7* noAlpha = alphaSurface(DDPF_RGB, 32, 0, 0x123456, 0x654321);
+    RECT r = {sw / 2 - 100, sh / 2 - 50, sw / 2 + 100, sh / 2 + 50};
+    struct Case {
+        const char* name;
+        DWORD flags, srcConst, destConst;
+        float left, right;  // the overlay's weight on each half
+        IDirectDrawSurface7* srcSurface = nullptr;  // (lpDDSAlphaSrc instead of the constant)
+        IDirectDrawSurface7* destSurface = nullptr;
+    };
+    const float a40 = 64 / 255.0f, aC0 = 192 / 255.0f, a4 = 4 / 15.0f, a12 = 12 / 15.0f;
+    const Case kCases[] = {
+        {"no alpha flag", 0, 0, 0, 1, 1},
+        {"ALPHASRCCONSTOVERRIDE 0x40", DDOVER_ALPHASRCCONSTOVERRIDE, 0x40, 0, a40, a40},
+        {"ALPHASRCCONSTOVERRIDE 0x40 | ALPHASRCNEG", DDOVER_ALPHASRCCONSTOVERRIDE | DDOVER_ALPHASRCNEG, 0x40, 0, 1 - a40, 1 - a40},
+        {"ALPHASRC", DDOVER_ALPHASRC, 0, 0, a40, aC0},
+        {"ALPHASRC | ALPHASRCNEG", DDOVER_ALPHASRC | DDOVER_ALPHASRCNEG, 0, 0, 1 - a40, 1 - aC0},
+        {"ALPHADESTCONSTOVERRIDE 0xc0", DDOVER_ALPHADESTCONSTOVERRIDE, 0, 0xC0, 1 - aC0, 1 - aC0},
+        {"ALPHASRC | ALPHADESTCONSTOVERRIDE 0x40 | ALPHADESTNEG", DDOVER_ALPHASRC | DDOVER_ALPHADESTCONSTOVERRIDE | DDOVER_ALPHADESTNEG,
+         0, 0x40, a40 * a40, aC0 * a40},
+        {"ALPHASRCSURFACEOVERRIDE", DDOVER_ALPHASRCSURFACEOVERRIDE, 0, 0, aC0, a40, srcAlpha},
+        {"ALPHASRCSURFACEOVERRIDE | ALPHASRCNEG", DDOVER_ALPHASRCSURFACEOVERRIDE | DDOVER_ALPHASRCNEG, 0, 0, 1 - aC0, 1 - a40, srcAlpha},
+        {"ALPHASRCSURFACEOVERRIDE, a surface without alpha", DDOVER_ALPHASRCSURFACEOVERRIDE, 0, 0, 1, 1, noAlpha},
+        {"ALPHASRCSURFACEOVERRIDE | ALPHASRC, a surface without alpha", DDOVER_ALPHASRCSURFACEOVERRIDE | DDOVER_ALPHASRC, 0, 0,
+         a40, aC0, noAlpha},
+        {"ALPHASRCSURFACEOVERRIDE, no surface (0x80)", DDOVER_ALPHASRCSURFACEOVERRIDE, 0x80, 0, 1, 1},
+        {"ALPHADESTSURFACEOVERRIDE", DDOVER_ALPHADESTSURFACEOVERRIDE, 0, 0, 1 - a4, 1 - a12, nullptr, destAlpha},
+        {"ALPHASRC | ALPHADESTSURFACEOVERRIDE | ALPHADESTNEG", DDOVER_ALPHASRC | DDOVER_ALPHADESTSURFACEOVERRIDE | DDOVER_ALPHADESTNEG,
+         0, 0, a40 * a4, aC0 * a12, nullptr, destAlpha}};
+    HDC sdc = GetDC(nullptr);
+    auto as = [](COLORREF v, float w) {  // white over 0x20, 0x40, 0x60 by w
+        const int want[3] = {int(0x20 + (255 - 0x20) * w + 0.5f), int(0x40 + (255 - 0x40) * w + 0.5f),
+                             int(0x60 + (255 - 0x60) * w + 0.5f)};
+        return abs(int(GetRValue(v)) - want[0]) <= 3 && abs(int(GetGValue(v)) - want[1]) <= 3 &&
+               abs(int(GetBValue(v)) - want[2]) <= 3;
+    };
+    for (const Case& k : kCases) {
+        DDOVERLAYFX ofx = {};
+        ofx.dwSize = sizeof(ofx);
+        ofx.dwAlphaSrcConstBitDepth = ofx.dwAlphaDestConstBitDepth = 8;
+        ofx.dwAlphaSrcConst = k.srcConst;
+        ofx.dwAlphaDestConst = k.destConst;
+        if (k.srcSurface) ofx.lpDDSAlphaSrc = reinterpret_cast<IDirectDrawSurface*>(k.srcSurface);
+        if (k.destSurface) ofx.lpDDSAlphaDest = reinterpret_cast<IDirectDrawSurface*>(k.destSurface);
+        const HRESULT u = ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | k.flags, &ofx);
+        for (int i = 0; i < 5; i++) {
+            Pump();
+            Sleep(60);
+        }
+        const COLORREF left = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, right = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
+        CHECK(u == DD_OK && as(left, k.left) && as(right, k.right),
+              "overlay alpha, %s: 0x%08lx; shown %06lx and %06lx (white by %.3f and %.3f over 204060)", k.name, u, DWORD(left),
+              DWORD(right), k.left, k.right);
+    }
+    // What the game writes into an alpha surface shows: the halves swapped.
+    for (const bool dest : {false, true}) {
+        DDOVERLAYFX ofx = {};
+        ofx.dwSize = sizeof(ofx);
+        ofx.lpDDSAlphaSrc = reinterpret_cast<IDirectDrawSurface*>(srcAlpha);
+        ofx.lpDDSAlphaDest = reinterpret_cast<IDirectDrawSurface*>(destAlpha);
+        const DWORD flag = dest ? DDOVER_ALPHADESTSURFACEOVERRIDE : DDOVER_ALPHASRCSURFACEOVERRIDE;
+        const HRESULT u = ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | flag, &ofx);
+        for (int i = 0; i < 5; i++) {
+            Pump();
+            Sleep(60);
+        }
+        if (dest) fill2(destAlpha, 16, 0xC000, 0x4000);
+        else fill2(srcAlpha, 32, 0x40000000, 0xC0000000);
+        for (int i = 0; i < 5; i++) {
+            Pump();
+            Sleep(60);
+        }
+        const COLORREF left = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, right = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
+        const float wl = dest ? 1 - a12 : a40, wr = dest ? 1 - a4 : aC0;
+        CHECK(u == DD_OK && as(left, wl) && as(right, wr),
+              "overlay alpha, %s: its alpha surface written to while shown: 0x%08lx; shown %06lx and %06lx (white by %.3f and "
+              "%.3f over 204060)",
+              dest ? "ALPHADESTSURFACEOVERRIDE" : "ALPHASRCSURFACEOVERRIDE", u, DWORD(left), DWORD(right), wl, wr);
+    }
+    // Edge blending: the left half the source key (green), the right half white with alpha 0xc0.
+    d = {};
+    d.dwSize = sizeof(d);
+    if (SUCCEEDED(ov->Lock(nullptr, &d, DDLOCK_WAIT, nullptr))) {
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+                reinterpret_cast<DWORD*>(static_cast<BYTE*>(d.lpSurface) + y * d.lPitch)[x] = (x < 8 ? 0x0000FF00u : 0xC0FFFFFFu);
+        ov->Unlock(nullptr);
+    }
+    struct EdgeCase {
+        const char* name;
+        DWORD flags, bits, edge;
+        float edgeWeight, inside;  // the overlay's weight in the column beside the key, and further in
+    };
+    const EdgeCase kEdges[] = {
+        {"KEYSRCOVERRIDE", DDOVER_KEYSRCOVERRIDE, 8, 0x40, 1, 1},
+        {"KEYSRCOVERRIDE | ALPHAEDGEBLEND 0x40", DDOVER_KEYSRCOVERRIDE | DDOVER_ALPHAEDGEBLEND, 8, 0x40, a40, 1},
+        {"KEYSRCOVERRIDE | ALPHAEDGEBLEND 0x40 | ALPHASRC", DDOVER_KEYSRCOVERRIDE | DDOVER_ALPHAEDGEBLEND | DDOVER_ALPHASRC, 8, 0x40,
+         a40, aC0},
+        {"KEYSRCOVERRIDE | ALPHAEDGEBLEND 4 (4 bits)", DDOVER_KEYSRCOVERRIDE | DDOVER_ALPHAEDGEBLEND, 4, 4, a4, 1}};
+    for (const EdgeCase& k : kEdges) {
+        DDOVERLAYFX ofx = {};
+        ofx.dwSize = sizeof(ofx);
+        ofx.dckSrcColorkey.dwColorSpaceLowValue = ofx.dckSrcColorkey.dwColorSpaceHighValue = 0x0000FF00;
+        ofx.dwAlphaEdgeBlendBitDepth = k.bits;
+        ofx.dwAlphaEdgeBlend = k.edge;
+        const HRESULT u = ov->UpdateOverlay(nullptr, prim, &r, DDOVER_SHOW | k.flags, &ofx);
+        for (int i = 0; i < 5; i++) {
+            Pump();
+            Sleep(60);
+        }
+        // (The overlay's columns 4, 8 and 12: 200 pixels of the screen for its 16.)
+        const COLORREF keyed = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, edge = GetPixel(sdc, sw / 2 + 6, sh / 2) & 0xFFFFFF,
+                       inside = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
+        CHECK(u == DD_OK && as(keyed, 0) && as(edge, k.edgeWeight) && as(inside, k.inside),
+              "overlay alpha, %s: 0x%08lx; shown %06lx where keyed, %06lx beside it and %06lx further (white by 0, %.3f and %.3f "
+              "over 204060)",
+              k.name, u, DWORD(keyed), DWORD(edge), DWORD(inside), k.edgeWeight, k.inside);
+    }
+    ReleaseDC(nullptr, sdc);
+    for (IDirectDrawSurface7* s : {srcAlpha, destAlpha, noAlpha})
+        if (s) s->Release();
+    ov->UpdateOverlay(nullptr, prim, nullptr, DDOVER_HIDE, nullptr);
+    ov->Release();
+    prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 // DDSCL_CREATEDEVICEWINDOW with DDSCL_NOWINDOWCHANGES: the focus window stays small, the
 // device window covers the screen and shows the picture.
 static int RunDeviceWindow() {
@@ -4400,12 +5870,921 @@ static int RunDeviceWindow() {
     CHECK(dev && IsWindowVisible(dev) && far_ == RGB(0, 255, 0) && fr.right - fr.left == 100,
           "device window: shown, the picture on it over the screen (%06lx), the focus window left alone (%ld wide)", far_,
           fr.right - fr.left);
+    // Mouse messages stay with the device window, as ddraw.dll's procedure leaves them to
+    // DefWindowProc (XP SP3: the focus window gets none).
+    g_mouseMsgs = 0;
+    if (dev) {
+        PostMessageA(dev, WM_MOUSEMOVE, 0, MAKELPARAM(20, 30));
+        PostMessageA(dev, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(20, 30));
+        PostMessageA(dev, WM_LBUTTONUP, 0, MAKELPARAM(20, 30));
+        PostMessageA(dev, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(20, 30));
+    }
+    for (int i = 0; i < 3; i++) {
+        Pump();
+        Sleep(50);
+    }
+    CHECK(dev && g_mouseMsgs == 0, "device window: mouse messages posted to it stay with it (the focus window got %d)", g_mouseMsgs);
     if (prim) prim->Release();
     dd->RestoreDisplayMode();
     dd->SetCooperativeLevel(focus, DDSCL_NORMAL);
     CHECK(!IsWindow(dev), "device window: gone with normal mode");
     dd->Release();
     DestroyWindow(focus);
+    return 0;
+}
+
+// Gamma ramps on the primary in exclusive mode, as measured on XP (fmtprobe's exclusive-mode
+// section; the Voodoo3): XP's identity to begin with (its display's, i << 8: dd2d9's where the
+// display gives none), each ramp set read back as it was, NULL taken, DDSGR_CALIBRATE
+// unsupported with no calibrator, a plain surface's control refusing. Then, where fmtcal.dll
+// is beside the test and the key can be written, the calibrator (fmtprobe section 34, in a
+// process of its own: the key is read as the DLL loads).
+static int RunGamma() {
+    HWND hwnd = MakeWindow(WS_POPUP | WS_VISIBLE, 640, 480);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    DDCAPS drv = {}, hel = {};
+    drv.dwSize = hel.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&drv, &hel);
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    dd->SetDisplayMode(640, 480, 16, 0, 0);
+    Pump();
+    DDSURFACEDESC2 pd = {};
+    pd.dwSize = sizeof(pd);
+    pd.dwFlags = DDSD_CAPS;
+    pd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&pd, &prim, nullptr);
+    IDirectDrawGammaControl* gamma = nullptr;
+    if (prim) prim->QueryInterface(IID_IDirectDrawGammaControl, reinterpret_cast<void**>(&gamma));
+    if (!gamma) return 1;
+    // The display's own ramp where it gives one (then dd2d9's too), XP's identity otherwise.
+    DDGAMMARAMP display = {};
+    HDC sdc = GetDC(nullptr);
+    if (!sdc || !GetDeviceGammaRamp(sdc, &display))
+        for (int i = 0; i < 256; i++) display.red[i] = display.green[i] = display.blue[i] = WORD(i << 8);
+    if (sdc) ReleaseDC(nullptr, sdc);
+    DDGAMMARAMP first = {}, ramp = {}, got = {};
+    const HRESULT gh = gamma->GetGammaRamp(0, &first);
+    CHECK((drv.dwCaps2 & DDCAPS2_PRIMARYGAMMA) && !(hel.dwCaps2 & DDCAPS2_PRIMARYGAMMA) && !(drv.dwCaps2 & DDCAPS2_CANCALIBRATEGAMMA) &&
+              gh == DD_OK && !memcmp(&first, &display, sizeof(first)),
+          "gamma: primary gamma (driver %d, emulation %d), no calibration (%d); GetGammaRamp 0x%08lx, red[128] 0x%04x, red[255] "
+          "0x%04x (the display's %d)",
+          (drv.dwCaps2 & DDCAPS2_PRIMARYGAMMA) != 0, (hel.dwCaps2 & DDCAPS2_PRIMARYGAMMA) != 0,
+          (drv.dwCaps2 & DDCAPS2_CANCALIBRATEGAMMA) != 0, gh, first.red[128], first.red[255], !memcmp(&first, &display, sizeof(first)));
+    struct Ramp {
+        const char* name;
+        int kind;
+        WORD at0, at128, at255;  // XP's, read back
+    };
+    static const Ramp kRamps[] = {{"all zero", 0, 0, 0, 0},
+                                  {"half brightness", 1, 0, 0x4000, 0x7f80},
+                                  {"inverted", 2, 0xffff, 0x7f7f, 0},
+                                  {"all 0xffff", 3, 0xffff, 0xffff, 0xffff},
+                                  {"a step at 128", 4, 0, 0xffff, 0xffff}};
+    for (const Ramp& k : kRamps) {
+        for (int i = 0; i < 256; i++) {
+            const WORD v = k.kind == 0   ? 0
+                           : k.kind == 1 ? WORD(i * 128)
+                           : k.kind == 2 ? WORD((255 - i) * 257)
+                           : k.kind == 3 ? 0xFFFF
+                           : i < 128     ? 0
+                                         : 0xFFFF;
+            ramp.red[i] = ramp.green[i] = ramp.blue[i] = v;
+        }
+        const HRESULT sh = gamma->SetGammaRamp(0, &ramp);
+        memset(&got, 0xEE, sizeof(got));
+        const HRESULT rh = gamma->GetGammaRamp(0, &got);
+        CHECK(sh == DD_OK && rh == DD_OK && got.red[0] == k.at0 && got.red[128] == k.at128 && got.red[255] == k.at255 &&
+                  !memcmp(&got, &ramp, sizeof(got)),
+              "SetGammaRamp, %s: 0x%08lx; GetGammaRamp then 0x%08lx, red[0] 0x%04x, red[128] 0x%04x, red[255] 0x%04x", k.name, sh,
+              rh, got.red[0], got.red[128], got.red[255]);
+    }
+    const HRESULT nh = gamma->SetGammaRamp(0, nullptr);
+    const HRESULT ch = gamma->SetGammaRamp(1 /* DDSGR_CALIBRATE */, &first);
+    memset(&got, 0xEE, sizeof(got));
+    gamma->GetGammaRamp(0, &got);
+    CHECK(nh == DD_OK && ch == DDERR_UNSUPPORTED && !memcmp(&got, &display, sizeof(got)),
+          "SetGammaRamp with a null ramp: 0x%08lx (the display's again %d); with DDSGR_CALIBRATE: 0x%08lx", nh,
+          !memcmp(&got, &display, sizeof(got)), ch);
+    gamma->Release();
+    DDSURFACEDESC2 od = {};
+    od.dwSize = sizeof(od);
+    od.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    od.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    od.dwWidth = od.dwHeight = 16;
+    IDirectDrawSurface7* off = nullptr;
+    dd->CreateSurface(&od, &off, nullptr);
+    IDirectDrawGammaControl* og = nullptr;
+    const HRESULT oq = off ? off->QueryInterface(IID_IDirectDrawGammaControl, reinterpret_cast<void**>(&og)) : E_FAIL;
+    const HRESULT ogh = og ? og->GetGammaRamp(0, &got) : E_FAIL;
+    CHECK(oq == DD_OK && ogh == DDERR_INVALIDPARAMS,
+          "IDirectDrawGammaControl from a plain surface: 0x%08lx; its GetGammaRamp: 0x%08lx", oq, ogh);
+    if (og) og->Release();
+    if (off) off->Release();
+    prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    // The calibrator, registered for a process of its own ("ddtest calibrator", RunCalibrator).
+    char exe[MAX_PATH], dll[MAX_PATH];
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    strcpy(dll, exe);
+    strcpy(strrchr(dll, '\\') + 1, "fmtcal.dll");
+    HKEY key = nullptr;
+    DWORD made = 0;
+    if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES ||
+        RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\DirectDraw\\GammaCalibrator", 0, nullptr, 0, KEY_ALL_ACCESS, nullptr,
+                        &key, &made) != ERROR_SUCCESS) {
+        fprintf(g_out, "SKIP the gamma calibrator: fmtcal.dll isn't beside the test, or the key can't be written\n");
+        return 0;
+    }
+    char old[MAX_PATH] = "";
+    DWORD type = 0, size = sizeof(old);
+    const bool hadPath = RegQueryValueExA(key, "Path", nullptr, &type, reinterpret_cast<BYTE*>(old), &size) == ERROR_SUCCESS;
+    RegSetValueExA(key, "Path", 0, REG_SZ, reinterpret_cast<const BYTE*>(dll), DWORD(strlen(dll) + 1));
+    fflush(g_out);
+    char cmd[MAX_PATH + 32];
+    snprintf(cmd, sizeof(cmd), "\"%s\" calibrator", exe);
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    DWORD code = DWORD(-1);
+    if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        if (WaitForSingleObject(pi.hProcess, 120000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    if (hadPath) RegSetValueExA(key, "Path", 0, type, reinterpret_cast<const BYTE*>(old), size);
+    else RegDeleteValueA(key, "Path");
+    RegCloseKey(key);
+    if (made == REG_CREATED_NEW_KEY) RegDeleteKeyA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\DirectDraw\\GammaCalibrator");
+    CHECK(code == 0, "the gamma calibrator, in a process of its own: exit %lu (its checks above)", code);
+    return 0;
+}
+
+// "ddtest calibrator", started by RunGamma with fmtcal.dll registered: the calibrator as
+// measured on XP (fmtprobe section 34). fmtcal.dll writes what it was called with to
+// fmtcal.txt beside it, inverts the ramp, or fails (DDERR_GENERIC) while fmtcal-fail.txt is there.
+static int RunCalibrator() {
+    char log[MAX_PATH], fail[MAX_PATH];
+    GetModuleFileNameA(nullptr, log, MAX_PATH);
+    strcpy(fail, log);
+    strcpy(strrchr(log, '\\') + 1, "fmtcal.txt");
+    strcpy(strrchr(fail, '\\') + 1, "fmtcal-fail.txt");
+    DeleteFileA(log);
+    DeleteFileA(fail);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    DDCAPS drv = {}, hel = {};
+    drv.dwSize = hel.dwSize = sizeof(DDCAPS);
+    dd->GetCaps(&drv, &hel);
+    CHECK((drv.dwCaps2 & DDCAPS2_CANCALIBRATEGAMMA) && !(hel.dwCaps2 & DDCAPS2_CANCALIBRATEGAMMA),
+          "a calibrator registered: CANCALIBRATEGAMMA, driver %d, emulation %d", (drv.dwCaps2 & DDCAPS2_CANCALIBRATEGAMMA) != 0,
+          (hel.dwCaps2 & DDCAPS2_CANCALIBRATEGAMMA) != 0);
+    HWND hwnd = MakeWindow(WS_POPUP | WS_VISIBLE, 640, 480);
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    dd->SetDisplayMode(640, 480, 16, 0, 0);
+    Pump();
+    DDSURFACEDESC2 pd = {};
+    pd.dwSize = sizeof(pd);
+    pd.dwFlags = DDSD_CAPS;
+    pd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    IDirectDrawSurface7* prim = nullptr;
+    dd->CreateSurface(&pd, &prim, nullptr);
+    IDirectDrawGammaControl* g = nullptr;
+    if (prim) prim->QueryInterface(IID_IDirectDrawGammaControl, reinterpret_cast<void**>(&g));
+    if (!g) return 1;
+    DDGAMMARAMP half = {}, inverted = {}, display = {}, got = {};
+    for (int i = 0; i < 256; i++) {
+        half.red[i] = half.green[i] = half.blue[i] = WORD(i * 0x80);
+        inverted.red[i] = inverted.green[i] = inverted.blue[i] = WORD(0xFFFF - i * 0x80);
+    }
+    HDC sdc = GetDC(nullptr);
+    if (!sdc || !GetDeviceGammaRamp(sdc, &display))
+        for (int i = 0; i < 256; i++) display.red[i] = display.green[i] = display.blue[i] = WORD(i << 8);
+    if (sdc) ReleaseDC(nullptr, sdc);
+    auto is = [&](const DDGAMMARAMP& r) {
+        got = {};
+        return SUCCEEDED(g->GetGammaRamp(0, &got)) && !memcmp(&got, &r, sizeof(r));
+    };
+    const HRESULT h0 = g->SetGammaRamp(0, &half);
+    const bool r0 = is(half);
+    const HRESULT h1 = g->SetGammaRamp(1, &half);
+    const bool r1 = is(inverted);
+    if (FILE* f = fopen(fail, "w")) fclose(f);
+    const HRESULT h2 = g->SetGammaRamp(1, &half);
+    DeleteFileA(fail);
+    const bool r2 = is(inverted);
+    const HRESULT h3 = g->SetGammaRamp(1, nullptr);
+    const bool r3 = is(display);
+    const HRESULT h4 = g->SetGammaRamp(0, nullptr);
+    const bool r4 = is(display);
+    CHECK(h0 == DD_OK && r0 && h1 == DD_OK && r1 && h2 == DDERR_GENERIC && r2 && h3 == DD_OK && r3 && h4 == DD_OK && r4,
+          "SetGammaRamp: half the identity 0x%08lx (read back %d); calibrated 0x%08lx (inverted by it %d); the calibrator "
+          "failing 0x%08lx (left as it was %d); CALIBRATE with NULL 0x%08lx (the display's %d); NULL 0x%08lx (%d)",
+          h0, r0, h1, r1, h2, r2, h3, r3, h4, r4);
+    // What it was called with: the display driver's name and the ramp given, twice (NULL: not
+    // called).
+    char lines[2][128] = {}, extra[128] = "";
+    int n = 0;
+    if (FILE* f = fopen(log, "r")) {
+        while (n < 2 && fgets(lines[n], sizeof(lines[n]), f)) n++;
+        if (!fgets(extra, sizeof(extra), f)) extra[0] = 0;
+        fclose(f);
+    }
+    CHECK(n == 2 && !strcmp(lines[0], "driver \"display\", red 0000 0080 0100 .. 7f80, green 7f80, blue 7f80\n") &&
+              !strcmp(lines[1], "driver \"display\", red 0000 0080 0100 .. 7f80, green 7f80, blue 7f80 (failing)\n") && !extra[0],
+          "the calibrator called %d times (more: %d): \"%.60s\", \"%.70s\"", n, extra[0] != 0, lines[0], lines[1]);
+    g->Release();
+    prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    DeleteFileA(log);
+    return 0;
+}
+
+// PrintScreen with EnablePrintScreen under HKLM\Software\Microsoft\DirectDraw, as measured on
+// XP (fmtprobe section 36): the key let go in the exclusive window (WM_KEYUP VK_SNAPSHOT, sent
+// as fmtprobe sends it) puts the primary on the clipboard as a bottom-up DIB, its corners
+// filled apart, at 16 bits (5-6-5, its masks), at 8 with a palette and without (the screen's
+// colours), at 32 (its masks), and the front of a flip chain after a flip. Without the value,
+// and in normal mode, the clipboard is left as it was.
+// (XP's colours of an 8-bit screen: GetSystemPaletteEntries there, and the DIB's table.)
+static const DWORD kXpScreenPalette[256] = {
+    0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0, 0xaca899, 0xece9d8, 0x993300, 0xcc3300,
+    0xff3300, 0x006600, 0x336600, 0x666600, 0x996600, 0xcc6600, 0xff6600, 0x009900, 0x339900, 0x669900, 0x999900, 0xcc9900,
+    0xff9900, 0x00cc00, 0x33cc00, 0x66cc00, 0x99cc00, 0xcccc00, 0xffcc00, 0x66ff00, 0x99ff00, 0xccff00, 0x00ff33, 0x3300ff,
+    0x660033, 0x990033, 0xcc0033, 0xff0033, 0x0033ff, 0x333333, 0x663333, 0x993333, 0xcc3333, 0xff3333, 0x006633, 0x336633,
+    0x666633, 0x996633, 0xcc6633, 0xff6633, 0x009933, 0x339933, 0x669933, 0x999933, 0xcc9933, 0xff9933, 0x00cc33, 0x33cc33,
+    0x66cc33, 0x99cc33, 0xcccc33, 0xffcc33, 0x33ff33, 0x66ff33, 0x99ff33, 0xccff33, 0xffff33, 0x000066, 0x330066, 0x660066,
+    0x990066, 0xcc0066, 0xff0066, 0x003366, 0x333366, 0x663366, 0x993366, 0xcc3366, 0xff3366, 0x006666, 0x336666, 0x666666,
+    0x996666, 0xcc6666, 0x009966, 0x339966, 0x669966, 0x999966, 0xcc9966, 0xff9966, 0x00cc66, 0x33cc66, 0x99cc66, 0xcccc66,
+    0xffcc66, 0x00ff66, 0x33ff66, 0x99ff66, 0xccff66, 0xff00cc, 0xcc00ff, 0x009999, 0x993399, 0x990099, 0xcc0099, 0x000099,
+    0x333399, 0x660099, 0xcc3399, 0xff0099, 0x006699, 0x336699, 0x663399, 0x996699, 0xcc6699, 0xff3399, 0x339999, 0x669999,
+    0x999999, 0xcc9999, 0xff9999, 0x00cc99, 0x33cc99, 0x66cc66, 0x99cc99, 0xcccc99, 0xffcc99, 0x00ff99, 0x33ff99, 0x66cc99,
+    0x99ff99, 0xccff99, 0xffff99, 0x0000cc, 0x330099, 0x6600cc, 0x9900cc, 0xcc00cc, 0x003399, 0x3333cc, 0x6633cc, 0x9933cc,
+    0xcc33cc, 0xff33cc, 0x0066cc, 0x3366cc, 0x666699, 0x9966cc, 0xcc66cc, 0xff6699, 0x0099cc, 0x3399cc, 0x6699cc, 0x9999cc,
+    0xcc99cc, 0xff99cc, 0x00cccc, 0x33cccc, 0x66cccc, 0x99cccc, 0xcccccc, 0xffcccc, 0x00ffcc, 0x33ffcc, 0x66ff99, 0x99ffcc,
+    0xccffcc, 0xffffcc, 0x3300cc, 0x6600ff, 0x9900ff, 0x0033cc, 0x3333ff, 0x6633ff, 0x9933ff, 0xcc33ff, 0xff33ff, 0x0066ff,
+    0x3366ff, 0x6666cc, 0x9966ff, 0xcc66ff, 0xff66cc, 0x0099ff, 0x3399ff, 0x6699ff, 0x9999ff, 0xcc99ff, 0xff99ff, 0x00ccff,
+    0x33ccff, 0x66ccff, 0x99ccff, 0xccccff, 0xffccff, 0x33ffff, 0x66ffcc, 0x99ffff, 0xccffff, 0xff6666, 0x66ff66, 0xffff66,
+    0x6666ff, 0xff66ff, 0x66ffff, 0xa50021, 0x5f5f5f, 0x777777, 0x868686, 0x969696, 0xcbcbcb, 0xb2b2b2, 0xd7d7d7, 0xdddddd,
+    0xe3e3e3, 0xeaeaea, 0xc0dcc0, 0xa6caf0, 0x000033, 0x330000, 0x330033, 0x003333, 0x161616, 0x1c1c1c, 0x222222, 0x292929,
+    0x555555, 0x4d4d4d, 0x424242, 0x393939, 0xff7c80, 0xff5050, 0xd60093, 0xccecff, 0xefd6c6, 0xe7e7d6, 0xada990, 0x33ff00,
+    0x660000, 0x990000, 0xcc0000, 0x003300, 0x333300, 0x663300, 0xfffbf0, 0x004e98, 0x808080, 0xff0000, 0x00ff00, 0xffff00,
+    0x0000ff, 0xff00ff, 0x00ffff, 0xffffff};
+
+static int RunPrintScreen() {
+    HKEY key = nullptr;
+    if (RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\DirectDraw", 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) {
+        CHECK(false, "PrintScreen: HKLM\\Software\\Microsoft\\DirectDraw can't be opened");
+        return 1;
+    }
+    BYTE old[64];
+    DWORD oldType = 0, oldSize = sizeof(old);
+    const bool had = RegQueryValueExA(key, "EnablePrintScreen", nullptr, &oldType, old, &oldSize) == ERROR_SUCCESS;
+    HWND hwnd = MakeWindow(WS_POPUP, 640, 480);
+    // The clipboard given a text of its own (to tell whether it was replaced), then the key.
+    auto press = [&] {
+        if (OpenClipboard(hwnd)) {
+            EmptyClipboard();
+            if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, 7)) {
+                if (char* t = static_cast<char*>(GlobalLock(g))) {
+                    memcpy(t, "ddtest", 7);
+                    GlobalUnlock(g);
+                }
+                if (!SetClipboardData(CF_TEXT, g)) GlobalFree(g);
+            }
+            CloseClipboard();
+        }
+        SendMessageA(hwnd, WM_KEYUP, VK_SNAPSHOT, 0xC1370001);
+        Pump();
+    };
+    // What the clipboard holds: `text` (the text left), or the DIB's header, its size, its table
+    // (masks or colours), its corners and pixel (1, 1).
+    struct Dib {
+        bool text = false, dib = false;
+        BITMAPINFOHEADER bi = {};
+        size_t size = 0;
+        DWORD table[256] = {};
+        DWORD tl = 0, tr = 0, bl = 0, br = 0, inner = 0;
+    };
+    auto clipboard = [&] {
+        Dib r;
+        if (!OpenClipboard(hwnd)) return r;
+        if (HANDLE t = GetClipboardData(CF_TEXT)) {
+            const char* s = static_cast<const char*>(GlobalLock(t));
+            r.text = s && !strcmp(s, "ddtest");
+            GlobalUnlock(t);
+        }
+        HANDLE hd = r.text ? nullptr : GetClipboardData(CF_DIB);
+        if (const auto* bi = hd ? static_cast<const BITMAPINFOHEADER*>(GlobalLock(hd)) : nullptr) {
+            r.bi = *bi;
+            r.size = GlobalSize(hd);
+            const DWORD entries = bi->biCompression == BI_BITFIELDS ? 3 : bi->biClrUsed;
+            const size_t stride = (size_t(bi->biWidth) * bi->biBitCount + 31) / 32 * 4, rows = size_t(abs(bi->biHeight));
+            if (bi->biSize == sizeof(BITMAPINFOHEADER) && entries <= 256 && bi->biBitCount >= 8 && bi->biWidth == 640 &&
+                rows == 480 && r.size >= bi->biSize + entries * 4 + stride * rows) {
+                const auto* table = reinterpret_cast<const DWORD*>(bi + 1);
+                memcpy(r.table, table, entries * 4);
+                const BYTE* bits = reinterpret_cast<const BYTE*>(table + entries);
+                auto px = [&](int x, int y) {
+                    DWORD v = 0;
+                    memcpy(&v, bits + stride * (rows - 1 - y) + size_t(x) * (bi->biBitCount / 8), bi->biBitCount / 8);
+                    return v;
+                };
+                r.dib = true;
+                r.tl = px(0, 0), r.tr = px(639, 0), r.bl = px(0, 479), r.br = px(639, 479), r.inner = px(1, 1);
+            }
+            GlobalUnlock(hd);
+        }
+        CloseClipboard();
+        return r;
+    };
+    auto fillCorners = [](IDirectDrawSurface7* s, DWORD bytes, DWORD other, DWORD tl, DWORD tr, DWORD bl, DWORD br) {
+        DDSURFACEDESC2 l = {};
+        l.dwSize = sizeof(l);
+        if (FAILED(s->Lock(nullptr, &l, DDLOCK_WAIT, nullptr))) return;
+        for (DWORD y = 0; y < l.dwHeight; y++)
+            for (DWORD x = 0; x < l.dwWidth; x++) {
+                const bool top = y == 0, bottom = y == l.dwHeight - 1, left = x == 0, right = x == l.dwWidth - 1;
+                const DWORD v = top && left ? tl : top && right ? tr : bottom && left ? bl : bottom && right ? br : other;
+                memcpy(static_cast<BYTE*>(l.lpSurface) + y * l.lPitch + x * bytes, &v, bytes);
+            }
+        s->Unlock(nullptr);
+    };
+    for (const bool on : {false, true}) {
+        const DWORD one = 1;
+        if (on) RegSetValueExA(key, "EnablePrintScreen", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one));
+        else RegDeleteValueA(key, "EnablePrintScreen");
+        IDirectDraw7* dd = nullptr;
+        DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);  // (the value read now)
+        if (!dd) continue;
+        dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        // 16 bits, 8 with a palette (red i, green 255 - i, blue i / 2) and without (the screen's
+        // colours), 32.
+        static const DWORD kDepths[] = {16, 8, 8, 32};
+        for (int m = 0; m < 4 && (on || m == 0); m++) {
+            const DWORD bpp = kDepths[m];
+            const HRESULT mode = dd->SetDisplayMode(640, 480, bpp, 0, 0);
+            DDSURFACEDESC2 pd = {};
+            pd.dwSize = sizeof(pd);
+            pd.dwFlags = DDSD_CAPS;
+            pd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+            IDirectDrawSurface7* prim = nullptr;
+            dd->CreateSurface(&pd, &prim, nullptr);
+            IDirectDrawPalette* pal = nullptr;
+            PALETTEENTRY e[256];
+            for (int i = 0; i < 256; i++) e[i] = {BYTE(i), BYTE(255 - i), BYTE(i / 2), 0};
+            if (prim && m == 1) {
+                dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, e, &pal, nullptr);
+                if (pal) prim->SetPalette(pal);
+            }
+            if (prim) {
+                if (bpp == 8) fillCorners(prim, 1, 0, 1, 2, 3, 255);
+                else if (bpp == 16) fillCorners(prim, 2, 0x0841, 0xF800, 0x07E0, 0x001F, 0xFFFF);
+                else fillCorners(prim, 4, 0x102030, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF);
+            }
+            press();
+            const Dib got = clipboard();
+            const BITMAPINFOHEADER& bi = got.bi;
+            const bool header = bi.biSize == 40 && bi.biWidth == 640 && bi.biHeight == 480 && bi.biPlanes == 1 &&
+                                bi.biBitCount == bpp && bi.biSizeImage == 0 && bi.biXPelsPerMeter == 1 && bi.biYPelsPerMeter == 1;
+            bool ok;
+            if (!on) {
+                ok = got.text;
+            } else if (bpp == 8) {
+                bool colours = true;
+                for (int i = 0; i < 256; i++)
+                    colours &= got.table[i] ==
+                               (pal ? DWORD(e[i].peRed) << 16 | DWORD(e[i].peGreen) << 8 | e[i].peBlue : kXpScreenPalette[i]);
+                ok = got.dib && header && bi.biCompression == BI_RGB && bi.biClrUsed == 256 && bi.biClrImportant == 256 &&
+                     got.size == 308264 && colours && got.tl == 1 && got.tr == 2 && got.bl == 3 && got.br == 255 && got.inner == 0;
+            } else {
+                const bool masks = bpp == 16 ? got.table[0] == 0xF800 && got.table[1] == 0x07E0 && got.table[2] == 0x001F
+                                             : got.table[0] == 0xFF0000 && got.table[1] == 0xFF00 && got.table[2] == 0xFF;
+                const bool corners =
+                    bpp == 16 ? got.tl == 0xF800 && got.tr == 0x07E0 && got.bl == 0x001F && got.br == 0xFFFF && got.inner == 0x0841
+                              : got.tl == 0xFF0000 && got.tr == 0xFF00 && got.bl == 0xFF && got.br == 0xFFFFFF && got.inner == 0x102030;
+                ok = got.dib && header && bi.biCompression == BI_BITFIELDS && bi.biClrUsed == 0 && bi.biClrImportant == 0 &&
+                     got.size == (bpp == 16 ? 614452u : 1228852u) && masks && corners;
+            }
+            CHECK(ok,
+                  "PrintScreen%s, 640x480x%lu%s (0x%08lx): %s; %lu bytes, %ldx%ld, %u bits, compression %lu, %lu colours (%lu "
+                  "important); the table %06lx %06lx %06lx .. %06lx; corners %lx %lx %lx %lx, (1, 1) %lx",
+                  on ? "" : " without EnablePrintScreen", bpp, bpp != 8 ? "" : pal ? " with a palette" : " without a palette", mode,
+                  got.text ? "the clipboard as it was" : got.dib ? "a DIB" : "nothing", static_cast<unsigned long>(got.size), bi.biWidth,
+                  bi.biHeight, bi.biBitCount, bi.biCompression, bi.biClrUsed, bi.biClrImportant, got.table[0], got.table[1],
+                  got.table[2], got.table[255], got.tl, got.tr, got.bl, got.br, got.inner);
+            if (pal) pal->Release();
+            if (prim) prim->Release();
+        }
+        if (on) {
+            // A flip chain: the front shown after the flip (the back's 2222).
+            dd->SetDisplayMode(640, 480, 16, 0, 0);
+            DDSURFACEDESC2 cd = {};
+            cd.dwSize = sizeof(cd);
+            cd.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+            cd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+            cd.dwBackBufferCount = 1;
+            IDirectDrawSurface7* front = nullptr;
+            dd->CreateSurface(&cd, &front, nullptr);
+            IDirectDrawSurface7* back = nullptr;
+            DDSCAPS2 bc = {DDSCAPS_BACKBUFFER, 0, 0, {0}};
+            if (front) front->GetAttachedSurface(&bc, &back);
+            HRESULT flip = E_FAIL;
+            if (back) {
+                DDBLTFX fx = {};
+                fx.dwSize = sizeof(fx);
+                fx.dwFillColor = 0x1111;
+                front->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+                fx.dwFillColor = 0x2222;
+                back->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+                flip = front->Flip(nullptr, DDFLIP_WAIT);
+                back->Release();
+            }
+            press();
+            const Dib got = clipboard();
+            CHECK(flip == DD_OK && got.dib && got.tl == 0x2222 && got.br == 0x2222 && got.inner == 0x2222,
+                  "PrintScreen, a flip chain flipped (0x%08lx): %s, corners %lx %lx, (1, 1) %lx (the back's 2222)", flip,
+                  got.dib ? "a DIB" : "no DIB", got.tl, got.br, got.inner);
+            if (front) front->Release();
+        }
+        dd->RestoreDisplayMode();
+        dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+        if (on) {
+            DDSURFACEDESC2 pd = {};
+            pd.dwSize = sizeof(pd);
+            pd.dwFlags = DDSD_CAPS;
+            pd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+            IDirectDrawSurface7* prim = nullptr;
+            dd->CreateSurface(&pd, &prim, nullptr);
+            press();
+            const Dib got = clipboard();
+            CHECK(got.text, "PrintScreen in normal mode, a primary made: %s", got.text ? "the clipboard as it was" : "replaced");
+            if (prim) prim->Release();
+        }
+        dd->Release();
+    }
+    if (had) RegSetValueExA(key, "EnablePrintScreen", 0, oldType, old, oldSize);
+    else RegDeleteValueA(key, "EnablePrintScreen");
+    RegCloseKey(key);
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// GDI's palette of the screen in an 8-bit exclusive mode, as measured on XP (fmtprobe section
+// 37): GetSystemPaletteEntries and GetSystemPaletteUse with no palette on the primary (the
+// static colours at the ends), with one on a plain surface or the back buffer (the same), on
+// the primary (its entries, the first black and the last white; no static colours), after
+// SetEntries (as given, the ends too), with another and after a flip, with the palette taken
+// off (the static colours back, the rest kept), released while the primary holds it (still
+// it), and the primary gone; the call's bounds; the screen's colour resolution.
+static int RunScreenPalette() {
+    HWND hwnd = MakeWindow(WS_POPUP, 640, 480);
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const HRESULT mode = dd->SetDisplayMode(640, 480, 8, 0, 0);
+    Pump();
+    DDSURFACEDESC2 d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+    d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    d.dwBackBufferCount = 1;
+    IDirectDrawSurface7 *front = nullptr, *back = nullptr, *plain = nullptr;
+    dd->CreateSurface(&d, &front, nullptr);
+    DDSCAPS2 bc = {DDSCAPS_BACKBUFFER, 0, 0, {0}};
+    if (front) front->GetAttachedSurface(&bc, &back);
+    d = {};
+    d.dwSize = sizeof(d);
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+    d.dwWidth = d.dwHeight = 16;
+    dd->CreateSurface(&d, &plain, nullptr);
+    // Palettes: A red i, green 255 - i, blue i / 2; B red 255 - i, green i / 2, blue i.
+    PALETTEENTRY a[256], b[256];
+    for (int i = 0; i < 256; i++) {
+        a[i] = {BYTE(i), BYTE(255 - i), BYTE(i / 2), 0};
+        b[i] = {BYTE(255 - i), BYTE(i / 2), BYTE(i), 0};
+    }
+    IDirectDrawPalette *pa = nullptr, *pb = nullptr;
+    dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, a, &pa, nullptr);
+    dd->CreatePalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, b, &pb, nullptr);
+    CHECK(SUCCEEDED(mode) && front && back && plain && pa && pb,
+          "GDI's palette of the screen: 640x480x8 (0x%08lx), a flip chain, palettes", mode);
+    if (FAILED(mode) || !front || !back || !plain || !pa || !pb) return 1;
+    auto rgb = [](const PALETTEENTRY& e) { return DWORD(e.peRed) << 16 | DWORD(e.peGreen) << 8 | e.peBlue; };
+    // The screen's palette now: `use`, the 256 entries, and whether they are `mid` (a palette's
+    // colours, or null: any) from 10 to 245 with the static colours at the ends (statics) or
+    // the palette's own from 1 to 254 between black and white.
+    auto state = [&](const char* what, UINT use, const PALETTEENTRY* mid, bool statics) {
+        static const DWORD kLow[10] = {0x000000, 0x800000, 0x008000, 0x808000, 0x000080,
+                                       0x800080, 0x008080, 0xC0C0C0, 0xACA899, 0xECE9D8};
+        static const DWORD kHigh[10] = {0xFFFBF0, 0x004E98, 0x808080, 0xFF0000, 0x00FF00,
+                                        0xFFFF00, 0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF};
+        PALETTEENTRY sys[256];
+        memset(sys, 0xEE, sizeof(sys));
+        HDC sdc = GetDC(nullptr);
+        const UINT got = GetSystemPaletteEntries(sdc, 0, 256, sys), gotUse = GetSystemPaletteUse(sdc);
+        ReleaseDC(nullptr, sdc);
+        int wrong = 0, first = -1;
+        for (int i = 0; i < 256; i++) {
+            const bool end = statics ? i < 10 || i >= 246 : i == 0 || i == 255;
+            const DWORD want = !end ? (mid ? rgb(mid[i]) : rgb(sys[i]))
+                               : statics ? (i < 10 ? kLow[i] : kHigh[i - 246])
+                               : i ? 0xFFFFFFu : 0u;
+            if ((rgb(sys[i]) != want || sys[i].peFlags) && !wrong++) first = i;
+        }
+        CHECK(got == 256 && gotUse == use && !wrong,
+              "GDI's palette of the screen, %s: %u entries, use %u (%u); %d not XP's (the first: %d, %06lx)", what, got, gotUse, use, wrong,
+              first, first >= 0 ? rgb(sys[first]) : 0);
+    };
+    HDC sdc = GetDC(nullptr);
+    const int res = GetDeviceCaps(sdc, COLORRES);
+    ReleaseDC(nullptr, sdc);
+    CHECK(res == 24, "the 8-bit screen's colour resolution: %d (24)", res);
+    state("no palette on the primary", SYSPAL_STATIC, nullptr, true);
+    plain->SetPalette(pa);
+    state("a palette on a plain surface", SYSPAL_STATIC, nullptr, true);
+    plain->SetPalette(nullptr);
+    back->SetPalette(pa);
+    state("a palette on the back buffer", SYSPAL_STATIC, nullptr, true);
+    back->SetPalette(nullptr);
+    front->SetPalette(pa);
+    state("a palette on the primary", SYSPAL_NOSTATIC256, a, false);
+    // SetEntries writes through as given, the first and last entries too.
+    PALETTEENTRY four[4] = {{1, 2, 3, 0}, {4, 5, 6, 0}, {7, 8, 9, 0}, {10, 11, 12, 0}};
+    pa->SetEntries(0, 0, 4, four);
+    pa->SetEntries(0, 100, 4, four);
+    pa->SetEntries(0, 252, 4, four);
+    PALETTEENTRY part[32];
+    memset(part, 0xEE, sizeof(part));
+    sdc = GetDC(nullptr);
+    HDC mdc = CreateCompatibleDC(sdc);
+    const UINT n0 = GetSystemPaletteEntries(sdc, 0, 4, part), n1 = GetSystemPaletteEntries(sdc, 100, 4, part + 4);
+    const UINT n2 = GetSystemPaletteEntries(sdc, 250, 20, part + 8), n3 = GetSystemPaletteEntries(sdc, 0, 256, nullptr);
+    const UINT n4 = GetSystemPaletteEntries(sdc, 0, 0, part + 16), n5 = GetSystemPaletteEntries(sdc, 256, 1, part + 16);
+    const UINT n6 = GetSystemPaletteEntries(mdc, 2, 2, part + 16);
+    DeleteDC(mdc);
+    ReleaseDC(nullptr, sdc);
+    CHECK(n0 == 4 && rgb(part[0]) == 0x010203 && rgb(part[3]) == 0x0A0B0C && n1 == 4 && rgb(part[4]) == 0x010203 &&
+              rgb(part[7]) == 0x0A0B0C && n2 == 6 && rgb(part[8]) == rgb(a[250]) && rgb(part[13]) == 0x0A0B0C &&
+              rgb(part[14]) == 0xEEEEEE && n3 == 256 && n4 == 0 && n5 == 0 && n6 == 2 && rgb(part[16]) == 0x070809,
+          "GDI's palette of the screen after SetEntries at 0, 100 and 252: (0, 4) %u: %06lx .. %06lx; (100, 4) %u: %06lx .. %06lx; "
+          "(250, 20) %u: %06lx .. %06lx, then %06lx; (0, 256, NULL) %u; (0, 0) %u; (256, 1) %u; a memory DC's (2, 2) %u: %06lx",
+          n0, rgb(part[0]), rgb(part[3]), n1, rgb(part[4]), rgb(part[7]), n2, rgb(part[8]), rgb(part[13]), rgb(part[14]), n3, n4, n5, n6,
+          rgb(part[16]));
+    // A palette's own entries, read back (XP SP3, fmtprobe's "palette entries read back"): as
+    // given until it is on the primary; there, and from then on, the low four bits of each
+    // peFlags are 5, and on this primary, a flip chain's, the first and last entries black and
+    // white, with DDPCAPS_ALLOW256 too (SetEntries on the primary then writes those two).
+    for (int kind = 0; kind < 4; kind++) {
+        const bool all = kind & 1;
+        const BYTE given = kind & 2 ? 0xFF : 0;
+        PALETTEENTRY want[256], got[256];
+        for (int i = 0; i < 256; i++) want[i] = {BYTE(i), BYTE(255 - i), BYTE(i / 2), given};
+        IDirectDrawPalette* pc = nullptr;
+        dd->CreatePalette(DDPCAPS_8BIT | (all ? DDPCAPS_ALLOW256 : 0), want, &pc, nullptr);
+        if (!pc) {
+            CHECK(false, "a palette's entries read back: the palette made");
+            continue;
+        }
+        auto ends = [&](bool force) {  // (black and white at the ends, their flags kept)
+            if (!force) return;
+            want[0] = {0, 0, 0, want[0].peFlags};
+            want[255] = {255, 255, 255, want[255].peFlags};
+        };
+        auto same = [&](const char* what) {
+            memset(got, 0xEE, sizeof(got));
+            const HRESULT hr = pc->GetEntries(0, 0, 256, got);
+            int wrong = 0, first = -1;
+            for (int i = 0; i < 256; i++)
+                if (memcmp(&got[i], &want[i], sizeof(PALETTEENTRY)) && !wrong++) first = i;
+            CHECK(hr == DD_OK && !wrong,
+                  "a palette's entries read back (%s, flags 0x%02x), %s: 0x%08lx, %d not XP's (the first: %d, %06lx/%02x for %06lx/%02x)",
+                  all ? "ALLOW256" : "8BIT", given, what, hr, wrong, first, first >= 0 ? rgb(got[first]) : 0,
+                  first >= 0 ? got[first].peFlags : 0, first >= 0 ? rgb(want[first]) : 0, first >= 0 ? want[first].peFlags : 0);
+        };
+        const PALETTEENTRY mixed[4] = {{1, 2, 3, 0}, {4, 5, 6, 0x01}, {7, 8, 9, 0x04}, {10, 11, 12, 0xFF}};
+        auto set = [&](DWORD at, bool realized) {
+            pc->SetEntries(0, at, 4, const_cast<PALETTEENTRY*>(mixed));
+            for (int i = 0; i < 4; i++) {
+                want[at + i] = mixed[i];
+                if (realized) want[at + i].peFlags = BYTE((mixed[i].peFlags & 0xF0) | 5);
+            }
+            ends(!all);
+        };
+        ends(!all);
+        same("just made");
+        set(100, false);
+        back->SetPalette(pc);
+        same("set at 100, on the back buffer");
+        back->SetPalette(nullptr);
+        front->SetPalette(pc);
+        for (PALETTEENTRY& e : want) e.peFlags = BYTE((e.peFlags & 0xF0) | 5);
+        ends(true);
+        same("on the primary");
+        set(0, true);
+        set(104, true);
+        set(252, true);
+        same("set at 0, 104 and 252 on the primary");
+        front->Flip(nullptr, DDFLIP_WAIT);
+        same("after a flip");
+        front->SetPalette(nullptr);
+        same("off the primary");
+        set(108, false);
+        same("set at 108 on no surface");
+        pc->Release();
+    }
+    front->SetPalette(pb);
+    state("another palette on the primary", SYSPAL_NOSTATIC256, b, false);
+    front->Flip(nullptr, DDFLIP_WAIT);
+    state("after a flip", SYSPAL_NOSTATIC256, b, false);
+    front->SetPalette(nullptr);
+    state("the palette taken off the primary", SYSPAL_STATIC, b, true);
+    front->SetPalette(pb);
+    pb->Release();
+    state("the palette released, still on the primary", SYSPAL_NOSTATIC256, b, false);
+    pa->Release();
+    plain->Release();
+    back->Release();
+    front->Release();
+    state("the primary released", SYSPAL_STATIC, b, true);
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    dd->Release();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+// ddraw.dll's activation in exclusive mode, as measured on XP (fmtprobe section 32), the
+// messages sent as fmtprobe sends them: the system settings while the game is in front, the
+// flip chain at a focus loss, WM_ACTIVATEAPP(TRUE) sent to the minimized window and while
+// another of the program's windows is in front, Alt+Tab's and Alt+Esc's key-up. (Where a focus
+// loss leaves the window as it is, minimize=off or i3, it isn't run.)
+static int RunActivation() {
+    if (!MinimizesOnFocusLoss()) {
+        fprintf(g_out, "SKIP activation as XP's: the focus loss doesn't minimize the window here\n");
+        return 0;
+    }
+    struct Sys {
+        BOOL shadow = FALSE, hot = FALSE, ime = FALSE;
+        UINT errorMode = 0;
+        bool semaphore = false, held = false;  // the fullscreen semaphore there; held (taken), not free
+    };
+    auto sys = []() {
+        Sys s;
+        SystemParametersInfoA(SPI_GETCURSORSHADOW, 0, &s.shadow, 0);
+        SystemParametersInfoA(SPI_GETHOTTRACKING, 0, &s.hot, 0);
+        SystemParametersInfoA(SPI_GETSHOWIMEUI, 0, &s.ime, 0);
+        s.errorMode = SetErrorMode(0);
+        SetErrorMode(s.errorMode);
+        if (HANDLE h = OpenSemaphoreA(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, "DDrawCheckFullscreenSemaphore")) {
+            s.semaphore = s.held = true;
+            if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) {  // free: given back
+                s.held = false;
+                ReleaseSemaphore(h, 1, nullptr);
+            }
+            CloseHandle(h);
+        }
+        return s;
+    };
+    // ddraw.dll's CheckFullscreen: whether a program holds the screen (see the end).
+    using CheckFn = BOOL(WINAPI*)();
+    const FARPROC checkFn = GetProcAddress(GetModuleHandleA("ddraw.dll"), "CheckFullscreen");
+    const auto check = reinterpret_cast<CheckFn>(reinterpret_cast<void*>(checkFn));
+    if (!check) return 1;
+    const BOOL checkBefore = check();
+    // The settings on, so that their going off shows (as on XP before: cursor shadow, hot
+    // tracking, IME status window), and an error mode of the test's own.
+    const Sys was = sys();
+    SystemParametersInfoA(SPI_SETCURSORSHADOW, 0, reinterpret_cast<PVOID>(TRUE), 0);
+    SystemParametersInfoA(SPI_SETHOTTRACKING, 0, reinterpret_cast<PVOID>(TRUE), 0);
+    SystemParametersInfoA(SPI_SETSHOWIMEUI, TRUE, nullptr, 0);
+    const UINT keepMode = SetErrorMode(SEM_NOGPFAULTERRORBOX);
+    const Sys before = sys();
+    HWND hwnd = MakeWindow(WS_POPUP | WS_VISIBLE, 640, 480);
+    SetForegroundWindow(hwnd);
+    Pump();
+    IDirectDraw7* dd = nullptr;
+    DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr);
+    if (!dd) return 1;
+    HRESULT hr = dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const HRESULT hm = dd->SetDisplayMode(640, 480, 16, 0, 0);
+    Pump();
+    const Sys front = sys();
+    CHECK(SUCCEEDED(hr) && SUCCEEDED(hm) && front.errorMode == (SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX) &&
+                  !front.hot && !front.ime && (!before.shadow || !front.shadow) && front.semaphore && front.held,
+          "exclusive, in front: no error boxes (mode 0x%x), no cursor shadow (%d), no hot tracking (%d), no IME status "
+          "window (%d), the fullscreen semaphore there and held (%d, %d)",
+          front.errorMode, front.shadow, front.hot, front.ime, front.semaphore, front.held);
+    // A flipping primary, flipped once: the GDI surface is the back buffer then.
+    DDSURFACEDESC2 fd = {};
+    fd.dwSize = sizeof(fd);
+    fd.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+    fd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    fd.dwBackBufferCount = 1;
+    IDirectDrawSurface7* prim = nullptr;
+    IDirectDrawSurface7* back = nullptr;
+    dd->CreateSurface(&fd, &prim, nullptr);
+    DDSCAPS2 bc = {DDSCAPS_BACKBUFFER, 0, 0, {0}};
+    if (prim) prim->GetAttachedSurface(&bc, &back);
+    if (!prim || !back) return 1;
+    auto gdiIs = [&]() {
+        IDirectDrawSurface7* g = nullptr;
+        dd->GetGDISurface(&g);
+        const int r = !g ? 0 : g == prim ? 1 : g == back ? 2 : 3;
+        if (g) g->Release();
+        return r;
+    };
+    prim->Flip(nullptr, DDFLIP_WAIT);
+    const int flipped = gdiIs();
+    // The focus lost, the window still in front: minimized, set aside (TestCooperativeLevel),
+    // the settings back, the flip chain back to the GDI surface; the surfaces can't be
+    // restored (the front: not the mode; the back buffer: through its front) until the game is
+    // back.
+    g_appMsgs = 0;
+    SendMessageA(hwnd, WM_ACTIVATEAPP, FALSE, 0);
+    Pump();
+    const Sys lost = sys();
+    hr = dd->TestCooperativeLevel();
+    const HRESULT rf = prim->Restore(), rb = back->Restore();
+    CHECK(flipped == 2 && IsIconic(hwnd) && hr == DDERR_NOEXCLUSIVEMODE && gdiIs() == 1 && rf == DDERR_WRONGMODE &&
+              rb == DDERR_IMPLICITLYCREATED && g_appMsgs == 1 && !g_appWp,
+          "focus lost (WM_ACTIVATEAPP(FALSE) in front): minimized (%d), set aside (0x%08lx), the GDI surface the front "
+          "buffer again (%d, after a flip %d), Restore 0x%08lx and 0x%08lx, the game told (%d)",
+          IsIconic(hwnd) != FALSE, hr, gdiIs(), flipped, rf, rb, g_appMsgs);
+    CHECK(lost.errorMode == before.errorMode && lost.hot == before.hot && lost.ime == before.ime &&
+              lost.shadow == before.shadow && !lost.semaphore,
+          "...the settings back as they were (error mode 0x%x, cursor shadow %d, hot tracking %d, IME %d, semaphore %d)",
+          lost.errorMode, lost.shadow, lost.hot, lost.ime, lost.semaphore);
+    // WM_ACTIVATEAPP(TRUE) to the minimized window: held back, nothing changes.
+    g_appMsgs = 0;
+    SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
+    Pump();
+    hr = dd->TestCooperativeLevel();
+    CHECK(IsIconic(hwnd) && g_appMsgs == 0 && hr == DDERR_NOEXCLUSIVEMODE,
+          "WM_ACTIVATEAPP(TRUE) to the minimized window: still minimized (%d), the game not told (%d), still set aside "
+          "(0x%08lx)",
+          IsIconic(hwnd) != FALSE, g_appMsgs, hr);
+    // Restored and brought to the front: the game told by a posted WM_ACTIVATEAPP(TRUE) naming
+    // its own thread, back in its mode, the settings off again.
+    ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+    Pump();
+    const Sys back2 = sys();
+    hr = dd->TestCooperativeLevel();
+    CHECK(GetForegroundWindow() == hwnd && hr == DD_OK && g_appMsgs == 1 && g_appWp &&
+              g_appLp == LPARAM(GetCurrentThreadId()) && !back2.hot && back2.semaphore,
+          "restored: in front (%d), back (0x%08lx), told by WM_ACTIVATEAPP(TRUE) with its own thread (%d: %d, 0x%lx), "
+          "the settings off again (hot tracking %d, semaphore %d)",
+          GetForegroundWindow() == hwnd, hr, g_appMsgs, int(g_appWp), static_cast<unsigned long>(g_appLp), back2.hot,
+          back2.semaphore);
+    // Another of the program's windows in front, WM_ACTIVATEAPP(TRUE) to the game's: passed on as
+    // FALSE, the game set aside, its window minimized.
+    HWND other = CreateWindowExA(0, "ddtest", "other", WS_POPUP | WS_VISIBLE, 100, 100, 100, 100, nullptr, nullptr,
+                                 GetModuleHandleA(nullptr), nullptr);
+    SetForegroundWindow(other);
+    Pump();
+    g_appMsgs = 0;
+    SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
+    Pump();
+    hr = dd->TestCooperativeLevel();
+    CHECK(GetForegroundWindow() == other && g_appMsgs == 1 && !g_appWp && !g_appLp && hr == DDERR_NOEXCLUSIVEMODE &&
+              IsIconic(hwnd),
+          "another of the program's windows in front, WM_ACTIVATEAPP(TRUE): the game told FALSE (%d: %d), set aside "
+          "(0x%08lx), minimized (%d)",
+          g_appMsgs, int(g_appWp), hr, IsIconic(hwnd) != FALSE);
+    DestroyWindow(other);
+    SetForegroundWindow(hwnd);
+    SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
+    Pump();
+    // Alt+Tab's and Alt+Esc's key-up: set aside (a posted WM_ACTIVATEAPP(FALSE) with its own
+    // thread); Tab without Alt and Alt+F4 change nothing. (The first: still minimized from
+    // above, held back, the game told again.)
+    struct Key {
+        const char* name;
+        WPARAM vk;
+        LPARAM lp;
+        bool aside;
+    };
+    static const Key kKeys[] = {{"Tab with Alt", VK_TAB, LPARAM(0xE00F0001), true},
+                                {"Tab without Alt", VK_TAB, LPARAM(0xC00F0001), false},
+                                {"Esc with Alt", VK_ESCAPE, LPARAM(0xE0010001), true},
+                                {"Esc without Alt", VK_ESCAPE, LPARAM(0xC0010001), true},
+                                {"F4 with Alt", VK_F4, LPARAM(0xE03E0001), false}};
+    for (const Key& k : kKeys) {
+        SetForegroundWindow(hwnd);
+        SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
+        Pump();
+        g_appMsgs = 0;
+        SendMessageA(hwnd, WM_SYSKEYUP, k.vk, k.lp);
+        Pump();
+        hr = dd->TestCooperativeLevel();
+        const bool min = IsIconic(hwnd) != FALSE;
+        CHECK(k.aside ? min && hr == DDERR_NOEXCLUSIVEMODE && g_appMsgs == 1 && !g_appWp &&
+                            g_appLp == LPARAM(GetCurrentThreadId())
+                      : !min && hr == DD_OK && g_appMsgs == 0,
+              "WM_SYSKEYUP, %s: %s (minimized %d, 0x%08lx, %d WM_ACTIVATEAPP: %d, 0x%lx)", k.name,
+              k.aside ? "set aside" : "nothing", min, hr, g_appMsgs, int(g_appWp), static_cast<unsigned long>(g_appLp));
+        if (min) ShowWindow(hwnd, SW_RESTORE);
+    }
+    auto inFront = [&]() {
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        SendMessageA(hwnd, WM_ACTIVATEAPP, TRUE, 0);
+        Pump();
+    };
+    // The Tab let go of the Alt+Tab that brought the game back (Alt down as it came back):
+    // nothing; the next one sets it aside. (Alt held with SendInput, as fmtprobe holds it.)
+    inFront();
+    SendMessageA(hwnd, WM_ACTIVATEAPP, FALSE, 0);
+    Pump();
+    INPUT alt = {};
+    alt.type = INPUT_KEYBOARD;
+    alt.ki.wVk = VK_MENU;
+    SendInput(1, &alt, sizeof(alt));
+    Pump();
+    if (GetAsyncKeyState(VK_MENU) < 0) {
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        Pump();
+        const HRESULT came = dd->TestCooperativeLevel();
+        g_appMsgs = 0;
+        SendMessageA(hwnd, WM_SYSKEYUP, VK_TAB, LPARAM(0xE00F0001));
+        Pump();
+        const bool firstMin = IsIconic(hwnd) != FALSE;
+        const int firstMsgs = g_appMsgs;
+        SendMessageA(hwnd, WM_SYSKEYUP, VK_TAB, LPARAM(0xE00F0001));
+        Pump();
+        hr = dd->TestCooperativeLevel();
+        CHECK(came == DD_OK && !firstMin && !firstMsgs && IsIconic(hwnd) && hr == DDERR_NOEXCLUSIVEMODE && g_appMsgs == 1 &&
+                  !g_appWp && g_appLp == LPARAM(GetCurrentThreadId()),
+              "Alt held as the game came back (0x%08lx): the first Tab let go changes nothing (minimized %d, %d "
+              "WM_ACTIVATEAPP), the second sets it aside (minimized %d, 0x%08lx, %d: %d, 0x%lx)",
+              came, firstMin, firstMsgs, IsIconic(hwnd) != FALSE, hr, g_appMsgs, int(g_appWp), static_cast<unsigned long>(g_appLp));
+    } else {
+        fprintf(g_out, "SKIP Alt held as the game came back: SendInput's Alt isn't down here\n");
+    }
+    alt.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &alt, sizeof(alt));
+    Pump();
+    // A suspend request in front (WM_POWER(PWR_SUSPENDREQUEST)): the game set aside first, by
+    // a sent WM_ACTIVATEAPP(FALSE) with its own thread, then told of the request.
+    inFront();
+    g_appMsgs = 0;
+    g_powerAt = -1;
+    const LRESULT pr = SendMessageA(hwnd, WM_POWER, PWR_SUSPENDREQUEST, 0);
+    Pump();
+    hr = dd->TestCooperativeLevel();
+    const Sys suspended = sys();
+    CHECK(IsIconic(hwnd) && hr == DDERR_NOEXCLUSIVEMODE && g_appMsgs == 1 && !g_appWp && g_appLp == LPARAM(GetCurrentThreadId()) &&
+              g_powerAt == 1 && pr == 0 && suspended.hot == before.hot && !suspended.semaphore,
+          "WM_POWER(PWR_SUSPENDREQUEST) in front: set aside (minimized %d, 0x%08lx), told first (%d WM_ACTIVATEAPP: %d, "
+          "0x%lx; the request after %d), the game's answer %ld, the settings back (hot tracking %d, semaphore %d)",
+          IsIconic(hwnd) != FALSE, hr, g_appMsgs, int(g_appWp), static_cast<unsigned long>(g_appLp), g_powerAt, long(pr),
+          suspended.hot, suspended.semaphore);
+    // CheckFullscreen while the game holds the screen: yes (and the display reset to the
+    // desktop's mode), the semaphore given back; so no the next time, the game left as it is.
+    inFront();
+    const BOOL checkFront = check();
+    Pump();
+    const Sys checked = sys();
+    const BOOL checkAgain = check();
+    hr = dd->TestCooperativeLevel();
+    Pump();
+    back->Release();
+    prim->Release();
+    dd->RestoreDisplayMode();
+    dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+    Pump();
+    const Sys normal = sys();
+    const BOOL checkNormal = check();
+    CHECK(!checkBefore && checkFront == TRUE && checked.semaphore && !checked.held && !checkAgain && hr == DD_OK && !checkNormal,
+          "CheckFullscreen: before %d; exclusive in front %d (the semaphore then there %d, held %d), again %d, the game still "
+          "exclusive (0x%08lx); in normal mode %d",
+          checkBefore, checkFront, checked.semaphore, checked.held, checkAgain, hr, checkNormal);
+    CHECK(normal.errorMode == before.errorMode && normal.hot == before.hot && normal.ime == before.ime &&
+              normal.shadow == before.shadow && !normal.semaphore,
+          "normal mode again: the settings as they were (error mode 0x%x, cursor shadow %d, hot tracking %d, IME %d, "
+          "semaphore %d)",
+          normal.errorMode, normal.shadow, normal.hot, normal.ime, normal.semaphore);
+    dd->Release();
+    DestroyWindow(hwnd);
+    SetErrorMode(keepMode);
+    SystemParametersInfoA(SPI_SETCURSORSHADOW, 0, reinterpret_cast<PVOID>(INT_PTR(was.shadow)), 0);
+    SystemParametersInfoA(SPI_SETHOTTRACKING, 0, reinterpret_cast<PVOID>(INT_PTR(was.hot)), 0);
+    SystemParametersInfoA(SPI_SETSHOWIMEUI, was.ime, nullptr, 0);
     return 0;
 }
 
@@ -5242,8 +7621,8 @@ static int RunMeasured() {
         }
         CHECK(z[0] == DDERR_INVALIDPIXELFORMAT && z[1] == DD_OK,
               "a system-memory Z buffer: 24 bits in 24 0x%08lx (DDERR_INVALIDPIXELFORMAT), 24 bits in 32 0x%08lx", z[0], z[1]);
-        // 15 bits with 1 of stencil: the emulation layer's, in system memory (in video memory
-        // the driver decides: VMware's, which doesn't list it, refused it).
+        // 15 bits with 1 of stencil: in system memory, and in video memory as the Voodoo3's
+        // driver took it on XP (VMware's, which doesn't list it, refused it).
         for (int i = 0; i < 2; i++) {
             d = {};
             d.dwSize = sizeof(d);
@@ -5263,7 +7642,11 @@ static int RunMeasured() {
             if (s) s->GetSurfaceDesc(&got);
             const DDPIXELFORMAT& pf = got.ddpfPixelFormat;
             if (i)
-                CHECK(hr == DDERR_INVALIDPIXELFORMAT, "a Z buffer of 15 bits and 1 of stencil in video memory: 0x%08lx (0x88760091)", hr);
+                CHECK(hr == DD_OK && pf.dwFlags == (DDPF_ZBUFFER | DDPF_STENCILBUFFER) && pf.dwZBitMask == 0xFFFE &&
+                          pf.dwStencilBitMask == 1,
+                      "a Z buffer of 15 bits and 1 of stencil in video memory: 0x%08lx, flags 0x%lx, Z mask 0x%lx, stencil mask "
+                      "0x%lx (made, 0x4400, 0xfffe, 0x1)",
+                      hr, pf.dwFlags, pf.dwZBitMask, pf.dwStencilBitMask);
             else
                 CHECK(hr == DD_OK && got.lPitch == 128 && pf.dwFlags == (DDPF_ZBUFFER | DDPF_STENCILBUFFER) &&
                           pf.dwZBufferBitDepth == 16 && pf.dwZBitMask == 0xFFFE && pf.dwStencilBitMask == 1,
@@ -5308,6 +7691,65 @@ static int RunMeasured() {
                   k.bits, k.zmask, k.stencilMask, k.memory ? "in system memory" : "no memory named", hr, got.ddsCaps.dwCaps,
                   got.lPitch, pf.dwFlags, pf.dwZBufferBitDepth, pf.dwZBitMask, pf.dwStencilBitDepth, pf.dwStencilBitMask);
             if (s) s->Release();
+        }
+        // Depth and stencil sharing bits, or the stencil outside the word: made as given, as
+        // measured on XP (fmtprobe section 29): 16 bits in video memory when none is named, 32 in
+        // system memory (refused in video memory); a depth fill writes dwFillDepth as it is.
+        const struct {
+            DWORD bits, zmask, stencilBits, stencilMask;
+        } shared[] = {{16, 0xFFFF, 1, 0x1},         {16, 0xFFFE, 2, 0x3},         {16, 0xFF00, 8, 0xFF00},
+                      {32, 0xFFFFFFFF, 8, 0xFF},     {32, 0xFFFFFF00, 9, 0x1FF},   {32, 0xFFFFFF, 8, 0xFF0000},
+                      {16, 0xFFFE, 1, 0x10000}};
+        for (const auto& k : shared) {
+            for (DWORD memory : {DWORD(0), DWORD(DDSCAPS_SYSTEMMEMORY), DWORD(DDSCAPS_VIDEOMEMORY)}) {
+                d = {};
+                d.dwSize = sizeof(d);
+                d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+                d.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | memory;
+                d.dwWidth = d.dwHeight = 64;
+                d.ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+                d.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER | DDPF_STENCILBUFFER;
+                d.ddpfPixelFormat.dwZBufferBitDepth = k.bits;
+                d.ddpfPixelFormat.dwStencilBitDepth = k.stencilBits;
+                d.ddpfPixelFormat.dwZBitMask = k.zmask;
+                d.ddpfPixelFormat.dwStencilBitMask = k.stencilMask;
+                s = nullptr;
+                hr = dd->CreateSurface(&d, &s, nullptr);
+                const bool video = k.bits == 16 ? memory != DDSCAPS_SYSTEMMEMORY : false;
+                const char* where = memory == DDSCAPS_SYSTEMMEMORY ? "system memory" : memory ? "video memory" : "no memory named";
+                if (k.bits == 32 && memory == DDSCAPS_VIDEOMEMORY) {
+                    CHECK(hr == DDERR_INVALIDPIXELFORMAT,
+                          "a Z buffer of 32 bits, Z mask 0x%lx and stencil mask 0x%lx, %s: 0x%08lx (0x88760091)", k.zmask,
+                          k.stencilMask, where, hr);
+                    if (s) s->Release();
+                    continue;
+                }
+                DDSURFACEDESC2 got = {};
+                got.dwSize = sizeof(got);
+                if (s) s->GetSurfaceDesc(&got);
+                const DDPIXELFORMAT& pf = got.ddpfPixelFormat;
+                DDBLTFX fx = {};
+                fx.dwSize = sizeof(fx);
+                fx.dwFillDepth = 0x12345678;
+                const HRESULT fill = s ? s->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL | DDBLT_WAIT, &fx) : E_FAIL;
+                DWORD word = 0;
+                DDSURFACEDESC2 l = {};
+                l.dwSize = sizeof(l);
+                if (s && SUCCEEDED(s->Lock(nullptr, &l, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                    word = k.bits == 16 ? *static_cast<const WORD*>(l.lpSurface) : *static_cast<const DWORD*>(l.lpSurface);
+                    s->Unlock(nullptr);
+                }
+                const DWORD caps = DDSCAPS_ZBUFFER | (video ? DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM : DDSCAPS_SYSTEMMEMORY);
+                CHECK(hr == DD_OK && got.ddsCaps.dwCaps == caps && pf.dwFlags == (DDPF_ZBUFFER | DDPF_STENCILBUFFER) &&
+                          pf.dwZBufferBitDepth == k.bits && pf.dwZBitMask == k.zmask && pf.dwStencilBitDepth == k.stencilBits &&
+                          pf.dwStencilBitMask == k.stencilMask && fill == DD_OK &&
+                          word == (k.bits == 16 ? 0x5678u : 0x12345678u),
+                      "a Z buffer of %lu bits, Z mask 0x%lx and stencil mask 0x%lx, %s: 0x%08lx, caps 0x%lx, flags 0x%lx, "
+                      "%lu bits, masks 0x%lx 0x%lx (%lu stencil bits); DEPTHFILL 0x12345678: 0x%08lx, the word 0x%lx",
+                      k.bits, k.zmask, k.stencilMask, where, hr, got.ddsCaps.dwCaps, pf.dwFlags, pf.dwZBufferBitDepth,
+                      pf.dwZBitMask, pf.dwStencilBitMask, pf.dwStencilBitDepth, fill, word);
+                if (s) s->Release();
+            }
         }
     }
 
@@ -5636,10 +8078,16 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     }
     else if (strstr(cmd, "mouse")) r = RunMouse() | RunNoWindowChanges();
     else if (strstr(cmd, "audit")) r = RunAudit(strstr(cmd, "borderless") != nullptr);
-    else if (strstr(cmd, "overlay")) r = RunOverlay() | RunOverlayWindowed() | RunDeviceWindow();
+    else if (strstr(cmd, "overlay"))
+        r = RunOverlay() | RunOverlayWindowed() | RunOverlayRanges() | RunOverlayAlpha() | RunOverlayBob() | RunVideoPorts() |
+            RunColorControls() | RunDeviceWindow();
     else if (strstr(cmd, "win")) r = RunWindowed();
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
-    else r = RunUnit() | RunExecute() | RunTargetGone() | RunFormats() | RunLifetime() | RunCoopModes() | RunMeasured();
+    else if (strstr(cmd, "calibrator")) r = RunCalibrator();
+    else
+        r = RunUnit() | RunExecute() | RunTargetGone() | RunPalTarget() | RunDrawnPrimary(8) | RunDrawnPrimary(32) |
+            RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() | RunCoopModes() |
+            RunActivation() | RunPrintScreen() | RunScreenPalette() | RunGamma() | RunMeasured();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);

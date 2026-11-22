@@ -87,13 +87,13 @@ HRESULT Surface::BltFourCC(RECT* dstRect, Surface* src, RECT* srcRect, DWORD fla
     Surface* const keyDst = destKeyFromSource ? src : this;
     auto yuv = [](const Buffer* b) { return b->fmt.Yuv() || b->fmt.Planar(); };
     const bool shared = dstConv && sb == db;
-    const KeyRange srcKey = SourceKeyOf(flags, fx, src), dstKey = DestKeyOf(flags, fx, keyDst);
+    const KeyRange srcKey = SourceKeyOf(flags, fx, src, this), dstKey = DestKeyOf(flags, fx, keyDst, this);
     bool markSrc = srcKey.on && srcConv && yuv(sb), markDst = dstKey.on && dstConv && yuv(db);
     if (shared && markSrc && dstKey.on) markSrc = markDst = false;
     auto keyFor = [](const KeyRange& k, bool mark, const Format& f) {
         if (mark) return BlitKey{true, 0, 0, 0xFF000000u};  // alpha 0: matched
-        if (!f.fourcc) return Masked(k, f.KeyMask());
-        return Masked({k.on, FourCCKeyToArgb(f.fourCC, k.lo), FourCCKeyToArgb(f.fourCC, k.hi)}, argb.KeyMask());
+        if (!f.fourcc) return Masked(k, f);
+        return Masked({k.on, FourCCKeyToArgb(f.fourCC, k.lo), FourCCKeyToArgb(f.fourCC, k.hi)}, argb);
     };
     BlitParams p;
     p.srcKey = keyFor(srcKey, markSrc, sb->fmt);

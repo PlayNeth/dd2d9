@@ -10,8 +10,10 @@ namespace dd2d9 {
 
 // antialiasing=N: the multisample type every render target and Z buffer gets (they are made
 // 32-bit and 24-bit then, the formats every GPU multisamples), the largest the GPU has up
-// to N; D3DMULTISAMPLE_NONE without the option or support. Decided once.
-D3DMULTISAMPLE_TYPE MsaaType(IDirect3DDevice9* d) {
+// to N; D3DMULTISAMPLE_NONE without the option or support, or once turned off on the device
+// (MultisamplingOff). Decided once.
+D3DMULTISAMPLE_TYPE MsaaType(const Gpu& gpu, IDirect3DDevice9* d) {
+    if (gpu.msaaOff) return D3DMULTISAMPLE_NONE;
     static int known = -1;  // Gpu lock
     if (known >= 0) return D3DMULTISAMPLE_TYPE(known);
     known = 0;
@@ -32,34 +34,66 @@ D3DMULTISAMPLE_TYPE MsaaType(IDirect3DDevice9* d) {
     return D3DMULTISAMPLE_TYPE(known);
 }
 
-// Z buffers DirectDraw can read and write: the GPU samples INTZ depth textures, renders to
-// R32F and runs ps_2_0 (most do, DXVK too), and zaccess isn't off. Decided once. Gpu lock held.
-bool ReadableDepth(IDirect3DDevice9* d) {
-    static int known = -1;
-    if (known >= 0) return known != 0;
-    known = 0;
+// The depth textures the GPU samples, for Z buffers DirectDraw can read and write: INTZ, or
+// where it lacks that, AMD's DF24 and DF16 (older Radeons, Intel's); RESZ, to read a
+// multisampled one; with an R32F render target and ps_2_0 for any (most GPUs, DXVK too),
+// and zaccess not off. Decided once. Gpu lock held.
+namespace {
+struct DepthTextures {
+    bool intz = false, df24 = false, df16 = false, resz = false;
+};
+const DepthTextures& DepthTexturesOf(IDirect3DDevice9* d) {
+    static DepthTextures known;
+    static bool decided = false;
+    if (decided) return known;
+    decided = true;
     if (!g_config.zAccess) {  // zaccess=off
         DD2D9_LOG("Direct3D: Z buffers on the GPU only (zaccess=off)");
-        return false;
+        return known;
     }
     IDirect3D9* d3d = nullptr;
     D3DDEVICE_CREATION_PARAMETERS cp;
     D3DCAPS9 caps;
     if (FAILED(d->GetCreationParameters(&cp)) || FAILED(d->GetDirect3D(&d3d)) || FAILED(d->GetDeviceCaps(&caps))) {
         if (d3d) d3d->Release();
-        return false;
+        return known;
     }
-    known = SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, D3DFMT_X8R8G8B8, D3DUSAGE_DEPTHSTENCIL,
-                                             D3DRTYPE_TEXTURE, kIntz)) &&
-            SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, D3DFMT_X8R8G8B8, D3DUSAGE_RENDERTARGET,
-                                             D3DRTYPE_SURFACE, D3DFMT_R32F)) &&
-            SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, D3DFMT_X8R8G8B8, 0, D3DRTYPE_TEXTURE,
-                                             D3DFMT_R32F)) &&
-            caps.PixelShaderVersion >= D3DPS_VERSION(2, 0);
+    auto has = [&](DWORD usage, D3DRESOURCETYPE type, D3DFORMAT f) {
+        return SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, D3DFMT_X8R8G8B8, usage, type, f));
+    };
+    if (has(D3DUSAGE_RENDERTARGET, D3DRTYPE_SURFACE, D3DFMT_R32F) && has(0, D3DRTYPE_TEXTURE, D3DFMT_R32F) &&
+        caps.PixelShaderVersion >= D3DPS_VERSION(2, 0)) {
+        known.intz = has(D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, kIntz);
+        known.df24 = has(D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, kDf24);
+        known.df16 = has(D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, kDf16);
+        known.resz = known.intz && has(D3DUSAGE_RENDERTARGET, D3DRTYPE_SURFACE, kResz);
+    }
     d3d->Release();
-    DD2D9_LOG("Direct3D: Z buffers %s", known ? "readable and writable by DirectDraw (INTZ)" : "on the GPU only (no INTZ)");
-    return known != 0;
+    if (known.intz)
+        DD2D9_LOG("Direct3D: Z buffers readable and writable by DirectDraw (INTZ%s)",
+                  known.resz ? "; antialiased ones resolved with RESZ" : "; antialiased ones not: no RESZ");
+    else if (known.df24 || known.df16)
+        DD2D9_LOG("Direct3D: Z buffers without stencil readable and writable by DirectDraw (%s%s%s; no INTZ)",
+                  known.df24 ? "DF24" : "", known.df24 && known.df16 ? ", " : "", known.df16 ? "DF16" : "");
+    else
+        DD2D9_LOG("Direct3D: Z buffers on the GPU only (no depth textures)");
+    return known;
 }
+}  // namespace
+
+// The depth texture a Z buffer of format `z` is made as for DirectDraw to read and write it:
+// INTZ (with its stencil), or one without stencil where the GPU lacks INTZ: DF16 where its
+// depth is 16 bits on the GPU (DepthFormat), DF24 for more.
+D3DFORMAT ReadableDepth(IDirect3DDevice9* d, const Format& z) {
+    const DepthTextures& t = DepthTexturesOf(d);
+    if (t.intz) return kIntz;
+    if (z.a) return D3DFMT_UNKNOWN;  // (its stencil: Format keeps it in `a`)
+    if (DepthFormat(z) == D3DFMT_D16) return t.df16 ? kDf16 : D3DFMT_UNKNOWN;
+    return t.df24 ? kDf24 : D3DFMT_UNKNOWN;
+}
+
+// antialiasing: whether a multisampled Z buffer can be read and written (resolved with RESZ).
+bool ResolvableDepth(IDirect3DDevice9* d) { return DepthTexturesOf(d).resz; }
 
 // The buffer's render-target (or Z) surface, made if needed. Gpu lock held, device usable.
 GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth) {
@@ -70,15 +104,18 @@ GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth) {
     if (g->surf) return g;
     if (g->failedGen == gpu.Generation() + 1) return nullptr;  // failed on this device already
     HRESULT hr;
-    const D3DMULTISAMPLE_TYPE msaa = MsaaType(d);
+    const D3DMULTISAMPLE_TYPE msaa = MsaaType(gpu, d);
     if (depth) {
         g->fmt = DepthFormat(b->fmt);
-        if (msaa) g->fmt = b->fmt.a ? D3DFMT_D24S8 : D3DFMT_D24X8;
+        // Multisampled: 24 bits, with stencil where the Z buffer has it or will be resolved
+        // into INTZ (RESZ resolves D24S8 into it; Wine's doesn't resolve D24X8).
+        if (msaa) g->fmt = b->fmt.a || ResolvableDepth(d) ? D3DFMT_D24S8 : D3DFMT_D24X8;
         hr = E_FAIL;
-        if (!msaa && ReadableDepth(d) &&
-            SUCCEEDED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_DEPTHSTENCIL, kIntz, D3DPOOL_DEFAULT, &g->ztex, nullptr))) {
+        const D3DFORMAT readable = ReadableDepth(d, b->fmt);
+        if (!msaa && readable != D3DFMT_UNKNOWN &&
+            SUCCEEDED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_DEPTHSTENCIL, readable, D3DPOOL_DEFAULT, &g->ztex, nullptr))) {
             hr = g->ztex->GetSurfaceLevel(0, &g->surf);
-            if (SUCCEEDED(hr)) g->fmt = kIntz;
+            if (SUCCEEDED(hr)) g->fmt = readable;
             else g->ztex->Release(), g->ztex = nullptr;
         }
         if (FAILED(hr)) hr = d->CreateDepthStencilSurface(b->w, b->h, g->fmt, msaa, 0, FALSE, &g->surf, nullptr);
@@ -86,8 +123,15 @@ GpuSurf* EnsureSurf(Gpu& gpu, IDirect3DDevice9* d, Buffer* b, bool depth) {
             g->fmt = D3DFMT_D16;
             hr = d->CreateDepthStencilSurface(b->w, b->h, g->fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g->surf, nullptr);
         }
+        g->msDepth = SUCCEEDED(hr) && msaa;
+        // Multisampled: read through an INTZ texture of its own it is resolved into (RESZ),
+        // where the GPU can; else antialiasing goes off once DirectDraw reads or writes it
+        // (GpuCpuAccess).
+        if (g->msDepth && ResolvableDepth(d) &&
+            FAILED(d->CreateTexture(b->w, b->h, 1, D3DUSAGE_DEPTHSTENCIL, kIntz, D3DPOOL_DEFAULT, &g->zres, nullptr)))
+            g->zres = nullptr;
         b->gpuStale = false;  // nothing to upload: a Z buffer starts cleared by the game
-        if (SUCCEEDED(hr) && g->ztex) {
+        if (SUCCEEDED(hr) && g->Readable()) {
             // Writable: uploaded as the surface's memory has it (zero-filled by DirectDraw,
             // which Wine's test_multiple_devices relies on: nothing passes).
             b->gpuStale = true;
@@ -218,7 +262,7 @@ static IDirect3DSurface9* LockUpload(IDirect3DDevice9* d, GpuSurf* g, const RECT
 void UploadSurf(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     Buffer* b = g->buf;
     if (g->depth) {  // only DDBLT_DEPTHFILL reaches one that can't be written (GpuSurf::fills)
-        if (g->ztex) UploadDepth(gpu, d, g);
+        if (g->Readable()) UploadDepth(gpu, d, g);
         else b->gpuStale = false;
         return;
     }
@@ -277,7 +321,7 @@ bool GpuBlt(Surface* dst, const RECT& d, Surface* src, const RECT& s, const std:
     if (!sg->surf || !sb->cpuStale) return false;  // (the device was reset: the CPU copy is all there is)
     // A primary's GPU copy made here is never drawn into multisampled: none made (the
     // antialiasing setting would make one).
-    if (!db->gpu && MsaaType(dev)) return false;
+    if (!db->gpu && MsaaType(gpu, dev)) return false;
     GpuSurf* dg = EnsureSurf(gpu, dev, db, false);
     if (!dg || !dg->surf || dg->fmt != sg->fmt) return false;
     Resolve(gpu, dev, sg);
@@ -351,6 +395,14 @@ void ReadBack(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
 void GpuCpuAccess(Surface* s, bool write, const RECT* area) {
     Buffer* b = s->buf;
     GpuSurf* g = b->gpu;
+    // An antialiased Z buffer the GPU can't resolve (no RESZ), read or written by DirectDraw:
+    // antialiasing goes off (MultisamplingOff), this one made again readable (its depth until
+    // now lost: the CPU copy's, as after a device loss).
+    if (g && g->gpu && g->msDepth && !g->zres) {
+        Gpu& gpu = *g->gpu;
+        GpuGuard l(gpu);
+        if (IDirect3DDevice9* d = gpu.Ensure(); d && ReadableDepth(d, b->fmt) != D3DFMT_UNKNOWN) MultisamplingOff(gpu, d);
+    }
     if (g && g->gpu && b->cpuStale) try {
         Gpu& gpu = *g->gpu;
         GpuGuard l(gpu);
@@ -362,8 +414,8 @@ void GpuCpuAccess(Surface* s, bool write, const RECT* area) {
             // A writable Z buffer: what the CPU wrote into a part read back alone goes up
             // first (the GPU's copy is the newer one elsewhere); a small area is read back
             // alone, the rest staying behind (cpuStale).
-            if (g->ztex && b->gpuStale) UploadDepth(gpu, d, g);
-            partly = g->ztex && area && ReadBackDepth(gpu, d, g, area);
+            if (g->Readable() && b->gpuStale) UploadDepth(gpu, d, g);
+            partly = g->Readable() && area && ReadBackDepth(gpu, d, g, area);
             if (!partly) ReadBack(gpu, d, g);
         }
         if (!partly) b->cpuStale = false;
@@ -374,11 +426,39 @@ void GpuCpuAccess(Surface* s, bool write, const RECT* area) {
     }
     // A writable Z buffer written with depth fills still pending: the CPU copy has them (the
     // fill drew there too), so the upload carries them, in order with the write.
-    if (write && g && g->depth && g->ztex && !g->fills.empty()) {
+    if (write && g && g->depth && g->Readable() && !g->fills.empty()) {
         for (const GpuSurf::Fill& f : g->fills) b->MarkGpuStale(&f.r);
         g->fills.clear();
     }
     if (write) b->MarkGpuStale(area);
+}
+
+// antialiasing where the GPU can't resolve a Z buffer, once DirectDraw reads or writes one
+// (GpuCpuAccess): off on the device from then on (logged), every render target's multisampled
+// image resolved into its own and let go, every multisampled Z buffer let go, made again as
+// one DirectDraw can read (with the CPU copy's depth, as after a device loss). The contexts
+// bind their targets again. g_lock and the Gpu lock held.
+void MultisamplingOff(Gpu& gpu, IDirect3DDevice9* d) {
+    if (gpu.msaaOff) return;
+    DD2D9_LOG("antialiasing off: DirectDraw reads or writes a Z buffer, which this GPU can't resolve while multisampled "
+              "(no RESZ)");
+    gpu.MultisamplingOff(d);
+    gpu.CloseScene();
+    gpu.stateOwner = nullptr;  // every context binds its targets and sends its states again
+    DeviceStateChanged();
+}
+
+void GpuSurf::MultisamplingOff(IDirect3DDevice9* d) {
+    if (msDepth) {
+        ReleaseGpuResources();
+    } else if (ms) {
+        Resolve(*gpu, d, this);
+        ms->Release();
+        ms = nullptr;
+        if (msCopy) msCopy->Release();
+        msCopy = nullptr;
+        msNewer = msStale = false;
+    }
 }
 
 IDirect3DSurface9* GpuNewestSurface(Buffer* b) {

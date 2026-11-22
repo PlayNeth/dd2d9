@@ -93,19 +93,16 @@ bool AdapterIdentifier(DDDEVICEIDENTIFIER2* out) {
 
 Presenter::Presenter(DDraw* dd) : ovGpu_(NewOverlayGpu()), dd_(dd) {
     InitializeCriticalSection(&gammaLock_);
-    for (int c = 0; c < 3; c++) {
-        WORD* ch = c == 0 ? gammaRamp_.red : c == 1 ? gammaRamp_.green : gammaRamp_.blue;
-        for (int i = 0; i < 256; i++) {
-            ch[i] = WORD(i * 257);
-            gammaLut_[c][i] = uint8_t(i);
-        }
-    }
+    IdentityRamp(&gammaRamp_);
+    for (int c = 0; c < 3; c++)
+        for (int i = 0; i < 256; i++) gammaLut_[c][i] = uint8_t(i);
 }
 
 Presenter::~Presenter() {
     Stop();
     ReleaseWindows(this);
     DeleteOverlayGpu(ovGpu_);
+    DeletePaletteFrame(palFrame_);  // (its device resources gone with LeaveGpu)
     if (gdiDc_ && !gdiPending_) {
         SelectObject(gdiDc_, gdiOld_);
         DeleteObject(gdiBm_);
@@ -216,11 +213,19 @@ void Presenter::SetGamma(const DDGAMMARAMP& ramp) {
     LeaveCriticalSection(&gammaLock_);
 }
 
+void Presenter::SetColor(const ColorTransform* t) {
+    EnterCriticalSection(&gammaLock_);
+    colorActive_ = t != nullptr;
+    color_ = t ? *t : ColorTransform();
+    LeaveCriticalSection(&gammaLock_);
+}
+
 // ---------------------------------------------------------------- device
 
 // The staging surface and the shaders' resources (the shared device's).
 void Presenter::ReleaseGpuResources() {
     if (ovGpu_) ReleaseOverlayGpu(ovGpu_);
+    ReleasePaletteFrame(palFrame_);
     if (staging_) staging_->Release();
     staging_ = nullptr;
     if (gammaSrc_) gammaSrc_->Release();
@@ -233,6 +238,13 @@ void Presenter::ReleaseGpuResources() {
     gammaPs_ = nullptr;
     gammaW_ = gammaH_ = 0;
     gammaTexVersion_ = 0;
+    if (colorSrc_) colorSrc_->Release();
+    if (colorOut_) colorOut_->Release();
+    if (colorPs_) colorPs_->Release();
+    colorSrc_ = nullptr;
+    colorOut_ = nullptr;
+    colorPs_ = nullptr;
+    colorW_ = colorH_ = 0;
     if (prescaled_) prescaled_->Release();
     prescaled_ = nullptr;
     preW_ = preH_ = 0;
@@ -243,7 +255,7 @@ void Presenter::ReleaseGpuResources() {
     sharpW_ = sharpH_ = 0;
     stW_ = stH_ = 0;
     stagingStale_ = true;
-    gammaFail_ = preFail_ = sharpFail_ = FailedSize();  // (a new device may make them)
+    gammaFail_ = colorFail_ = preFail_ = sharpFail_ = FailedSize();  // (a new device may make them)
     gammaLutFailed_ = false;
 }
 
@@ -485,6 +497,9 @@ void Presenter::Loop() {
         } dropOverlays{overlays, keyPrimary};
         bool cpuOverlays = false;  // overlays laid over the frame on the CPU (no pixel shaders)
         bool gpuFrame = false;     // snap.buf's render target is the newest copy: presented from it
+        // The primary's colour controls, and whether the CPU applies them (see below).
+        bool colorOn = false, colorCpu = false;
+        ColorTransform color;
         RECT area = {0, 0, 0, 0};  // what to convert, in primary surface coordinates
         uint64_t seq = 0;
         bool primaryExists = false;
@@ -499,9 +514,21 @@ void Presenter::Loop() {
                 seq = ++convertSeq_;
                 RECT changed;
                 bool all = dd_->TakeDirty(&changed);
+                // The primary's gamma ramp and colour controls where the GPU can't apply them (no
+                // pixel shaders: GammaOnCpu, ColorOnCpu): applied to the frame as the CPU copy is
+                // converted (a frame Direct3D drew read back for them); the colour controls to
+                // the whole frame as that starts or stops.
+                EnterCriticalSection(&gammaLock_);
+                colorOn = colorActive_;
+                color = color_;
+                const bool gammaCpu = gammaActive_ && GammaOnCpu(sw, sh);
+                LeaveCriticalSection(&gammaLock_);
+                colorCpu = colorOn && ColorOnCpu(sw, sh);
                 // The staging surface holds the last converted frame: a partial update
                 // needs it to show this very surface and buffer, at the same position.
-                all = all || stagingStale_ || !EqualRect(&src, &lastSrc_) || p != lastPrimary_ || p->buf != lastBuf_;
+                all = all || stagingStale_ || !EqualRect(&src, &lastSrc_) || p != lastPrimary_ || p->buf != lastBuf_ ||
+                      colorCpu != colorCpuShown_;
+                colorCpuShown_ = colorCpu;
                 // Overlays shown on it: drawn over the frame in the back buffer (DrawOverlaysGpu),
                 // or without pixel shaders laid over the whole frame on the CPU, converted whole
                 // (and the next frame too, see stagingStale_ below: what they covered comes back).
@@ -518,14 +545,23 @@ void Presenter::Loop() {
                 if (all) area = src;
                 else if (!IntersectRect(&area, &changed, &src)) SetRectEmpty(&area);
                 // Direct3D drew into it since the CPU copy was made: shown straight from
-                // its render target, the whole frame (the staging surface no longer holds it).
-                // A palettized one goes through its CPU copy (read back now): the palette is
-                // applied there. So does a source rectangle outside the surface (a window
-                // partly off the screen), which StretchRect would refuse.
+                // its render target, the whole frame (the staging surface no longer holds it),
+                // a palettized one through its palette (PaletteFrameGpu). One goes through its
+                // CPU copy (read back now) instead where that can't be done (no pixel shaders),
+                // for a source rectangle outside the surface (a window partly off the screen),
+                // which StretchRect would refuse, with overlays laid over it on the CPU, and with a
+                // gamma ramp or colour controls the CPU applies.
                 const bool inside = src.left >= 0 && src.top >= 0 && src.right <= p->buf->w && src.bottom <= p->buf->h;
-                // So does one with overlays laid over it on the CPU.
+                if (p->buf->fmt.pal8 && !palFrame_) {
+                    try {
+                        palFrame_ = NewPaletteFrame();
+                    } catch (const std::bad_alloc&) {
+                        // (read back, as without pixel shaders)
+                    }
+                }
+                const bool palCpu = p->buf->fmt.pal8 && (!palFrame_ || PaletteFrameFailed(palFrame_));
                 if (!IsRectEmpty(&area) && p->buf->gpu && p->buf->cpuStale &&
-                    (p->buf->fmt.pal8 || !inside || cpuOverlays)) {
+                    (palCpu || !inside || cpuOverlays || gammaCpu || colorCpu)) {
                     GpuCpuAccess(p, false);
                     area = src;
                 }
@@ -575,7 +611,9 @@ void Presenter::Loop() {
         }
         if (snap.buf && !gpuFrame) {
             const double t0 = Seconds();
-            Convert(snap, area, frame_.data() + size_t(area.top - src.top) * sw + (area.left - src.left), int(sw * 4));
+            uint32_t* const at = frame_.data() + size_t(area.top - src.top) * sw + (area.left - src.left);
+            Convert(snap, area, at, int(sw * 4));
+            if (colorCpu) ApplyColorCpu(at, int(sw), area.right - area.left, area.bottom - area.top, color);
             if (cpuOverlays) {
                 OverlayGdi g = {nullptr, 0, 0, src.left, src.top};
                 if (windowed && OverlaysKeyedOnDest(overlays) && CaptureGdi(hwnd, LONG(sw), LONG(sh))) {
@@ -638,13 +676,23 @@ void Presenter::Loop() {
                 keySrc = rt;
                 keyRect = src;
                 keyGammaOn = false;  // (before ApplyGammaGpu)
+                if (snap.fmt.pal8) {
+                    if (IDirect3DSurface9* q = PaletteFrameGpu(gpu, palFrame_, rt, src, snap.pal)) {
+                        source = keySrc = q;
+                        sourceRect = keyRect = {0, 0, src.right - src.left, src.bottom - src.top};
+                    } else {
+                        MarkDirty();  // (read back from the next frame on)
+                    }
+                }
                 EnterCriticalSection(&gammaLock_);
                 const bool gammaOn = gammaActive_;
                 LeaveCriticalSection(&gammaLock_);
                 if (gammaOn) {
-                    if (IDirect3DSurface9* g = ApplyGammaGpu(d, rt, src)) {
+                    if (IDirect3DSurface9* g = ApplyGammaGpu(d, source, sourceRect)) {
                         source = g;
                         sourceRect = {0, 0, src.right - src.left, src.bottom - src.top};
+                    } else if (GammaOnCpu(sw, sh)) {
+                        MarkDirty();  // (the CPU applies it from the next frame on)
                     }
                 }
                 snap.buf->Release();
@@ -673,6 +721,16 @@ void Presenter::Loop() {
         }
         CountPresent(lockTime, convertTime,
                      double(area.right - area.left) * (area.bottom - area.top) / (double(sw) * sh));
+        // The primary's colour controls, over the frame as it is shown by now (overlays get
+        // their own as they're drawn). Without pixel shaders, by the CPU from the next frame on.
+        if (colorOn && !colorCpu) {
+            if (IDirect3DSurface9* c = ApplyColorGpu(d, source, sourceRect, color)) {
+                source = c;
+                sourceRect = {0, 0, sourceRect.right - sourceRect.left, sourceRect.bottom - sourceRect.top};
+            } else if (ColorOnCpu(sw, sh)) {
+                MarkDirty();
+            }
+        }
 
         if (IDirect3DSurface9* bb = gpu.TargetBackBuffer()) {
             // Fitted into the target area of the back buffer (the client area's part on the

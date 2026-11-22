@@ -29,7 +29,8 @@ so the mode-switch tests fail there).
 - To look at one sub-test: `WT_ONLY=test_lost_device WINETEST_PLATFORM=windows wine work/ddraw7.exe`,
   with `log=2` in a `dd2d9.ini` next to it.
 
-`baseline.json` was last recorded from dd2d9 1.1.0 (first made from 0.9.0) with Wine 11.0 (WoW64) on Xvnc. Another Wine
+`baseline.json` was last recorded from dd2d9 1.1.0 (first made from 0.9.0) with Wine 11.0 (WoW64) on Xvnc, and
+`test_range_colorkey`'s counts from 1.9.0 (colour-key ranges, below). Another Wine
 version or X server may move a few display-related results; compare runs from the
 same machine when in doubt. A full run takes a few hours; the four `ddrawN` files can
 run at once (`--only`, each with its own `--display` and `--prefix`), but then the
@@ -46,6 +47,7 @@ The differences dd2d9 makes on purpose (see the main README), and environment on
 | `test_map_synchronisation` | a vertex buffer written while the GPU still draws from it (`DDLOCK_NOOVERWRITE`) shows in that draw on Windows; dd2d9 hands the vertices over at the draw |
 | `test_draw_primitive` (one check) | the first `DrawIndexedPrimitiveVB` with no indices fails on Windows and the same call then succeeds (Wine fails it too) |
 | `test_cross_device_blt` | dd2d9 converts between pixel formats in Blt; `ddraw.dll` refuses (`DDERR_UNSUPPORTED`) |
+| `test_range_colorkey` | colour-key ranges are taken in video memory (where a surface goes when no memory is named), as XP's `ddraw.dll` takes them with a driver that has them (the Voodoo3's); the tests follow drivers without them (`DDERR_NOCOLORKEYHW`), and don't release the surfaces they expected to fail (the object's count, ddraw4 and ddraw7) |
 | `test_compute_sphere_visibility` (ddraw4, tests 2 and 5) | Windows' DX6 answers there aren't understood (Wine fails them too) |
 | `test_surface_attachment`, `test_flip` (ddraw1) | a reference `ddraw.dll` leaks when a DirectDraw 1 flip chain shrinks |
 | `test_getdc` (A2R10G10B10) | Wine's GDI has no DC for that format; Windows does |

@@ -32,12 +32,43 @@ static bool ZTargets(IDirect3DDevice9* d, GpuSurf* g) {
 // The largest lock read back alone (ReadBackDepth's `part`).
 constexpr int kZTile = 64;
 
+// The colour target bound with the Z buffer to fill or write it: `zrt`, or a multisampled
+// Z buffer's own (D3D9 binds them together only with the same multisampling: X8R8G8B8, the
+// format every GPU multisamples, as MsaaType checked). Gpu lock held.
+static IDirect3DSurface9* DepthColorTarget(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
+    if (!g->msDepth) return g->zrt;
+    const Buffer* b = g->buf;
+    if (!g->zrtMs && FAILED(d->CreateRenderTarget(b->w, b->h, D3DFMT_X8R8G8B8, MsaaType(gpu, d), 0, FALSE, &g->zrtMs, nullptr)))
+        g->zrtMs = nullptr;
+    return g->zrtMs;
+}
+
+// antialiasing: the multisampled Z buffer resolved into `zres` (RESZ: with it bound, the INTZ
+// texture at stage 0 and a draw made, the render state's value resolves it there). Within a
+// pass, whose end puts the states back (the point size too, here). Gpu lock held.
+static bool ResolveDepth(QuadPass& pass, Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
+    IDirect3DSurface9* const ct = DepthColorTarget(gpu, d, g);
+    if (!ct) return false;
+    pass.Target(ct, g->surf);
+    pass.Texture(0, g->zres);
+    pass.State(D3DRS_ZENABLE, FALSE);
+    pass.State(D3DRS_ZWRITEENABLE, FALSE);
+    pass.State(D3DRS_COLORWRITEENABLE, 0);
+    const float point[6] = {0, 0, 0, 1, 0, 0};  // (x, y, z, rhw, u, v: the pass's vertices)
+    if (!pass.DrawUP(D3DPT_POINTLIST, 1, point, sizeof(point))) return false;
+    DWORD size = 0;
+    d->GetRenderState(D3DRS_POINTSIZE, &size);
+    d->SetRenderState(D3DRS_POINTSIZE, kReszCode);
+    d->SetRenderState(D3DRS_POINTSIZE, size == kReszCode ? 0 : size);  // (a change again: the next resolve too)
+    return true;
+}
+
 // The depth the GPU has, into the CPU copy (in its format, its stencil bits kept): the
 // pending depth fills applied first. `part`: only that rectangle (at most kZTile square),
 // the rest of the CPU copy left as it was (still behind). false: not read. Gpu lock held.
 bool ReadBackDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g, const RECT* part) {
     Buffer* b = g->buf;
-    if (!g->ztex || !ZTargets(d, g)) return false;
+    if (!g->Readable() || !ZTargets(d, g)) return false;
     const RECT all = {0, 0, b->w, b->h};
     RECT src = all;  // (a Blt's rectangle comes here before Blt checks it: kept inside)
     if (part && !IntersectRect(&src, part, &all)) return false;
@@ -57,15 +88,21 @@ bool ReadBackDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g, const RECT* part) 
     {
         QuadPass pass(gpu, d, g->zreadPs);
         if (!g->fills.empty()) {
-            pass.Target(g->zrt, g->surf);  // (as large as the Z buffer, which D3D9 needs for the fills)
+            // (A target as large as the Z buffer, which D3D9 needs for the fills.)
+            IDirect3DSurface9* const ct = DepthColorTarget(gpu, d, g);
+            if (!ct) return false;
+            pass.Target(ct, g->surf);
             for (const GpuSurf::Fill& f : g->fills) {
                 const D3DRECT rect = {f.r.left, f.r.top, f.r.right, f.r.bottom};
-                d->Clear(1, &rect, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, f.z, 0);
+                d->Clear(1, &rect, D3DCLEAR_ZBUFFER | (HasStencil(g->fmt) ? D3DCLEAR_STENCIL : 0), 0, f.z, 0);
             }
             g->fills.clear();
         }
+        if (g->zres && !ResolveDepth(pass, gpu, d, g)) return false;
         pass.Target(rt);  // (the Z buffer sampled now: not bound as well)
-        pass.Texture(0, g->ztex);
+        pass.Texture(0, g->ZRead());
+        pass.State(D3DRS_ZENABLE, FALSE);  // (no Z buffer bound: as the pass has it, after a resolve too)
+        pass.State(D3DRS_COLORWRITEENABLE, 0xF);
         if (!pass.Draw(part ? RECT{0, 0, w, h} : all, src, b->w, b->h)) return false;
     }
     gpu.CloseScene();
@@ -144,10 +181,12 @@ void UploadDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     g->zupSys->UnlockRect(0);  // (its dirty rectangle: UpdateTexture copies that)
     gpu.CloseScene();
     if (FAILED(d->UpdateTexture(g->zupSys, g->zup))) return;
+    IDirect3DSurface9* const ct = DepthColorTarget(gpu, d, g);
+    if (!ct) return;
     bool drawn;
     {
         QuadPass pass(gpu, d, g->zwritePs);
-        pass.Target(g->zrt, g->surf);
+        pass.Target(ct, g->surf);
         pass.Texture(0, g->zup);
         pass.State(D3DRS_ZENABLE, TRUE);  // (written whatever is there: ZFUNC ALWAYS)
         pass.State(D3DRS_ZWRITEENABLE, TRUE);
@@ -157,7 +196,7 @@ void UploadDepth(Gpu& gpu, IDirect3DDevice9* d, GpuSurf* g) {
     if (drawn) b->gpuStale = false;
 }
 
-bool GpuDepthWritable(const Buffer* b) { return b->gpu && b->gpu->depth && b->gpu->ztex; }
+bool GpuDepthFillable(const Buffer* b) { return b->gpu && b->gpu->depth; }
 
 bool GpuDepthFill(Surface* s, const RECT& r, DWORD value) {
     GpuSurf* g = s->buf->gpu;
@@ -169,7 +208,7 @@ bool GpuDepthFill(Surface* s, const RECT& r, DWORD value) {
     if (r.left <= 0 && r.top <= 0 && r.right >= s->buf->w && r.bottom >= s->buf->h) g->WStart();
     // A writable Z buffer with writes of the CPU's waiting to go up: the fill, drawn into the
     // CPU copy too, goes up with them, in order.
-    if (g->ztex && s->buf->gpuStale) return true;
+    if (g->Readable() && s->buf->gpuStale) return true;
     // A fill covering an earlier one replaces it: a game filling every frame without drawing
     // in between (a paused half of a split screen) keeps one per viewport, in order.
     auto covered = [&r](const GpuSurf::Fill& f) {

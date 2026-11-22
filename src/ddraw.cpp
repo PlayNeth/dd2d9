@@ -28,6 +28,7 @@ DDraw::DDraw() {
         wraps_[1] = new DDWrap<2>(this);
         wraps_[2] = new DDWrap<4>(this);
         wraps_[3] = new DDWrap<7>(this);
+        videoPorts_ = NewVideoPortContainer(this);
         gpu_ = new Gpu;
         presenter_ = new Presenter(this);
         Guard l;
@@ -65,6 +66,7 @@ void DDraw::FreeParts() {
     delete static_cast<DDWrap<2>*>(wraps_[1]);
     delete static_cast<DDWrap<4>*>(wraps_[2]);
     delete static_cast<DDWrap<7>*>(wraps_[3]);
+    DeleteVideoPortContainer(videoPorts_);
 }
 
 void* DDraw::Iface(int v) {
@@ -89,6 +91,12 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out, int fromVersion) {
         *out = Iface(v);
         return S_OK;
     }
+    // The video port container: always (ddraw.dll's QueryInterface checks nothing for it).
+    if (IsVideoPortContainerIid(r)) {
+        AddRef(kVideoPortContainer);
+        *out = videoPorts_;
+        return S_OK;
+    }
     // Direct3D: 7 on DirectDrawCreateEx's objects, 3-6 on the others (as ddraw.dll loads
     // d3dim700.dll or d3dim.dll).
     HRESULT hr = dd7 ? D3D7Query(this, r, out, fromVersion) : D3DLegacyQuery(this, r, out, fromVersion);
@@ -97,7 +105,9 @@ HRESULT DDraw::QueryInterface(REFIID r, void** out, int fromVersion) {
     return E_NOINTERFACE;
 }
 
-static int IfaceIndex(int version) { return version == 1 ? 0 : version == 2 ? 1 : version == 4 ? 2 : 3; }
+static int IfaceIndex(int version) {
+    return version == 1 ? 0 : version == 2 ? 1 : version == 4 ? 2 : version == DDraw::kVideoPortContainer ? 4 : 3;
+}
 
 // log=2 traces these (whether a game lets go of its old DirectDraw object before making
 // another decides what the new one may do). Surfaces made through IDirectDraw4/7 hold a
@@ -140,6 +150,7 @@ void DDraw::TearDown() {
             RestoreDisplay();
             RestoreSavedWindow(true);
             UnhookWindow();
+            if (g_exclusiveDD == this) ExclusiveSettings(false);
             {
                 Guard l;
                 if (g_exclusiveDD == this) g_exclusiveDD = nullptr;
@@ -173,6 +184,7 @@ HRESULT DDraw::Initialize(GUID*, int version) {
     if (initialized) return DDERR_ALREADYINITIALIZED;
     initialized = true;
     dd7 = version == 7;
+    ReadPrintScreenSetting();  // (as ddraw.dll's object creation reads it)
     return DD_OK;
 }
 
@@ -253,7 +265,7 @@ HRESULT DDraw::GetGDISurface(void** out, int version) {
 }
 
 // Flips until the GDI surface is in front again.
-HRESULT DDraw::FlipToGDISurface() {
+HRESULT DDraw::FlipToGDISurface(bool own) {
     Surface* front;
     Surface* gdi;
     {
@@ -265,7 +277,7 @@ HRESULT DDraw::FlipToGDISurface() {
         if (gdi == front) return DD_OK;
         front->AddRef();  // Flip takes the lock itself
     }
-    HRESULT hr = front->Flip(gdi, DDFLIP_WAIT);
+    HRESULT hr = front->Flip(gdi, DDFLIP_WAIT, own);
     front->Release();
     return hr;
 }
