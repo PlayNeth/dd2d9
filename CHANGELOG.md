@@ -3,6 +3,21 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.9.2
+- **The hooks of overlay and capture tools are left alone.** dd2d9 answers the game's modules
+  for Windows (the mode's sizes for the window and the cursor, `ram=`, `cpu=`, ...), and left
+  out Windows' own modules and other graphics, sound and input wrappers. A tool's hook loaded
+  into the game was answered as the game: RivaTuner Statistics Server's `RTSSHooks.dll`, which
+  draws over the real screen, was given the game's sizes and cursor. Now left alone, by name:
+  RivaTuner's and MSI Afterburner's, Steam's, Discord's, OBS's, Fraps's, Bandicam's, Origin's
+  and Epic's overlays, and ReShade and Special K where injected under their own names. A mod's
+  DLL in the game's folder is still answered as the game.
+- The log's settings line takes `minimize=`, `vsync=`, `d3d=` and `flipcopy=` from one table.
+- Tests: ddtest's checks that read the screen wait for the picture instead of a fixed time
+  where that time was shortest (a `device window` check had failed once in many runs); one
+  helper starts ddtest's child processes; a new check, with `hooktool.dll`, of which modules
+  the hooks reach. `re/README.md` says where the notes in `re/spec` are behind dd2d9.
+
 ## 1.9.1
 - **A `DDPCAPS_ALLOW256` palette keeps its first and last entries on the primary.** When a
   palette goes on the primary, `ddraw.dll` makes its first and last entries black and white

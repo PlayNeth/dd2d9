@@ -16,6 +16,23 @@ PDB: ddraw.pdb, key DF483A833685447F9F96D93012393C342
 - Older interfaces share implementations. For example, Surface/2/3/4/7 Blt are a single function,
   but Surface/2/3 Unlock (LPVOID) and Surface4/7 Unlock (LPRECT) are separate.
 
+## Where the notes in `spec/` are behind dd2d9
+The notes compare `ddraw.dll` with dd2d9 as it was when each was written; their line numbers
+and their lists of differences are of that time. Since then (the CHANGELOG has each):
+
+- dd2d9 has colour-key ranges, overlays, the video port container, `IDirectDrawColorControl`,
+  the gamma calibrator, `DDSCAPS_OWNDC`, the PrintScreen copy, GDI's palette of the screen,
+  and exclusive mode's system settings, semaphore and activation as `ddraw.dll`'s (1.9.0).
+  Where a note says dd2d9 lacks one of these, or lists it as "not copied", it is out of date.
+- Deliberately not as XP since 1.9.1, and not in the notes' lists:
+  - an override key (`DDBLT_KEYSRCOVERRIDE`, `DDBLT_KEYDESTOVERRIDE`) is its low value alone
+    (XP with the Voodoo3's driver compared the range in video memory, and the emulation layer
+    refused a destination override's range);
+  - a `DDPCAPS_ALLOW256` palette keeps its first and last entries on the primary (`ddraw.dll`
+    forces them by the surface's flags, FUN_73751e14: see `spec/palette-clipper-exports.md`);
+  - the system settings exclusive mode changes are put back when the game exits without
+    leaving it (`ddraw.dll`'s unloading, FUN_7373149b, only frees its record of the process).
+
 ## Files
 - `ddraw_xpsp3_symbols.json`: 178 named functions (addresses, aliases, stack bytes) and 25 vtables.
 - `ghidra_name_ddraw.py`: run it from Ghidra's Script Manager after auto-analysis.

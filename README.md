@@ -248,7 +248,7 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 ### Tests
 
 `build/ddtest.exe` writes its results to `ddtest.txt`:
-- with no argument, pixel-exact checks of blits, keys and their ranges, conversion, GDI (`DDSCAPS_OWNDC` too), YUV surfaces, interface versions, palettes, object lifetimes, cooperative levels and activation, gamma ramps (and the gamma calibrator, with `fmtcal.dll` beside it and the registry writable), and an 8-bit texture Direct3D draws into;
+- with no argument, pixel-exact checks of blits, keys and their ranges, conversion, GDI (`DDSCAPS_OWNDC` too), YUV surfaces, interface versions, palettes, object lifetimes, cooperative levels and activation, gamma ramps (and the gamma calibrator, with `fmtcal.dll` beside it and the registry writable), the modules the hooks reach (with `hooktool.dll` beside it), and an 8-bit texture Direct3D draws into;
 - `ddtest overlay` checks overlays (keys and their ranges, alpha, bob and field flips, colour controls on them and on the primary, the video port container) and `DDSCL_CREATEDEVICEWINDOW`'s window;
 - `ddtest fs8` runs a 640×480×8 exclusive-mode flip-chain animation and checks the pacing;
 - `ddtest win` runs a windowed primary with a clipper (and checks that the program's own GDI drawing into the window stays);

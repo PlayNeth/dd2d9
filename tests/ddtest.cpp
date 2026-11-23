@@ -157,6 +157,80 @@ static void Pump() {
     }
 }
 
+// This program run again as "ddtest <mode>", a process of its own, and waited for: its exit
+// code, or -1 if it couldn't be started (1 if it had to be ended after two minutes).
+static DWORD RunChild(const char* mode) {
+    char exe[MAX_PATH], cmd[MAX_PATH + 32];
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    snprintf(cmd, sizeof(cmd), "\"%s\" %s", exe, mode);
+    fflush(g_out);
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    DWORD code = DWORD(-1);
+    if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        if (WaitForSingleObject(pi.hProcess, 120000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    return code;
+}
+
+// The modules dd2d9's hooks reach: a DLL the game loads is answered as the game is
+// (hooktool.dll's reading of the machine's memory is dd2d9's ram=, as this program's own);
+// the same DLL under the name of an overlay tool's hook, RTSSHooks.dll, is left alone and
+// reads the machine's own.
+static int RunHookedModules() {
+    char dll[MAX_PATH], tool[MAX_PATH];
+    GetModuleFileNameA(nullptr, dll, MAX_PATH);
+    strcpy(tool, dll);
+    strcpy(strrchr(dll, '\\') + 1, "hooktool.dll");
+    strcpy(strrchr(tool, '\\') + 1, "RTSSHooks.dll");
+    using RamFn = DWORD(WINAPI*)();
+    auto ram = [](const char* path) {
+        DWORD mb = 0;
+        if (HMODULE m = LoadLibraryA(path)) {
+            if (auto fn = reinterpret_cast<RamFn>(reinterpret_cast<void*>(GetProcAddress(m, "ToolTotalRamMB")))) mb = fn();
+            FreeLibrary(m);
+        }
+        return mb;
+    };
+    MEMORYSTATUS ms = {};
+    ms.dwLength = sizeof(ms);
+    GlobalMemoryStatus(&ms);
+    const DWORD own = DWORD(ms.dwTotalPhys >> 20), asGame = ram(dll);
+    const bool copied = CopyFileA(dll, tool, FALSE) != 0;
+    const DWORD asTool = copied ? ram(tool) : 0;
+    DeleteFileA(tool);
+    // (The machine's own, by a function dd2d9 doesn't answer.)
+    using InstalledFn = BOOL(WINAPI*)(ULONGLONG*);
+    ULONGLONG kb = 0;
+    if (auto fn = reinterpret_cast<InstalledFn>(reinterpret_cast<void*>(
+            GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetPhysicallyInstalledSystemMemory"))))
+        fn(&kb);
+    if (!asGame || !copied || !asTool || (kb >> 10) <= own) {
+        fprintf(g_out, "SKIP the modules hooked: hooktool.dll isn't beside the test, or the machine has no more memory than "
+                       "dd2d9's ram= (%lu MB; the machine: %lu)\n", own, DWORD(kb >> 10));
+        return 0;
+    }
+    CHECK(asGame == own, "a DLL the game loads: answered as the game, %lu MB of memory (the game: %lu)", asGame, own);
+    CHECK(asTool > own, "the same DLL as RTSSHooks.dll, an overlay tool's hook: left alone, the machine's %lu MB (the game: %lu)",
+          asTool, own);
+    return 0;
+}
+
+// Waits until `shown()`, a reading of the screen, holds, or `ms` have passed: what dd2d9 shows
+// gets there a frame or two after the call, in a time that varies with the machine and the X
+// server. The check that follows reads again and reports.
+template <typename F>
+static void WaitShown(F shown, int ms = 2000) {
+    for (int t = 0; t < ms && !shown(); t += 50) {
+        Pump();
+        Sleep(50);
+    }
+}
+
 // The game's window back in front after a focus loss, as the user brings it back: minimized,
 // restored (from its taskbar button) and activated, which ddraw.dll then tells the game (it
 // posts WM_ACTIVATEAPP(TRUE): one sent to a minimized window it holds back, as measured on
@@ -5750,6 +5824,9 @@ static int RunOverlayAlpha() {
             Pump();
             Sleep(60);
         }
+        WaitShown([&] {
+            return as(GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, k.left) && as(GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF, k.right);
+        });
         const COLORREF left = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, right = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
         CHECK(u == DD_OK && as(left, k.left) && as(right, k.right),
               "overlay alpha, %s: 0x%08lx; shown %06lx and %06lx (white by %.3f and %.3f over 204060)", k.name, u, DWORD(left),
@@ -5773,8 +5850,11 @@ static int RunOverlayAlpha() {
             Pump();
             Sleep(60);
         }
-        const COLORREF left = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, right = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
         const float wl = dest ? 1 - a12 : a40, wr = dest ? 1 - a4 : aC0;
+        WaitShown([&] {
+            return as(GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, wl) && as(GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF, wr);
+        });
+        const COLORREF left = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, right = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
         CHECK(u == DD_OK && as(left, wl) && as(right, wr),
               "overlay alpha, %s: its alpha surface written to while shown: 0x%08lx; shown %06lx and %06lx (white by %.3f and "
               "%.3f over 204060)",
@@ -5812,6 +5892,10 @@ static int RunOverlayAlpha() {
             Sleep(60);
         }
         // (The overlay's columns 4, 8 and 12: 200 pixels of the screen for its 16.)
+        WaitShown([&] {
+            return as(GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, 0) && as(GetPixel(sdc, sw / 2 + 6, sh / 2) & 0xFFFFFF, k.edgeWeight) &&
+                   as(GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF, k.inside);
+        });
         const COLORREF keyed = GetPixel(sdc, sw / 2 - 50, sh / 2) & 0xFFFFFF, edge = GetPixel(sdc, sw / 2 + 6, sh / 2) & 0xFFFFFF,
                        inside = GetPixel(sdc, sw / 2 + 50, sh / 2) & 0xFFFFFF;
         CHECK(u == DD_OK && as(keyed, 0) && as(edge, k.edgeWeight) && as(inside, k.inside),
@@ -5861,6 +5945,7 @@ static int RunDeviceWindow() {
     }
     HWND dev = FindWindowA("DirectDrawDeviceWnd", nullptr);
     HDC sdc = GetDC(nullptr);
+    WaitShown([&] { return (GetPixel(sdc, sw - 10, sh - 10) & 0xFFFFFF) == RGB(0, 255, 0); });
     const COLORREF far_ = GetPixel(sdc, sw - 10, sh - 10) & 0xFFFFFF;
     ReleaseDC(nullptr, sdc);
     RECT fr = {};
@@ -6003,19 +6088,7 @@ static int RunGamma() {
     DWORD type = 0, size = sizeof(old);
     const bool hadPath = RegQueryValueExA(key, "Path", nullptr, &type, reinterpret_cast<BYTE*>(old), &size) == ERROR_SUCCESS;
     RegSetValueExA(key, "Path", 0, REG_SZ, reinterpret_cast<const BYTE*>(dll), DWORD(strlen(dll) + 1));
-    fflush(g_out);
-    char cmd[MAX_PATH + 32];
-    snprintf(cmd, sizeof(cmd), "\"%s\" calibrator", exe);
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    DWORD code = DWORD(-1);
-    if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        if (WaitForSingleObject(pi.hProcess, 120000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
-        GetExitCodeProcess(pi.hProcess, &code);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    }
+    const DWORD code = RunChild("calibrator");
     if (hadPath) RegSetValueExA(key, "Path", 0, type, reinterpret_cast<const BYTE*>(old), size);
     else RegDeleteValueA(key, "Path");
     RegCloseKey(key);
@@ -6782,24 +6855,7 @@ static int RunActivation() {
     // A program that ends in exclusive mode without releasing anything ("ddtest leave", a
     // process of its own): the settings are put back as it ends, the semaphore gone. Read by
     // another process ("ddtest leave after": this one may hold what it read before).
-    char exe[MAX_PATH], cmd[MAX_PATH + 32];
-    GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    fflush(g_out);
-    auto child = [&](const char* mode) {
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s", exe, mode);
-        STARTUPINFOA si = {};
-        si.cb = sizeof(si);
-        PROCESS_INFORMATION pi = {};
-        DWORD code = DWORD(-1);
-        if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-            if (WaitForSingleObject(pi.hProcess, 60000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
-            GetExitCodeProcess(pi.hProcess, &code);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-        }
-        return code;
-    };
-    const DWORD left = child("leave"), after = child("leave after");
+    const DWORD left = RunChild("leave"), after = RunChild("leave after");
     Pump();
     CHECK(left == 0 && after == DWORD(10 + (before.hot ? 1 : 0) + (before.shadow ? 2 : 0)) && !sys().semaphore,
           "a program ended in exclusive mode without releasing DirectDraw (exit %lu: 0, hot tracking off there): the settings "
@@ -8136,7 +8192,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     else if (strstr(cmd, "leave")) r = RunLeave(strstr(cmd, "after") != nullptr);
     else
         r = RunUnit() | RunExecute() | RunTargetGone() | RunPalTarget() | RunDrawnPrimary(8) | RunDrawnPrimary(32) |
-            RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() | RunCoopModes() |
+            RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() | RunCoopModes() | RunHookedModules() |
             RunActivation() | RunPrintScreen() | RunScreenPalette() | RunGamma() | RunMeasured();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);

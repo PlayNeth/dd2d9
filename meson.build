@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.9.1',
+  version : '1.9.2',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -92,6 +92,13 @@ executable('fmtprobe', 'tests/fmtprobe.cpp', 'tests/fmtprobe2.cpp',
 shared_library('fmtcal', 'tests/fmtcal.cpp',
   name_prefix : '',
   cpp_args : ['-march=pentium', '-mno-sse2', '-mno-sse', '-mno-mmx', '-mfpmath=387'],
+  link_args : static_link + ['-Wl,--kill-at'],
+  install : false)
+
+# A DLL that reads the machine's memory (tests/hooktool.cpp), for ddtest's check of the
+# modules dd2d9's hooks reach.
+shared_library('hooktool', 'tests/hooktool.cpp',
+  name_prefix : '',
   link_args : static_link + ['-Wl,--kill-at'],
   install : false)
 

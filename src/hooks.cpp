@@ -336,10 +336,12 @@ unsigned PatchModule(HMODULE m, const ImportHook* hooks, size_t n, bool* bound) 
     return count;
 }
 
-// Windows' modules, and the graphics, sound and input DLLs a game folder may hold (DXVK,
-// dgVoodoo, ...): those work with the real machine. Such a DLL is known by its name, or by
+// Windows' modules, the graphics, sound and input DLLs a game folder may hold (DXVK,
+// dgVoodoo, ...), and the hooks overlay and capture tools put into the game (RivaTuner, Steam,
+// Discord, OBS, ...): those work with the real machine. A wrapper is known by its name, or by
 // exporting what the DLL it stands for does (one renamed, or chained behind another under
-// another name). Reads only the module's memory: called under g_hookLock.
+// another name); a tool's hook by its name. Reads only the module's memory: called under
+// g_hookLock.
 bool LeaveAlone(HMODULE m, const wchar_t* path) {
     const wchar_t* name = wcsrchr(path, L'\\');
     name = name ? name + 1 : path;
@@ -360,6 +362,13 @@ bool LeaveAlone(HMODULE m, const wchar_t* path) {
                                       L"dxgi.dll", L"opengl32.dll", L"dinput.dll", L"dinput8.dll", L"dsound.dll",
                                       L"winmm.dll", L"glide.dll", L"glide2x.dll", L"glide3x.dll"};
     for (const wchar_t* n : kNames)
+        if (_wcsicmp(name, n) == 0) return true;
+    // (The 32-bit names: RivaTuner Statistics Server and MSI Afterburner, Steam, Discord, OBS,
+    // Fraps, Bandicam, ReShade and Special K injected, Origin, Epic.)
+    static const wchar_t* kTools[] = {L"RTSSHooks.dll",   L"GameOverlayRenderer.dll", L"DiscordHook.dll", L"graphics-hook32.dll",
+                                      L"fraps32.dll",     L"bdcam.dll",               L"ReShade32.dll",   L"SpecialK32.dll",
+                                      L"igo32.dll",       L"EOSOVH-Win32-Shipping.dll"};
+    for (const wchar_t* n : kTools)
         if (_wcsicmp(name, n) == 0) return true;
     static const char* kExports[] = {"DirectDrawCreate", "Direct3DCreate",     "Direct3DCreate8",   "Direct3DCreate9",
                                      "D3D11CreateDevice", "CreateDXGIFactory", "wglGetProcAddress", "vkGetInstanceProcAddr",

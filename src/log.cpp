@@ -67,18 +67,17 @@ void LogInit() {
 
     static const char* kDisplay[] = {"switch", "window", "borderless"};
     static const char* kStretch[] = {"aspect", "fill", "integer"};
-    static const char* kVSync[] = {"auto", "on", "off"};
     Log(1, "dd2d9 " DD2D9_VERSION);
     Log(1, "process: %s", Utf8(ModulePath(nullptr)).c_str());
     Log(1, "module:  %s", Utf8(g_dllPath).c_str());
     if (g_iniLoaded.empty()) Log(1, "config:  none found");
     for (const auto& f : g_iniLoaded) Log(1, "config:  %s", Utf8(f).c_str());
     for (const auto& e : g_iniErrors) Log(1, "config:  %s", Utf8(e).c_str());
-    static const char* kD3D[] = {"auto", "on", "off"};
+    static const char* kAutoOnOff[] = {"auto", "on", "off"};  // (minimize=, vsync=, d3d=, flipcopy=)
     static const char* kFilter[] = {"point", "linear", "sharp"};
-    Log(1, "settings: display=%s minimize=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s log=%d",  // (minimize: as d3d=)
-        kDisplay[g_config.display], kD3D[g_config.minimize], kStretch[g_config.stretch], kFilter[g_config.filter],
-        kVSync[g_config.vsync], kD3D[g_config.d3d], g_config.systemD3D9 ? "system" : "game", g_config.log);
+    Log(1, "settings: display=%s minimize=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s log=%d",
+        kDisplay[g_config.display], kAutoOnOff[g_config.minimize], kStretch[g_config.stretch], kFilter[g_config.filter],
+        kAutoOnOff[g_config.vsync], kAutoOnOff[g_config.d3d], g_config.systemD3D9 ? "system" : "game", g_config.log);
     if (g_config.minimize == kMinimizeAuto && g_tilingWm)
         Log(1, "minimize=auto: the fullscreen window isn't minimized under %s, which doesn't minimize windows",
             g_tilingWm);
@@ -88,7 +87,7 @@ void LogInit() {
         g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off",
         g_config.overlayBias, g_config.overlays ? "on" : "off", g_config.palTextures ? "on" : "off",
         g_config.heapZero ? "on" : "off", g_config.fairLocks ? "on" : "off", g_config.safeTimers ? "on" : "off", g_config.joyPoll ? "on" : "off", g_config.selfSuspend ? "on" : "off", g_config.noBuffering ? "on" : "off", g_config.safeTerminate ? "on" : "off",
-        kD3D[g_config.flipCopy]);  // (auto, on, off: as d3d=)
+        kAutoOnOff[g_config.flipCopy]);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }
