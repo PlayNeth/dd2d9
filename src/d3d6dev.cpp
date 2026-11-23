@@ -19,6 +19,9 @@ Device::Device(D3D* d3d, DevKind kind, const GUID& guid, int version, Surface* r
     : d3d(d3d), dd(d3d->dd), kind(kind), guid(guid), version(version), rt(rt), rtVersion(rtVersion), z(z), pal(pal),
       ddHold(d3d->dd), ctx(d3d->dd->GetGpu()) {
     f1.o = f2.o = f3.o = this;
+    // (the extents start empty: XP's 2048 is its largest target's size)
+    ext[0] = std::max(ext[0], float(rt->W()));
+    ext[1] = std::max(ext[1], float(rt->H()));
     ctx.SetSoftware(kind != kHAL);
     g_liveDevices.push_back(this);
     if (kind == kHAL) {
@@ -655,7 +658,7 @@ HRESULT Device::SetRenderTargetI(Surface* s) {
     const DWORD caps = s->desc.ddsCaps.dwCaps;
     const DWORD depths = hal.dwDeviceRenderBitDepth | hel.dwDeviceRenderBitDepth;
     if (!(caps & DDSCAPS_3DDEVICE) || !(BitsToDDBD(s->buf->fmt.bpp) & depths)) return DDERR_INVALIDCAPS;
-    if (s->W() > 2048 || s->H() > 2048) return DDERR_INVALIDPARAMS;
+    if (TargetTooLarge(s)) return DDERR_INVALIDPARAMS;
     // Below 16 bits a palette, palettized or not (as Direct3D 7's).
     const bool zbuf = (caps & DDSCAPS_ZBUFFER) != 0;
     if (!zbuf && !s->palette && s->buf->fmt.bpp < 16) return DDERR_NOPALETTEATTACHED;

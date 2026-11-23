@@ -3,6 +3,27 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.9.3
+- **Direct3D devices on render targets larger than 2048 pixels.** XP's Direct3D gives no
+  device on a render target wider or higher than 2048, and takes none as a device's new
+  target; dd2d9 copied that. Need for Speed III at 2560x1440 was refused its device and
+  stopped there, the screen left empty. dd2d9 now takes a target as large as Direct3D 9
+  does, deliberately unlike XP, for the devices of Direct3D 2 to 7 and `SetRenderTarget`.
+  A device's extents start empty at the target's size where that is above 2048.
+- A device that is refused is written to the log with the error and the target's size,
+  depth and caps.
+- **The Wine installer is `install.sh`, and simpler.** `./install.sh` installs for the whole
+  prefix, `./install.sh --app game.exe ...` only for the programs named, `./install.sh
+  --uninstall` removes it; it was `install-dd2d9.sh install <dll>` and `uninstall`. It takes
+  the `ddraw.dll` beside it (a release) or `build/ddraw.dll` (a source tree). Wine's own
+  `ddraw.dll` is kept beside dd2d9's as `ddraw.dll.wine` (it was `ddraw.dll.wine-orig`; a
+  prefix set up by the old script is taken over), and when dd2d9 is installed again or
+  removed, Wine is asked for its own DLL first, so that what goes back after a Wine update is
+  that Wine's and not the one before's.
+- Tests: ddtest draws on a 2560x1440 target with Direct3D 2 and 7, changes a small device's
+  target to it, and runs the game's sequence: the mode set, a device on the flip chain's back
+  buffer, a frame drawn and shown.
+
 ## 1.9.2
 - **The hooks of overlay and capture tools are left alone.** dd2d9 answers the game's modules
   for Windows (the mode's sizes for the window and the cursor, `ram=`, `cpu=`, ...), and left

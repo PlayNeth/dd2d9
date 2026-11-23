@@ -171,6 +171,7 @@ public:
     // Direct3DCreateDevice (A): version 1 from a surface QI (surface, slot set), 2 or 3 from
     // CreateDevice. rtVersion: the surface interface version the game passed.
     HRESULT CreateDeviceI(REFCLSID guid, Surface* rt, int rtVersion, int version, Device** out);
+    HRESULT MakeDevice(REFCLSID guid, Surface* rt, int rtVersion, int version, Device** out);  // (it, unlogged)
     // DirectDraw's last reference went: everything left is released (A §~DIRECT3DI).
     void Teardown();
 };

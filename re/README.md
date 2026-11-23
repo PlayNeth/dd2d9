@@ -32,6 +32,9 @@ and their lists of differences are of that time. Since then (the CHANGELOG has e
     forces them by the surface's flags, FUN_73751e14: see `spec/palette-clipper-exports.md`);
   - the system settings exclusive mode changes are put back when the game exits without
     leaving it (`ddraw.dll`'s unloading, FUN_7373149b, only frees its record of the process).
+  - since 1.9.3, a Direct3D device's render target may be larger than 2048 either way, up to
+    what Direct3D 9 takes (XP's Direct3D refuses the device, and a device's change to such a
+    target).
 
 ## Files
 - `ddraw_xpsp3_symbols.json`: 178 named functions (addresses, aliases, stack bytes) and 25 vtables.

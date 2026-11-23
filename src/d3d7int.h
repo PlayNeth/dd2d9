@@ -73,6 +73,7 @@ public:
     STDMETHOD_(ULONG, Release)() override { return dd_->Release(outer_); }
     STDMETHOD(EnumDevices)(LPD3DENUMDEVICESCALLBACK7 cb, void* ctx) override;
     STDMETHOD(CreateDevice)(REFCLSID rclsid, IDirectDrawSurface7* surface, IDirect3DDevice7** device) override;
+    HRESULT MakeDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, IDirect3DDevice7** device);  // (it, unlogged)
     STDMETHOD(CreateVertexBuffer)(D3DVERTEXBUFFERDESC* desc, IDirect3DVertexBuffer7** vb, DWORD flags) override;
     STDMETHOD(EnumZBufferFormats)(REFCLSID iid, LPD3DENUMPIXELFORMATSCALLBACK cb, void* ctx) override;
     STDMETHOD(EvictManagedTextures)() override { return D3D_OK; }

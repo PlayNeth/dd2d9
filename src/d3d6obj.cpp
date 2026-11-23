@@ -358,13 +358,22 @@ HRESULT D3D::F3::CreateViewport(IDirect3DViewport3** out, IUnknown* outerUnk) {
 
 // Direct3DCreateDevice and Init (A).
 HRESULT D3D::CreateDeviceI(REFCLSID guid, Surface* rt, int rtVersion, int version, Device** out) {
+    const HRESULT hr = MakeDevice(guid, rt, rtVersion, version, out);
+    if (FAILED(hr))
+        DD2D9_LOG("IDirect3DDevice%s refused: 0x%08lx (target %dx%d, %u bpp, caps 0x%lx)",
+                  version == 1 ? "" : version == 2 ? "2" : "3", hr, rt->W(), rt->H(), unsigned(rt->buf->fmt.bpp),
+                  rt->desc.ddsCaps.dwCaps);
+    return hr;
+}
+
+HRESULT D3D::MakeDevice(REFCLSID guid, Surface* rt, int rtVersion, int version, Device** out) {
     *out = nullptr;
     const DevKind kind = KindOf(guid);
     if (kind == kBadGuid) return DDERR_INVALIDPARAMS;
     if (version >= 3 && kind == kRamp) return DDERR_INVALIDPARAMS;
     const DWORD caps = rt->desc.ddsCaps.dwCaps;
     if (!(caps & DDSCAPS_3DDEVICE) || (caps & DDSCAPS_ZBUFFER)) return DDERR_INVALIDCAPS;
-    if (rt->W() > 2048 || rt->H() > 2048) return DDERR_INVALIDOBJECT;
+    if (TargetTooLarge(rt)) return DDERR_INVALIDOBJECT;
     const Format& f = rt->buf->fmt;
     if (!rt->palette && f.bpp < 16) return DDERR_NOPALETTEATTACHED;
     Surface* z = AttachedZ(rt);

@@ -82,7 +82,8 @@ Device7::Device7(Direct3D7* d3d, DevKind kind, Surface* rt, Surface* z, Palette*
     vp_ = {0, 0, DWORD(rt_->W()), DWORD(rt_->H()), 0.0f, 1.0f};
     lights_.resize(8);
     cs_.dwStatus = 0x01FFF000;
-    cs_.minx = cs_.miny = 2048.0f;
+    cs_.minx = std::max(2048.0f, float(rt_->W()));  // (empty: XP's 2048 is its largest target's size)
+    cs_.miny = std::max(2048.0f, float(rt_->H()));
     blocks_.push_back(nullptr);  // handle 0 is never given out
     ctx_.SetTargets(rt_, z_);
     Use u(this);  // creates the Direct3D 9 device now, and sends the state above

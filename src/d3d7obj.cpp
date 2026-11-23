@@ -128,6 +128,20 @@ HRESULT Direct3D7::CreateVertexBuffer(D3DVERTEXBUFFERDESC* desc, IDirect3DVertex
 // ---------------------------------------------------------------- CreateDevice (D)
 
 HRESULT Direct3D7::CreateDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, IDirect3DDevice7** out) {
+    const HRESULT hr = MakeDevice(rclsid, surface, out);
+    if (FAILED(hr)) {
+        Guard l;
+        const Surface* rt = surface ? Surf(surface) : nullptr;
+        if (rt)
+            DD2D9_LOG("IDirect3DDevice7 refused: 0x%08lx (target %dx%d, %u bpp, caps 0x%lx)", hr, rt->W(), rt->H(),
+                      unsigned(rt->buf->fmt.bpp), rt->desc.ddsCaps.dwCaps);
+        else
+            DD2D9_LOG("IDirect3DDevice7 refused: 0x%08lx", hr);
+    }
+    return hr;
+}
+
+HRESULT Direct3D7::MakeDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, IDirect3DDevice7** out) {
     if (!out) return DDERR_INVALIDPARAMS;
     if (!surface) return DDERR_INVALIDOBJECT;
     *out = nullptr;
@@ -153,7 +167,7 @@ HRESULT Direct3D7::CreateDevice(REFCLSID rclsid, IDirectDrawSurface7* surface, I
     // The render target (Init 3.3-3.7, checkDeviceSurface).
     const DWORD caps = rt->desc.ddsCaps.dwCaps;
     if (!(caps & DDSCAPS_3DDEVICE) || (caps & DDSCAPS_ZBUFFER)) return DDERR_INVALIDCAPS;
-    if (rt->W() > 2048 || rt->H() > 2048) return DDERR_INVALIDOBJECT;
+    if (TargetTooLarge(rt)) return DDERR_INVALIDOBJECT;
     if (!rt->palette && rt->buf->fmt.bpp < 16) return DDERR_NOPALETTEATTACHED;
     Surface* z = AttachedZ(rt);
     const bool hw = kind != kRGB;

@@ -35,13 +35,14 @@ Copy `ddraw.dll` next to the game's exe. Don't replace the one in `System32` or 
 
 ### Linux (Wine / Proton)
 
-Either install it into the prefix the game uses:
+Either unzip the release and run `install.sh` for the prefix the game uses:
 
 ```sh
-WINEPREFIX=~/Games/foo ./install-dd2d9.sh install ddraw.dll
+WINEPREFIX=~/Games/foo ./install.sh                  # every program in the prefix
+WINEPREFIX=~/Games/foo ./install.sh --app game.exe   # only game.exe; the rest keep Wine's ddraw
 ```
 
-That copies it into the prefix's 32-bit system folder (`syswow64` in a 64-bit prefix, `system32` in a 32-bit one), keeping Wine's own copy, sets the `ddraw=native,builtin` override, and creates `C:\windows\dd2d9.ini` from `dd2d9.ini.example` if there's none. After a Wine or Proton update, run it again: updating the prefix puts Wine's `ddraw.dll` back.
+That copies the `ddraw.dll` beside the script (or `build/ddraw.dll`, in a source tree) into the prefix's 32-bit system folder (`syswow64` in a 64-bit prefix, `system32` in a 32-bit one), keeping Wine's own beside it as `ddraw.dll.wine`, sets the `ddraw=native,builtin` override (for the prefix, or with `--app` for the named programs only), and creates `C:\windows\dd2d9.ini` from `dd2d9.ini.example` if there's none. After a Wine or Proton update, run it again: the update may put Wine's `ddraw.dll` back, and where it doesn't, the copy kept of Wine's own is the old Wine's until you do.
 
 Or, for one game: put `ddraw.dll` next to the game's exe and run the game with `WINEDLLOVERRIDES="ddraw=n"`.
 
@@ -52,7 +53,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 ## Uninstalling
 
 - **Windows:** delete `ddraw.dll` from the game's folder.
-- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install-dd2d9.sh uninstall` puts Wine's `ddraw.dll` back and removes the override. It keeps `dd2d9.ini`.
+- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `ddraw.dll` back and removes the prefix's override. It keeps `dd2d9.ini`; overrides made with `--app` stay, but fall back to Wine's `ddraw`.
 - You can also delete `dd2d9.ini` and `dd2d9.log`.
 
 ---
@@ -148,7 +149,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 
 dd2d9 reads these files in order, later ones winning:
 
-1. `C:\windows\dd2d9.ini` (in a Wine prefix, `drive_c/windows/dd2d9.ini`; `install-dd2d9.sh` creates it);
+1. `C:\windows\dd2d9.ini` (in a Wine prefix, `drive_c/windows/dd2d9.ini`; `install.sh` creates it);
 2. `dd2d9.ini` next to `ddraw.dll`;
 3. `dd2d9.ini` next to the game's exe;
 4. the file named by the `DD2D9_INI` environment variable.
@@ -208,7 +209,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 
 ## Troubleshooting
 
-- **Nothing changes, and `log=1` writes no `dd2d9.log`:** dd2d9 isn't being loaded. Under Wine, check the `ddraw=n` override, or run `install-dd2d9.sh install` again after a Wine update. On load, dd2d9 also sends a debug message saying where it was loaded from: under Wine 9, `WINEDEBUG=warn+seh` prints it; on Windows, use DebugView.
+- **Nothing changes, and `log=1` writes no `dd2d9.log`:** dd2d9 isn't being loaded. Under Wine, check the `ddraw=n` override, or run `install.sh` again after a Wine update. On load, dd2d9 also sends a debug message saying where it was loaded from: under Wine 9, `WINEDEBUG=warn+seh` prints it; on Windows, use DebugView.
 - **A game refuses to start on a 32-bit desktop** ("16 bit screen mode required"): set `desktopbpp=16` in a `[game.exe]` section; `desktopbpp=8` for one that asks for 256 colours.
 - **A game says there isn't enough memory:** keep `ram` at its default, or lower it.
 - **A game runs too fast:** set `fpslimit`. If it times itself from the registry's processor clock, try `cpu=0`.

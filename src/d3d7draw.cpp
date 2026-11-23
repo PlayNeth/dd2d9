@@ -46,7 +46,7 @@ HRESULT Device7::SetRenderTarget(IDirectDrawSurface7* surface, DWORD) {
     // Not a render target, a depth the device doesn't draw in, or too large: DDERR_INVALIDCAPS
     // (XP SP3 for a 4-bit target on the RGB device; Wine's test_rt_caps for the others).
     if (!(s->desc.ddsCaps.dwCaps & DDSCAPS_3DDEVICE) || !(BitsToDDBD(s->buf->fmt.bpp) & caps_.dwDeviceRenderBitDepth) ||
-        s->W() > 2048 || s->H() > 2048)
+        TargetTooLarge(s))
         return DDERR_INVALIDCAPS;
     // Below 16 bits a palette, palettized or not (an 8-bit RGB, luminance or alpha-only surface
     // too: XP SP3).

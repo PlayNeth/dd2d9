@@ -24,6 +24,16 @@ inline Surface* AttachedZ(Surface* rt) {
     return nullptr;
 }
 
+// A render target too large for a device. XP's Direct3D takes none above 2048 either way; dd2d9's own,
+// deliberately: as large as Direct3D 9 takes (Need for Speed III at 2560x1440 was refused its device, and
+// stopped there).
+inline bool TargetTooLarge(const Surface* s) {
+    const GpuCaps c = GpuGetCaps();
+    const DWORD w = c.valid ? std::max<DWORD>(c.maxTextureWidth, 2048) : 2048;
+    const DWORD h = c.valid ? std::max<DWORD>(c.maxTextureHeight, 2048) : 2048;
+    return DWORD(s->W()) > w || DWORD(s->H()) > h;
+}
+
 inline DWORD BitsToDDBD(DWORD bpp) {
     switch (bpp) {
     case 8: return DDBD_8;

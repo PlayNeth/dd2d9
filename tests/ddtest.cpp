@@ -2508,6 +2508,256 @@ static int RunTargetGone() {
 // 32-bit target: each texel its palette entry's colour, the entry a lock of the texture then
 // shows, every time it is drawn (dd2d9 makes the first copy on the GPU, the next from what the
 // lock read back). Then colour-keyed, entry 10 the key: the background where that entry is.
+// Render targets larger than 2048 either way. XP's Direct3D refuses a device on one (DDERR_INVALIDOBJECT) and a
+// device's change to one; dd2d9 takes them, deliberately (Need for Speed III at 2560x1440 stopped at the refusal):
+// devices of Direct3D 2 and 7 on a 2560x1440 target, drawn at its far corner, and a small device's target changed
+// to it. Their extents start empty at the target's size where that is above XP's 2048.
+static int RunLargeTarget() {
+    const DWORD kW = 2560, kH = 1440;
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    auto pixel = [](void* bits, LONG pitch, DWORD x, DWORD y) {
+        return reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(bits) + y * pitch)[x] & 0xFFFFFF;
+    };
+    D3DTLVERTEX tri[3] = {};
+    const float at[3][2] = {{2400.0f, 1300.0f}, {2556.0f, 1300.0f}, {2556.0f, 1436.0f}};
+    for (int i = 0; i < 3; i++) {
+        tri[i].sx = at[i][0], tri[i].sy = at[i][1], tri[i].sz = 0.5f, tri[i].rhw = 1.0f;
+        tri[i].color = 0xFF00FF00;
+    }
+    {  // Direct3D 2
+        IDirectDraw* dd = nullptr;
+        if (FAILED(DirectDrawCreate(nullptr, &dd, nullptr))) return 1;
+        dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+        DDSURFACEDESC sd = {};
+        sd.dwSize = sizeof(sd);
+        sd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        sd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+        sd.dwWidth = kW, sd.dwHeight = kH;
+        sd.ddpfPixelFormat.dwSize = sizeof(sd.ddpfPixelFormat);
+        sd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        sd.ddpfPixelFormat.dwRGBBitCount = 32;
+        sd.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+        sd.ddpfPixelFormat.dwGBitMask = 0xFF00;
+        sd.ddpfPixelFormat.dwBBitMask = 0xFF;
+        IDirectDrawSurface *rt = nullptr, *small = nullptr;
+        IDirect3D2* d3d = nullptr;
+        IDirect3DDevice2 *dev = nullptr, *dev2 = nullptr;
+        IDirect3DViewport2* vp = nullptr;
+        HRESULT made = dd->CreateSurface(&sd, &rt, nullptr);
+        sd.dwWidth = sd.dwHeight = 64;
+        if (SUCCEEDED(made)) made = dd->CreateSurface(&sd, &small, nullptr);
+        if (SUCCEEDED(made)) made = dd->QueryInterface(IID_IDirect3D2, reinterpret_cast<void**>(&d3d));
+        CHECK(SUCCEEDED(made), "a %lux%lu and a 64x64 render target, and Direct3D 2 (0x%08lx)", kW, kH, made);
+        if (SUCCEEDED(made)) {
+            const HRESULT hr = d3d->CreateDevice(IID_IDirect3DHALDevice, rt, &dev);
+            D3DCLIPSTATUS cs = {};
+            cs.dwFlags = D3DCLIPSTATUS_EXTENTS2;
+            if (dev) dev->GetClipStatus(&cs);
+            CHECK(hr == D3D_OK && cs.minx == float(kW) && cs.miny == 2048.0f && cs.maxx == 0.0f && cs.maxy == 0.0f,
+                  "a Direct3D 2 device on a %lux%lu target: 0x%08lx (dd2d9's own: XP DDERR_INVALIDOBJECT), its extents "
+                  "%g,%g-%g,%g (empty: from %lu,2048 to 0,0)",
+                  kW, kH, hr, cs.minx, cs.miny, cs.maxx, cs.maxy, kW);
+        }
+        if (dev) {
+            HRESULT hr = d3d->CreateViewport(&vp, nullptr);
+            if (SUCCEEDED(hr)) hr = dev->AddViewport(vp);
+            D3DVIEWPORT2 vd = {};
+            vd.dwSize = sizeof(vd);
+            vd.dwWidth = kW, vd.dwHeight = kH;
+            vd.dvClipX = -1.0f, vd.dvClipY = 1.0f, vd.dvClipWidth = vd.dvClipHeight = 2.0f;
+            vd.dvMaxZ = 1.0f;
+            if (SUCCEEDED(hr)) hr = vp->SetViewport2(&vd);
+            if (SUCCEEDED(hr)) hr = dev->SetCurrentViewport(vp);
+            D3DRECT all = {};
+            all.x2 = LONG(kW), all.y2 = LONG(kH);
+            D3DMATERIAL m = {};
+            m.dwSize = sizeof(m);
+            IDirect3DMaterial2* mat = nullptr;
+            D3DMATERIALHANDLE hm = 0;
+            if (SUCCEEDED(hr)) hr = d3d->CreateMaterial(&mat, nullptr);
+            if (SUCCEEDED(hr)) hr = mat->SetMaterial(&m);
+            if (SUCCEEDED(hr)) hr = mat->GetHandle(dev, &hm);
+            if (SUCCEEDED(hr)) hr = vp->SetBackground(hm);
+            if (SUCCEEDED(hr)) hr = vp->Clear(1, &all, D3DCLEAR_TARGET);
+            dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+            if (SUCCEEDED(hr)) hr = dev->BeginScene();
+            if (SUCCEEDED(hr)) hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DVT_TLVERTEX, tri, 3, 0);
+            if (SUCCEEDED(hr)) hr = dev->EndScene();
+            DWORD in = 1, out = 1;
+            DDSURFACEDESC ld = {};
+            ld.dwSize = sizeof(ld);
+            if (SUCCEEDED(rt->Lock(nullptr, &ld, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                in = pixel(ld.lpSurface, ld.lPitch, 2540, 1320);
+                out = pixel(ld.lpSurface, ld.lPitch, 2420, 1420);
+                rt->Unlock(nullptr);
+            }
+            CHECK(SUCCEEDED(hr) && in == 0x00FF00 && out == 0,
+                  "a triangle at the far corner of the %lux%lu target (0x%08lx): 0x%06lx inside it (green), 0x%06lx "
+                  "beside it (the black cleared to)",
+                  kW, kH, hr, in, out);
+            if (mat) mat->Release();
+            // A small device's target changed to the large one.
+            HRESULT toLarge = E_FAIL;
+            IDirectDrawSurface* now = nullptr;
+            if (SUCCEEDED(d3d->CreateDevice(IID_IDirect3DHALDevice, small, &dev2))) {
+                toLarge = dev2->SetRenderTarget(rt, 0);
+                dev2->GetRenderTarget(&now);
+            }
+            CHECK(toLarge == D3D_OK && now == rt,
+                  "a 64x64 device's SetRenderTarget to the %lux%lu target: 0x%08lx (dd2d9's own: XP "
+                  "DDERR_INVALIDPARAMS), its target now the large one: %d",
+                  kW, kH, toLarge, now == rt);
+            if (now) now->Release();
+        }
+        if (dev2) dev2->Release();
+        if (vp) vp->Release();
+        if (dev) dev->Release();
+        if (d3d) d3d->Release();
+        if (small) small->Release();
+        if (rt) rt->Release();
+        dd->Release();
+    }
+    {  // As the game: the mode set, a device on the back buffer of the primary's flip chain, a frame drawn and shown
+        IDirectDraw* dd = nullptr;
+        if (FAILED(DirectDrawCreate(nullptr, &dd, nullptr))) return 1;
+        dd->SetCooperativeLevel(hwnd, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        const HRESULT mode = dd->SetDisplayMode(kW, kH, 16);
+        DDSURFACEDESC sd = {};
+        sd.dwSize = sizeof(sd);
+        sd.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+        sd.ddsCaps.dwCaps =
+            DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+        sd.dwBackBufferCount = 1;
+        IDirectDrawSurface *primary = nullptr, *back = nullptr;
+        IDirect3D2* d3d = nullptr;
+        IDirect3DDevice2* dev = nullptr;
+        IDirect3DViewport2* vp = nullptr;
+        HRESULT hr = mode;
+        if (SUCCEEDED(hr)) hr = dd->CreateSurface(&sd, &primary, nullptr);
+        DDSCAPS bc = {DDSCAPS_BACKBUFFER};
+        if (SUCCEEDED(hr)) hr = primary->GetAttachedSurface(&bc, &back);
+        if (SUCCEEDED(hr)) hr = dd->QueryInterface(IID_IDirect3D2, reinterpret_cast<void**>(&d3d));
+        const HRESULT made = SUCCEEDED(hr) ? d3d->CreateDevice(IID_IDirect3DHALDevice, back, &dev) : hr;
+        hr = made;
+        if (SUCCEEDED(hr)) hr = d3d->CreateViewport(&vp, nullptr);
+        if (SUCCEEDED(hr)) hr = dev->AddViewport(vp);
+        D3DVIEWPORT2 vd = {};
+        vd.dwSize = sizeof(vd);
+        vd.dwWidth = kW, vd.dwHeight = kH;
+        vd.dvClipX = -1.0f, vd.dvClipY = 1.0f, vd.dvClipWidth = vd.dvClipHeight = 2.0f;
+        vd.dvMaxZ = 1.0f;
+        if (SUCCEEDED(hr)) hr = vp->SetViewport2(&vd);
+        if (SUCCEEDED(hr)) hr = dev->SetCurrentViewport(vp);
+        if (dev) {
+            dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+        }
+        if (SUCCEEDED(hr)) hr = dev->BeginScene();
+        if (SUCCEEDED(hr)) hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DVT_TLVERTEX, tri, 3, 0);
+        if (SUCCEEDED(hr)) hr = dev->EndScene();
+        DWORD in = 1;
+        DDSURFACEDESC ld = {};
+        ld.dwSize = sizeof(ld);
+        if (SUCCEEDED(hr) && SUCCEEDED(back->Lock(nullptr, &ld, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+            in = reinterpret_cast<const WORD*>(static_cast<const BYTE*>(ld.lpSurface) + 1320 * ld.lPitch)[2540];
+            back->Unlock(nullptr);
+        }
+        const HRESULT flip = SUCCEEDED(hr) ? primary->Flip(nullptr, DDFLIP_WAIT) : hr;
+        CHECK(made == D3D_OK && SUCCEEDED(hr) && in == 0x07E0 && flip == DD_OK,
+              "%lux%lu in 16 bits (0x%08lx), a Direct3D 2 device on the flip chain's back buffer: 0x%08lx (dd2d9's "
+              "own: XP DDERR_INVALIDOBJECT); a triangle drawn (0x%08lx) reads 0x%04lx at its far corner (0x07e0), "
+              "Flip 0x%08lx",
+              kW, kH, mode, made, hr, in, flip);
+        if (vp) vp->Release();
+        if (dev) dev->Release();
+        if (d3d) d3d->Release();
+        if (back) back->Release();
+        if (primary) primary->Release();
+        dd->RestoreDisplayMode();
+        dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+        dd->Release();
+    }
+    {  // Direct3D 7
+        IDirectDraw7* dd = nullptr;
+        if (FAILED(DirectDrawCreateEx(nullptr, reinterpret_cast<void**>(&dd), IID_IDirectDraw7, nullptr))) return 1;
+        dd->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+        DDSURFACEDESC2 sd = {};
+        sd.dwSize = sizeof(sd);
+        sd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        sd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+        sd.dwWidth = kW, sd.dwHeight = kH;
+        sd.ddpfPixelFormat.dwSize = sizeof(sd.ddpfPixelFormat);
+        sd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        sd.ddpfPixelFormat.dwRGBBitCount = 32;
+        sd.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+        sd.ddpfPixelFormat.dwGBitMask = 0xFF00;
+        sd.ddpfPixelFormat.dwBBitMask = 0xFF;
+        IDirectDrawSurface7 *rt = nullptr, *small = nullptr;
+        IDirect3D7* d3d = nullptr;
+        IDirect3DDevice7 *dev = nullptr, *dev2 = nullptr;
+        HRESULT made = dd->CreateSurface(&sd, &rt, nullptr);
+        sd.dwWidth = sd.dwHeight = 64;
+        if (SUCCEEDED(made)) made = dd->CreateSurface(&sd, &small, nullptr);
+        if (SUCCEEDED(made)) made = dd->QueryInterface(IID_IDirect3D7, reinterpret_cast<void**>(&d3d));
+        CHECK(SUCCEEDED(made), "a %lux%lu and a 64x64 render target, and Direct3D 7 (0x%08lx)", kW, kH, made);
+        if (SUCCEEDED(made)) {
+            const HRESULT hr = d3d->CreateDevice(IID_IDirect3DHALDevice, rt, &dev);
+            D3DCLIPSTATUS cs = {};
+            cs.dwFlags = D3DCLIPSTATUS_EXTENTS2;
+            D3DVIEWPORT7 vp = {};
+            if (dev) {
+                dev->GetClipStatus(&cs);
+                dev->GetViewport(&vp);
+            }
+            CHECK(hr == D3D_OK && cs.minx == float(kW) && cs.miny == 2048.0f && vp.dwWidth == kW && vp.dwHeight == kH,
+                  "a Direct3D 7 device on a %lux%lu target: 0x%08lx (dd2d9's own: XP DDERR_INVALIDOBJECT), its extents "
+                  "from %g,%g (empty: %lu,2048), its viewport %lux%lu (the target's)",
+                  kW, kH, hr, cs.minx, cs.miny, kW, vp.dwWidth, vp.dwHeight);
+        }
+        if (dev) {
+            HRESULT hr = dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1.0f, 0);
+            dev->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+            dev->SetRenderState(D3DRENDERSTATE_ZENABLE, FALSE);
+            dev->SetRenderState(D3DRENDERSTATE_LIGHTING, FALSE);
+            if (SUCCEEDED(hr)) hr = dev->BeginScene();
+            if (SUCCEEDED(hr)) hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST, D3DFVF_TLVERTEX, tri, 3, 0);
+            if (SUCCEEDED(hr)) hr = dev->EndScene();
+            DWORD in = 1, out = 1;
+            DDSURFACEDESC2 ld = {};
+            ld.dwSize = sizeof(ld);
+            if (SUCCEEDED(rt->Lock(nullptr, &ld, DDLOCK_WAIT | DDLOCK_READONLY, nullptr))) {
+                in = pixel(ld.lpSurface, ld.lPitch, 2540, 1320);
+                out = pixel(ld.lpSurface, ld.lPitch, 2420, 1420);
+                rt->Unlock(nullptr);
+            }
+            CHECK(SUCCEEDED(hr) && in == 0x00FF00 && out == 0,
+                  "a triangle at the far corner of the %lux%lu target, Direct3D 7 (0x%08lx): 0x%06lx inside it "
+                  "(green), 0x%06lx beside it (the black cleared to)",
+                  kW, kH, hr, in, out);
+            HRESULT toLarge = E_FAIL;
+            IDirectDrawSurface7* now = nullptr;
+            if (SUCCEEDED(d3d->CreateDevice(IID_IDirect3DHALDevice, small, &dev2))) {
+                toLarge = dev2->SetRenderTarget(rt, 0);
+                dev2->GetRenderTarget(&now);
+            }
+            CHECK(toLarge == D3D_OK && now == rt,
+                  "a 64x64 Direct3D 7 device's SetRenderTarget to the %lux%lu target: 0x%08lx (dd2d9's own: XP "
+                  "DDERR_INVALIDCAPS), its target now the large one: %d",
+                  kW, kH, toLarge, now == rt);
+            if (now) now->Release();
+        }
+        if (dev2) dev2->Release();
+        if (dev) dev->Release();
+        if (d3d) d3d->Release();
+        if (small) small->Release();
+        if (rt) rt->Release();
+        dd->Release();
+    }
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 static int RunPalTarget() {
     IDirectDraw* dd1 = nullptr;
     if (FAILED(DirectDrawCreate(nullptr, &dd1, nullptr))) return 1;
@@ -8191,9 +8441,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     else if (strstr(cmd, "calibrator")) r = RunCalibrator();
     else if (strstr(cmd, "leave")) r = RunLeave(strstr(cmd, "after") != nullptr);
     else
-        r = RunUnit() | RunExecute() | RunTargetGone() | RunPalTarget() | RunDrawnPrimary(8) | RunDrawnPrimary(32) |
-            RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() | RunCoopModes() | RunHookedModules() |
-            RunActivation() | RunPrintScreen() | RunScreenPalette() | RunGamma() | RunMeasured();
+        r = RunUnit() | RunExecute() | RunTargetGone() | RunLargeTarget() | RunPalTarget() | RunDrawnPrimary(8) |
+            RunDrawnPrimary(32) | RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() |
+            RunCoopModes() | RunHookedModules() | RunActivation() | RunPrintScreen() | RunScreenPalette() |
+            RunGamma() | RunMeasured();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);
