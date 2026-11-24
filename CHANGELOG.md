@@ -3,6 +3,17 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.9.5
+- **Movies named by a path with spaces are scaled with the game again.** Street Fighter Zero
+  plays its movies through MCI by their paths, quoted (`open "K:\DRM-Free Games\...\Z3.AVI"`,
+  then `window "..." handle`, `put "..." destination at ...`): from a folder with spaces in
+  its name, dd2d9 split the quoted path into words, didn't know the device, and left its
+  destination in the game's 640x480 coordinates, so the movie played in the top left corner
+  of the screen. Quoted words are now read as one, as MCI reads them, for the command
+  strings dd2d9 translates and for its own (`where`, `put`).
+- Tests: ddtest's movie checks open one by a quoted path with spaces and check where its
+  picture goes.
+
 ## 1.9.4
 - **A fullscreen game activated while minimized and left so in front is restored.** Under
   Wine with i3, started where the game's environment has no `I3SOCK` (`minimize=auto` then

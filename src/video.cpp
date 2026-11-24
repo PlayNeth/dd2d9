@@ -70,16 +70,38 @@ std::string Lower(std::string s) {
 }
 
 std::vector<std::string> Split(const std::string& s) {
+    // Words split at spaces; a quoted one ("K:\DRM-Free Games\...\Z3.AVI", MCI's own quoting
+    // of a device name with spaces) is one, its quotes kept, so a command rebuilt from the
+    // words is the same command. Street Fighter Zero names its movies by their paths: from a
+    // folder with spaces in its name, each word of the path was taken for a word of the
+    // command, the device wasn't known, and its picture wasn't moved.
     std::vector<std::string> t;
     size_t i = 0;
     while (i < s.size()) {
         while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
         size_t j = i;
-        while (j < s.size() && !std::isspace(static_cast<unsigned char>(s[j]))) j++;
+        bool quoted = false;
+        while (j < s.size() && (quoted || !std::isspace(static_cast<unsigned char>(s[j])))) {
+            if (s[j] == '"') quoted = !quoted;
+            j++;
+        }
         if (j > i) t.push_back(s.substr(i, j - i));
         i = j;
     }
     return t;
+}
+
+// A device's name as dd2d9 keeps it (its quotes taken off, lower case: MCI's names don't
+// depend on case), and as it goes into a command of dd2d9's own (quoted when it has a space).
+std::string Name(const std::string& word) {
+    std::string n;
+    for (char c : word)
+        if (c != '"') n += char(std::tolower(static_cast<unsigned char>(c)));
+    return n;
+}
+
+std::string Quoted(const std::string& name) {
+    return name.find(' ') == std::string::npos ? name : "\"" + name + "\"";
 }
 
 // A decimal number (a window handle printed with %u or %d, a coordinate).
@@ -120,14 +142,14 @@ void PlaceNatural(const std::string& alias, HWND window) {
     const SendStringAFn send = RealSendStringA();
     if (!send) return;
     char out[128] = {};
-    if (send(("where " + alias + " source").c_str(), out, sizeof(out), nullptr) != 0) return;
+    if (send(("where " + Quoted(alias) + " source").c_str(), out, sizeof(out), nullptr) != 0) return;
     const std::vector<std::string> t = Split(out);
     long r[4];
     if (t.size() != 4 || !Number(t[0], &r[0]) || !Number(t[1], &r[1]) || !Number(t[2], &r[2]) || !Number(t[3], &r[3]))
         return;
     r[0] = r[1] = 0;
     if (!ToReal(window, r)) return;
-    const std::string cmd = "put " + alias + " destination at " + std::to_string(r[0]) + " " + std::to_string(r[1]) +
+    const std::string cmd = "put " + Quoted(alias) + " destination at " + std::to_string(r[0]) + " " + std::to_string(r[1]) +
                             " " + std::to_string(r[2]) + " " + std::to_string(r[3]);
     const MCIERROR e = send(cmd.c_str(), nullptr, 0, nullptr);
     DD2D9_LOG("video \"%s\": shown at its natural size where the image is (%s): %lu", alias.c_str(), cmd.c_str(),
@@ -139,7 +161,7 @@ void PlaceNatural(const std::string& alias, HWND window) {
 std::string Translate(const std::string& cmd, std::string* natural, HWND* naturalWindow) {
     const std::vector<std::string> t = Split(cmd);
     if (t.size() < 2) return cmd;
-    const std::string verb = Lower(t[0]), alias = Lower(t[1]);
+    const std::string verb = Lower(t[0]), alias = Name(t[1]);
     InitOnce();
     EnterCriticalSection(&g_videoLock);
     std::string out = cmd;
@@ -512,7 +534,7 @@ struct StringClose {
 StringClose* BeforeStringCommand(const std::string& cmd) {
     const std::vector<std::string> t = Split(cmd);
     if (t.size() < 2) return nullptr;
-    const std::string verb = Lower(t[0]), alias = Lower(t[1]);
+    const std::string verb = Lower(t[0]), alias = Name(t[1]);
     if (verb != "play" && verb != "close") return nullptr;
     const bool close = verb == "close", all = alias == "all";
     StringClose closed;
@@ -570,7 +592,7 @@ void AfterStringCommand(const std::string& cmd, MCIERROR e, StringClose* closed)
     bool child = false;
     for (size_t i = 2; i + 1 < t.size(); i++) {
         const std::string k = Lower(t[i]);
-        if (k == "alias") alias = Lower(t[i + 1]);
+        if (k == "alias") alias = Name(t[i + 1]);
         else if (k == "parent") Number(t[i + 1], &parent);
         else if (k == "style") {
             long v;

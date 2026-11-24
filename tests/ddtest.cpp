@@ -4967,6 +4967,33 @@ static int RunMouse() {
                       labs(r[3] - long(24 * scale)) <= 1,
                   "MCI video without a destination: its natural size, scaled, where the image is (%s)", out);
             mciSendStringA("close w", nullptr, 0, nullptr);
+            // A device named by its quoted path, spaces in it (Street Fighter Zero's movies, from
+            // a folder with spaces in its name): known all the same, its destination translated.
+            char spaced[MAX_PATH];
+            if (CopyFileA("dd2d9test.avi", "dd2d9 test.avi", FALSE) && GetFullPathNameA("dd2d9 test.avi", MAX_PATH, spaced, nullptr)) {
+                char open[MAX_PATH + 32];
+                snprintf(open, sizeof(open), "open \"%s\"", spaced);
+                if (mciSendStringA(open, nullptr, 0, nullptr) == 0) {
+                    snprintf(cmd, sizeof(cmd), "window \"%s\" handle %lu", spaced,
+                             static_cast<unsigned long>(reinterpret_cast<uintptr_t>(hwnd)));
+                    mciSendStringA(cmd, nullptr, 0, nullptr);
+                    snprintf(cmd, sizeof(cmd), "put \"%s\" destination  at  160 120 320 240", spaced);
+                    mciSendStringA(cmd, nullptr, 0, nullptr);
+                    snprintf(cmd, sizeof(cmd), "where \"%s\" destination", spaced);
+                    out[0] = 0;
+                    mciSendStringA(cmd, out, sizeof(out), nullptr);
+                    sscanf(out, "%ld %ld %ld %ld", &r[0], &r[1], &r[2], &r[3]);
+                    const long qx = ix + long(160 * scale), qy = iy + long(120 * scale);
+                    CHECK(labs(r[0] - qx) <= 1 && labs(r[1] - qy) <= 1 && labs(r[2] - ew) <= 1 && labs(r[3] - eh) <= 1,
+                          "MCI video named by a quoted path with spaces: destination where the image is (%s; want %ld %ld %ld %ld)",
+                          out, qx, qy, ew, eh);
+                    snprintf(cmd, sizeof(cmd), "close \"%s\" wait", spaced);
+                    mciSendStringA(cmd, nullptr, 0, nullptr);
+                } else {
+                    printf("SKIP MCI video named by a quoted path: not opened\n");
+                }
+                DeleteFileA("dd2d9 test.avi");
+            }
             // The player's window control (Rockman X4): a child window the game moves and sizes,
             // and the picture it places in it, in the mode's coordinates: both scaled.
             if (HWND mw = MCIWndCreateA(hwnd, GetModuleHandleA(nullptr),
