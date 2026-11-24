@@ -3,6 +3,37 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.9.4
+- **A fullscreen game activated while minimized and left so in front is restored.** Under
+  Wine with i3, started where the game's environment has no `I3SOCK` (`minimize=auto` then
+  minimizes, as for a window manager that does), Need for Speed III's screen stayed black
+  back on its workspace, until the workspace was switched away and back quickly. i3 never
+  minimizes the window, and Wine, asked to, kept it minimized, in front with the keyboard
+  focus. As `ddraw.dll` does, dd2d9 tells a game activated while minimized nothing until its
+  window is restored, and it never was. Now a window still minimized in front 250 ms after
+  its activation is restored by dd2d9, and the game told it's back as for any restore. On
+  Windows a minimized window brought to the front is restored with it. This works whatever
+  the window manager, and whether or not dd2d9 recognises it.
+- **`minimize=auto` stops minimizing once a window manager has left the window minimized in
+  front.** Restored that way, Need for Speed III's picture came back, but under i3 Wine still
+  gave the window no keyboard focus, and the game's mouse stood still until its workspace was
+  switched away and back. Under Wine, from the next focus loss on, the window is left as it
+  is, as under a recognised i3 or sway (logged).
+- **i3 and sway are also recognised by the session's desktop:** `XDG_CURRENT_DESKTOP`,
+  `XDG_SESSION_DESKTOP` or `DESKTOP_SESSION` naming `i3` or `sway` (or a variant, such as
+  `i3-with-shmlog`), set by display managers (under Wine read as Wine hands the `XDG_`
+  variables on, renamed `WINE_HOST_XDG_...`). Before, only the `I3SOCK` and `SWAYSOCK` that i3
+  and sway give the programs they start were used, and a game started by a launcher that
+  systemd or D-Bus started had neither.
+- **Under Wine, i3 and sway are also found by their IPC socket:** i3's
+  `$XDG_RUNTIME_DIR/i3/ipc-socket.<pid>` (or `/tmp/i3-<user>.*/ipc-socket.<pid>`), sway's
+  `$XDG_RUNTIME_DIR/sway-ipc.<uid>.<pid>.sock`, while that process lives. i3 4.25 sets `I3SOCK`
+  only for the programs its own `exec` starts. Need for Speed III, opened from a file manager
+  under i3 with no desktop variables in its session, had neither, so its window was minimized
+  at the first switch (the black screen and the still mouse above).
+- Tests: ddtest's focus-loss check leaves the window minimized in front after
+  `WM_ACTIVATEAPP(TRUE)` and waits for dd2d9 to restore it.
+
 ## 1.9.3
 - **Direct3D devices on render targets larger than 2048 pixels.** XP's Direct3D gives no
   device on a render target wider or higher than 2048, and takes none as a device's new

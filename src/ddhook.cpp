@@ -141,6 +141,8 @@ void DisplayChanged(DDraw* owner) {
     owner->OnDisplayChange();
 }
 
+void ScheduleRestore();
+
 // The noted work (WindowWorkMsg, on the window's thread). The lock busy again: its holder
 // posts the message again as it lets go.
 void RunWindowWork(HWND h) {
@@ -158,6 +160,7 @@ void RunWindowWork(HWND h) {
             bool active = fg && (GetWindowThreadProcessId(fg, &pid), pid == GetCurrentProcessId());
             if (active && IsIconic(h)) {
                 g_activationPending.store(true);
+                ScheduleRestore();
             } else {
                 if (active && owner->FullscreenDisplay() && owner->GameWindowInFront(fg) == 0) {
                     active = false;
@@ -240,6 +243,49 @@ void ActivationTaken() {
 volatile LONG g_toldSize = -1;
 
 namespace {
+// Activated while minimized and still minimized a moment later, with its window in front: the
+// window is restored by dd2d9, and the game told it's back as for any restore in front (see
+// HookProc). dd2d9's own, unlike ddraw.dll, which waits for the restore: on Windows a minimized
+// window brought to the front is restored with it, but a window manager that doesn't minimize
+// windows (i3, sway) never answers Wine's request to minimize, and back on the game's workspace
+// Wine kept the window minimized, in front with the keyboard focus: under i3 without I3SOCK in
+// the game's environment (minimize=auto took it for a window manager that minimizes) Need for
+// Speed III's screen stayed black until its workspace was switched away and back quickly. A
+// one-shot thread-pool timer, as the topmost one (no WM_TIMER through the game's message loop);
+// the window is restored asynchronously, by its own thread. Scheduled on the window's thread.
+constexpr DWORD kRestoreDelay = 250;  // ms: well past a restore that comes with the activation
+HANDLE g_restoreTimer;
+// The last focus loss took the foreground away from the game's window (another program, or
+// none, in front: the user switched away), not just the activation (ddtest's own sends).
+std::atomic<bool> g_foregroundLeft{false};
+
+void CALLBACK RestoreTick(void*, BOOLEAN) {
+    if (!g_activationPending.load()) return;  // told meanwhile (restored, or another way)
+    AcquireSRWLockShared(&g_windowHookLock);
+    const HWND h = g_hook.owner && g_hook.owner->Exclusive() ? g_hook.hwnd : nullptr;
+    ReleaseSRWLockShared(&g_windowHookLock);
+    if (!h || !IsIconic(h) || GetForegroundWindow() != h) return;
+    DD2D9_LOG("the game's window still minimized in front %lu ms after its activation: restored", kRestoreDelay);
+    ShowWindowAsync(h, SW_RESTORE);
+    // A window manager that doesn't minimize, not found by its variables (see LoadConfig):
+    // minimize=auto stops minimizing from the next focus loss. Restored, the window came back,
+    // but under i3 Wine still gave it no keyboard focus, and Need for Speed III's mouse stood
+    // still until the game's workspace was switched away and back. Only under Wine, and only
+    // where the user had switched away (on Windows nothing leaves a window minimized in front).
+    static const bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+    if (wine && g_foregroundLeft.load() && g_config.minimize == kMinimizeAuto && !g_tilingWm) {
+        g_tilingWm = "a window manager that left the window minimized";  // (one aligned pointer: read whole)
+        DD2D9_LOG("minimize=auto: the fullscreen window isn't minimized from now on, under %s", g_tilingWm);
+    }
+}
+
+void ScheduleRestore() {
+    if (g_restoreTimer) DeleteTimerQueueTimer(nullptr, g_restoreTimer, nullptr);  // (not waiting: it only reads)
+    if (!CreateTimerQueueTimer(&g_restoreTimer, nullptr, RestoreTick, nullptr, kRestoreDelay, 0,
+                               WT_EXECUTEONLYONCE | WT_EXECUTEDEFAULT))
+        g_restoreTimer = nullptr;
+}
+
 // WM_ACTIVATEAPP(TRUE) posted to the game, as ddraw.dll posts it, with the window's own
 // thread for the other one (see HookProc).
 void PostActivation(HWND h, const char* why) {
@@ -302,12 +348,14 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_ACTIVATEAPP) {
         g_activationPosted.store(false);  // (dd2d9's or not, one has come)
+        if (!wp) g_foregroundLeft.store(GetForegroundWindow() != h);
         if (wp && view.owned && view.exclusive) {
             // As ddraw.dll: activated while minimized, the game hears nothing (nor does dd2d9
             // set it up) until its window is restored (see above).
             if (IsIconic(h)) {
                 g_activationPending.store(true);
                 DD2D9_LOG("WM_ACTIVATEAPP(TRUE) to the minimized window: the game is told once it is restored");
+                ScheduleRestore();
                 return 0;
             }
             // Activated with another of its windows in front (a dialog), it's told it isn't, and

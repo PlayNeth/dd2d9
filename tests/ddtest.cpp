@@ -4103,14 +4103,57 @@ static int RunLifetime() {
 
 // Whether dd2d9 minimizes a fullscreen window that loses the focus, as its dd2d9.ini has it:
 // display=window is an ordinary window, and minimize=off (or auto under i3 or sway, which
-// pass their programs I3SOCK or SWAYSOCK) leaves it as it is.
+// pass their programs I3SOCK or SWAYSOCK, or whose session's desktop names them) leaves it as
+// it is.
+static bool TilingDesktop() {
+    if (GetEnvironmentVariableA("I3SOCK", nullptr, 0) > 1 || GetEnvironmentVariableA("SWAYSOCK", nullptr, 0) > 1)
+        return true;
+    // (Wine hands the XDG_ variables on as WINE_HOST_XDG_..., as dd2d9 reads them.)
+    auto hostEnv = [](const char* name, char* v, DWORD n) {
+        const DWORD r = GetEnvironmentVariableA((std::string("WINE_HOST_") + name).c_str(), v, n);
+        return r ? r : GetEnvironmentVariableA(name, v, n);
+    };
+    for (const char* name : {"XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"}) {
+        char v[256] = "";
+        if (!hostEnv(name, v, sizeof(v)) || strlen(v) >= sizeof(v) - 1) continue;
+        for (char* d = strtok(CharLowerA(v), ":"); d; d = strtok(nullptr, ":"))
+            if (!strcmp(d, "i3") || !strncmp(d, "i3-", 3) || !strcmp(d, "sway") || !strncmp(d, "sway-", 5)) return true;
+    }
+    // Under Wine, as dd2d9: i3's or sway's IPC socket in the runtime directory, its process alive.
+    using DosFn = WCHAR*(CDECL*)(LPCSTR);
+    const auto dos = reinterpret_cast<DosFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_dos_file_name")));
+    char runtime[MAX_PATH] = "";
+    if (!dos || !hostEnv("XDG_RUNTIME_DIR", runtime, sizeof(runtime))) return false;
+    bool found = false;
+    for (const char* pattern : {"/i3/ipc-socket.*", "/sway-ipc.*.sock"}) {
+        WCHAR* dir = dos((std::string(runtime) + pattern).c_str());
+        if (!dir) continue;
+        WIN32_FIND_DATAW fd;
+        const HANDLE h = FindFirstFileW(dir, &fd);
+        HeapFree(GetProcessHeap(), 0, dir);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            std::wstring pid = fd.cFileName;
+            if (pid.size() > 5 && pid.compare(pid.size() - 5, 5, L".sock") == 0) pid.resize(pid.size() - 5);
+            pid = pid.substr(pid.find_last_of(L'.') + 1);
+            WCHAR* p = dos(("/proc/" + std::string(pid.begin(), pid.end())).c_str());
+            if (p) {
+                found = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+                HeapFree(GetProcessHeap(), 0, p);
+            }
+        } while (!found && FindNextFileW(h, &fd));
+        FindClose(h);
+        if (found) break;
+    }
+    return found;
+}
+
 static bool MinimizesOnFocusLoss() {
     char display[32] = "", minimize[32] = "";
     GetPrivateProfileStringA("dd2d9", "display", "", display, sizeof(display), ".\\dd2d9.ini");
     GetPrivateProfileStringA("dd2d9", "minimize", "auto", minimize, sizeof(minimize), ".\\dd2d9.ini");
     if (!strcmp(display, "window") || !strcmp(minimize, "off")) return false;
-    const bool tiling = GetEnvironmentVariableA("I3SOCK", nullptr, 0) > 1 || GetEnvironmentVariableA("SWAYSOCK", nullptr, 0) > 1;
-    return !strcmp(minimize, "on") || !tiling;
+    return !strcmp(minimize, "on") || !TilingDesktop();
 }
 
 // Leaving exclusive mode: DirectDraw 2+ restores the desktop mode, DirectDraw 1
@@ -6958,9 +7001,23 @@ static int RunActivation() {
           "WM_ACTIVATEAPP(TRUE) to the minimized window: still minimized (%d), the game not told (%d), still set aside "
           "(0x%08lx)",
           IsIconic(hwnd) != FALSE, g_appMsgs, hr);
-    // Restored and brought to the front: the game told by a posted WM_ACTIVATEAPP(TRUE) naming
-    // its own thread, back in its mode, the settings off again.
-    ShowWindow(hwnd, SW_RESTORE);
+    // Left minimized in front (Wine under a window manager that doesn't minimize, i3): dd2d9
+    // restores the window a moment later. Elsewhere restored here. Either way: the game told by
+    // a posted WM_ACTIVATEAPP(TRUE) naming its own thread, back in its mode, the settings off
+    // again.
+    const bool frontMinimized = GetForegroundWindow() == hwnd && IsIconic(hwnd);
+    for (int i = 0; i < 50 && frontMinimized && IsIconic(hwnd); i++) {
+        Pump();
+        Sleep(20);
+    }
+    Pump();  // (the activation dd2d9 posts as the window is restored)
+    if (frontMinimized)
+        CHECK(!IsIconic(hwnd) && g_appMsgs == 1,
+              "...still minimized in front a moment later: restored by dd2d9 (%d), the game told (%d)", !IsIconic(hwnd),
+              g_appMsgs);
+    else
+        fprintf(g_out, "SKIP restored when left minimized in front: the test window isn't in front\n");
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
     Pump();
     const Sys back2 = sys();

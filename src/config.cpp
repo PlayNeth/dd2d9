@@ -1,6 +1,7 @@
 // Configuration: dd2d9.ini files and the DD2D9_INI / DD2D9_LOG environment variables.
 #include "configint.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
@@ -50,6 +51,89 @@ std::string Utf8(const std::wstring& w) {
     std::string s(size_t(n > 0 ? n : 0), '\0');
     if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), &s[0], n, nullptr, nullptr);
     return s;
+}
+
+// A variable of the Unix environment: Wine hands the XDG_ ones on renamed, as WINE_HOST_XDG_...
+// (XDG_RUNTIME_DIR, XDG_CURRENT_DESKTOP, ...: measured under Wine 11.22); others as they are.
+static std::wstring HostEnv(const wchar_t* name) {
+    const std::wstring renamed = Env((std::wstring(L"WINE_HOST_") + name).c_str());
+    return renamed.empty() ? Env(name) : renamed;
+}
+
+// Under Wine, a Unix path as Windows sees it (kernel32's wine_get_dos_file_name; empty elsewhere).
+static std::wstring DosPath(const std::string& unix) {
+    using Fn = WCHAR*(CDECL*)(LPCSTR);
+    static const auto fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "wine_get_dos_file_name")));
+    if (!fn) return std::wstring();
+    WCHAR* p = fn(unix.c_str());
+    if (!p) return std::wstring();
+    std::wstring r = p;
+    HeapFree(GetProcessHeap(), 0, p);
+    if (!unix.empty() && unix.back() == '/' && (r.empty() || r.back() != L'\\')) r += L'\\';  // (a directory: ends in one)
+    return r;
+}
+
+// Under Wine, i3 or sway running, found by its IPC socket, for a game started where neither's
+// variables reach (a file manager D-Bus started, a launcher systemd started). i3 makes its socket
+// as $XDG_RUNTIME_DIR/i3/ipc-socket.<pid> (or /tmp/i3-<user>.XXXXXX/ipc-socket.<pid> without
+// that variable: i3's get_process_filename), sway as $XDG_RUNTIME_DIR/sway-ipc.<uid>.<pid>.sock;
+// a socket counts while its process lives (/proc/<pid>: one left behind by a crash doesn't).
+static const char* TilingWmBySocket() {
+    const std::wstring proc = DosPath("/proc/");
+    if (proc.empty()) return nullptr;  // (not Wine)
+    auto alive = [&](const std::wstring& pid) {
+        if (pid.empty() || pid.find_first_not_of(L"0123456789") != std::wstring::npos) return false;
+        return GetFileAttributesW((proc + pid).c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+    // Each name matching `pattern` in `dir`, its process id between `prefix` and `suffix`.
+    auto found = [&](const std::wstring& dir, const wchar_t* pattern, size_t prefix, size_t suffix) {
+        WIN32_FIND_DATAW fd;
+        const HANDLE h = FindFirstFileW((dir + pattern).c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        bool any = false;
+        do {
+            const std::wstring n = fd.cFileName;
+            if (n.size() <= suffix || (prefix != size_t(-1) && n.size() <= prefix + suffix)) continue;
+            std::wstring pid = n.substr(0, n.size() - suffix);
+            if (prefix == size_t(-1)) pid = pid.substr(pid.find_last_of(L'.') + 1);  // (sway: after its uid)
+            else pid = pid.substr(prefix);
+            any = alive(pid);
+        } while (!any && FindNextFileW(h, &fd));
+        FindClose(h);
+        return any;
+    };
+    std::vector<std::wstring> runtime;
+    if (const std::wstring x = HostEnv(L"XDG_RUNTIME_DIR"); !x.empty()) runtime.push_back(DosPath(Utf8(x) + "/"));
+    else if (const std::wstring users = DosPath("/run/user/"); !users.empty()) {
+        WIN32_FIND_DATAW fd;
+        const HANDLE h = FindFirstFileW((users + L"*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.')
+                    runtime.push_back(users + fd.cFileName + L"\\");
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    for (const std::wstring& dir : runtime) {
+        if (dir.empty()) continue;
+        if (found(dir, L"sway-ipc.*.sock", size_t(-1), 5)) return "sway";
+        if (found(dir + L"i3\\", L"ipc-socket.*", 11, 0)) return "i3";
+    }
+    if (const std::wstring tmp = DosPath("/tmp/"); !tmp.empty()) {
+        WIN32_FIND_DATAW fd;
+        const HANDLE h = FindFirstFileW((tmp + L"i3-*").c_str(), &fd);
+        bool i3 = false;
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    i3 = found(tmp + fd.cFileName + L"\\", L"ipc-socket.*", 11, 0);
+            } while (!i3 && FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        if (i3) return "i3";
+    }
+    return nullptr;
 }
 
 // ---------------------------------------------------------------- config parsing
@@ -293,6 +377,24 @@ void LoadConfig(HMODULE self) {
     // I3SOCK too, for i3's tools (Wine passes both on to the game).
     if (!Env(L"SWAYSOCK").empty()) g_tilingWm = "sway";
     else if (!Env(L"I3SOCK").empty()) g_tilingWm = "i3";
+    // A game started from elsewhere than i3 (a launcher started by systemd or D-Bus) has neither:
+    // the session's desktop then, as display managers name it (XDG_CURRENT_DESKTOP, a list
+    // separated by colons; XDG_SESSION_DESKTOP; DESKTOP_SESSION), "i3", "sway", or one of their
+    // variants ("i3-with-shmlog").
+    if (!g_tilingWm) {
+        for (const wchar_t* name : {L"XDG_CURRENT_DESKTOP", L"XDG_SESSION_DESKTOP", L"DESKTOP_SESSION"}) {
+            const std::string v = Lower(Utf8(HostEnv(name)));
+            for (size_t at = 0; at <= v.size() && !g_tilingWm;) {
+                const size_t end = std::min(v.find(':', at), v.size());
+                const std::string d = v.substr(at, end - at);
+                if (d == "i3" || d.rfind("i3-", 0) == 0) g_tilingWm = "i3";
+                else if (d == "sway" || d.rfind("sway-", 0) == 0) g_tilingWm = "sway";
+                at = end + 1;
+            }
+            if (g_tilingWm) break;
+        }
+    }
+    if (!g_tilingWm && g_config.minimize == kMinimizeAuto) g_tilingWm = TilingWmBySocket();  // (only auto reads it)
 
     // DD2D9_LOG=0/1/2 sets the level; any other value is a log file path (and enables logging).
     std::wstring envLog = Env(L"DD2D9_LOG");
