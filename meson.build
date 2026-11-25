@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.9.5',
+  version : '1.10.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -31,7 +31,7 @@ ddraw = shared_library('ddraw',
     'src/ddmode.cpp', 'src/ddraw.cpp', 'src/ddscreen.cpp', 'src/ddtiming.cpp', 'src/ddvideoport.cpp',
     'src/ddwindow.cpp', 'src/format.cpp', 'src/fourcc.cpp', 'src/gpu.cpp', 'src/gpucontext.cpp',
     'src/gpudepth.cpp', 'src/gpudraw.cpp', 'src/gpuformat.cpp', 'src/gpusurf.cpp', 'src/gputex.cpp',
-    'src/hooks.cpp', 'src/input.cpp', 'src/inputpaint.cpp', 'src/lock.cpp', 'src/log.cpp',
+    'src/dinputmouse.cpp', 'src/dpi.cpp', 'src/hooks.cpp', 'src/input.cpp', 'src/inputpaint.cpp', 'src/lock.cpp', 'src/log.cpp',
     'src/overlay.cpp', 'src/palette.cpp', 'src/presentconv.cpp', 'src/presenter.cpp', 'src/presentpass.cpp',
     'src/quadpass.cpp', 'src/surface.cpp', 'src/util.cpp', 'src/video.cpp',
   name_prefix : '',
@@ -44,7 +44,8 @@ ddraw = shared_library('ddraw',
 # with whichever ddraw.dll sits next to it.
 executable('ddtest', 'tests/ddtest.cpp',
   dependencies : [cpp.find_library('ddraw'), cpp.find_library('dxguid'), cpp.find_library('gdi32'),
-                  cpp.find_library('user32'), cpp.find_library('winmm'), cpp.find_library('vfw32')],
+                  cpp.find_library('user32'), cpp.find_library('winmm'), cpp.find_library('vfw32'),
+                  cpp.find_library('dinput')],
   link_args : static_link + ['-mwindows'],
   install : false)
 # ddtest's stand-in for a Windows module calling a dd2d9 hook (copied into the Windows folder).

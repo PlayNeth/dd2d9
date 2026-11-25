@@ -178,6 +178,8 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         {"selfsuspend", &g_config.selfSuspend},
         {"nobuffering", &g_config.noBuffering},
         {"safeterminate", &g_config.safeTerminate},
+        {"dpiaware", &g_config.dpiAware},
+        {"mousemerge", &g_config.mouseMerge},
     };
     for (const auto& b : kBools) {
         if (key != b.key) continue;

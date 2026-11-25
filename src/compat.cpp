@@ -103,6 +103,15 @@ BOOL WINAPI HookTerminateThread(HANDLE thread, DWORD code) {
     static volatile LONG logged;
     if (!InterlockedExchange(&logged, 1))
         DD2D9_LOG("compat: the game terminates a thread: not while it holds the loader's lock (safeterminate=on)");
+    static volatile LONG which;
+    if (LogLevel() >= 1 && InterlockedIncrement(&which) <= 20) {  // which thread, and from where
+        void* start = nullptr;  // ThreadQuerySetWin32StartAddress
+        char from[300] = "?", starts[300] = "?";
+        if (g_queryThread && g_queryThread(thread, 9, &start, sizeof(start), nullptr) >= 0 && start)
+            DescribeAddress(start, starts, sizeof(starts));
+        DescribeAddress(__builtin_return_address(0), from, sizeof(from));
+        DD2D9_LOG("compat: thread %lu (it starts in %s) terminated from %s", GetThreadId(thread), starts, from);
+    }
     // The thread terminating itself, or one that can't be told from it, must not take the
     // lock with it; another process's thread has that process's lock, not this one's. Both
     // as Windows does them.
@@ -132,6 +141,37 @@ BOOL WINAPI HookTerminateThread(HANDLE thread, DWORD code) {
     SetLastError(err);
     return ok;
 }
+
+// The game or a mod ending the process (log=1 and above): who, with which code. ExitProcess is
+// also told of by DllMain's detach; TerminateProcess of the process itself runs no detach.
+using ExitProcessFn = void(WINAPI*)(UINT);
+using TerminateProcessFn = BOOL(WINAPI*)(HANDLE, UINT);
+ExitProcessFn g_exitProcess;
+TerminateProcessFn g_terminateProcess;
+
+void WINAPI HookExitProcess(UINT code) {
+    char from[300];
+    DescribeAddress(__builtin_return_address(0), from, sizeof(from));
+    DD2D9_LOG("ExitProcess(0x%x) from %s", code, from);
+    LogStack(__builtin_frame_address(0));
+    DD2D9_NEXT(g_exitProcess)(code);
+}
+
+BOOL WINAPI HookTerminateProcess(HANDLE process, UINT code) {
+    if (GetProcessId(process) == GetCurrentProcessId()) {
+        char from[300];
+        DescribeAddress(__builtin_return_address(0), from, sizeof(from));
+        DD2D9_LOG("TerminateProcess(this process, 0x%x) from %s", code, from);
+        LogStack(__builtin_frame_address(0));  // (both lines written out at once, as level 1)
+    }
+    return DD2D9_NEXT(g_terminateProcess)(process, code);
+}
+
+ImportHook kExitHooks[] = {
+    {"kernel32", "ExitProcess", reinterpret_cast<void*>(HookExitProcess), reinterpret_cast<void**>(&g_exitProcess)},
+    {"kernel32", "TerminateProcess", reinterpret_cast<void*>(HookTerminateProcess),
+     reinterpret_cast<void**>(&g_terminateProcess)},
+};
 
 ImportHook kTerminateHooks[] = {
     {"kernel32", "TerminateThread", reinterpret_cast<void*>(HookTerminateThread),
@@ -765,7 +805,7 @@ struct HookTable {
     size_t n;
     bool on;
 };
-HookTable g_tables[15];
+HookTable g_tables[17];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
@@ -839,6 +879,9 @@ void InstallCompatHooks(bool inLoaderLock) {
     g_tables[11] = {mouseHooks, mouse, true};
     g_tables[12] = {kPaintHooks, kPaintHookCount, true};
     g_tables[13] = {videoHooks, video, true};
+    g_tables[15] = {kExitHooks, sizeof(kExitHooks) / sizeof(kExitHooks[0]), LogLevel() >= 1};
+    if (g_config.mouseMerge) MouseMergeInit();
+    g_tables[16] = {kMouseMergeHooks, kMouseMergeHookCount, g_config.mouseMerge};
     // The tables switched on, and GetProcAddress with them, patched together (the modules
     // listed once): made once, the setting fixed for the process.
     static std::vector<ImportHook> all;

@@ -319,7 +319,7 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     HookView view;
     if (msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED || msg == WM_SIZE || msg == WM_MOVE ||
         msg == WM_STYLECHANGED || msg == WM_GETMINMAXINFO || msg == WM_SYSCOMMAND || msg == WM_ACTIVATEAPP ||
-        msg == WM_ACTIVATE || msg == WM_SETFOCUS || msg == WM_SYSKEYUP || msg == WM_POWER)
+        msg == WM_ACTIVATE || msg == WM_SETFOCUS || msg == WM_SYSKEYUP || msg == WM_POWER || msg == WM_DPICHANGED)
         view = ViewHook(h);
     if ((frameChanged || resized) && view.owned && view.exclusive && !view.quietMove)
         RequestWindowWork(h, frameChanged ? kWorkCoverFrame : kWorkCoverMoved);
@@ -482,6 +482,12 @@ LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             mmi->ptMaxTrackSize.y = std::max<LONG>(mmi->ptMaxTrackSize.y, view.coverSize.cy);
         }
         return r;
+    } else if (msg == WM_DPICHANGED && lp && view.owned && view.exclusive && !view.fullscreen) {
+        // Window mode, moved to a monitor of another scaling (dpiaware=on): sized as Windows
+        // suggests, the scale dd2d9 gave it kept (see ApplyWindow). The game hears of it
+        // too, as of any message; programs of its time do nothing with it.
+        const RECT* r = reinterpret_cast<const RECT*>(lp);
+        SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
     } else if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) {
         // A display mode shown scaled or in a window: the game's window is its screen, at
         // 0,0 and the mode's size (see input.cpp). The wheel messages carry screen

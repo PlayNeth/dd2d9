@@ -704,9 +704,24 @@ void DDraw::ApplyWindow() {
     GetMonitorInfoW(GameMonitor(hwnd_), &mi);
     if (display == kDisplayWindow) {
         Uncover();
-        RECT r = {0, 0, LONG(modeW_), LONG(modeH_)};
-        AdjustWindowRectEx(&r, DWORD(style), GetMenu(hwnd_) != nullptr, DWORD(exStyle));
+        // The display's scaling (dpiaware=on; 96 DPI is 100%), as far as the work area takes
+        // the window whole: 640x480 at 150% a 960x720 client area, its image scaled with it.
+        const UINT dpi = WindowDpi(hwnd_);
+        const bool menu = GetMenu(hwnd_) != nullptr;
         const RECT& wa = mi.rcWork;
+        RECT frame = {0, 0, 0, 0};
+        AdjustWindowRectForDpi(&frame, DWORD(style), menu, DWORD(exStyle), dpi);
+        double scale = dpi / 96.0;
+        if (scale > 1.0) {
+            const double fitW = double(wa.right - wa.left - (frame.right - frame.left)) / modeW_;
+            const double fitH = double(wa.bottom - wa.top - (frame.bottom - frame.top)) / modeH_;
+            scale = std::max(1.0, std::min(scale, std::min(fitW, fitH)));
+        }
+        RECT r = {0, 0, LONG(modeW_ * scale + 0.5), LONG(modeH_ * scale + 0.5)};
+        AdjustWindowRectForDpi(&r, DWORD(style), menu, DWORD(exStyle), dpi);
+        if (scale != 1.0)
+            DD2D9_LOG("window mode at %u DPI: the client area %ldx%ld (%d%%)", dpi, LONG(modeW_ * scale + 0.5),
+                      LONG(modeH_ * scale + 0.5), int(scale * 100 + 0.5));
         int w = r.right - r.left, h = r.bottom - r.top;
         int x = std::max<int>(wa.left, wa.left + ((wa.right - wa.left) - w) / 2);
         int y = std::max<int>(wa.top, wa.top + ((wa.bottom - wa.top) - h) / 2);

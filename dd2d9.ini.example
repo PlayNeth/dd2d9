@@ -27,6 +27,15 @@ display=switch
 ; desktop was switched to.
 minimize=auto
 
+; The display's scaling (125%, 150%, ... in Windows' display settings): on (default), the
+; game sees the real screen and its picture is shown 1:1, sharp; in window mode, its window
+; is enlarged by the scaling, as far as the screen takes it (640x480 at 150%: 960x720).
+; off: Windows scales the game, as it does any program of its time: the screen it is told
+; of is smaller than the real one, and its picture is stretched again and blurred. A game
+; whose manifest or compatibility settings ("Override high DPI scaling") set it already
+; is left as it is.
+dpiaware=on
+
 ; Scaling when the image doesn't fit 1:1 (window resized, borderless, windowed games):
 ;   aspect (default), fill, integer
 stretch=aspect
@@ -167,6 +176,15 @@ palettizedtextures=on
 ; primary or more (games that show frames that way).
 fpslimit=0
 
+; A DirectInput mouse's buffered moves (what games read with GetDeviceData) merged: on
+; (default). A mouse polled 1000 to 8000 times a second puts that many moves of a pixel or
+; two in DirectInput's buffer, where a mouse of the time put 100 to 125: a game that reads a
+; few each frame falls behind and stutters, or its buffer overflows and moves are lost (Need
+; for Speed III). Merged, the moves between two button changes come as one entry per axis
+; holding all of their distance, in order with the buttons, and DirectInput's buffer is made
+; 128 entries or more. off: as DirectInput gives them.
+mousemerge=on
+
 ; Direct3D in 32 bits for 16-bit games: their render targets are drawn in 32 bits on the
 ; GPU (blending, fog and gradients without 16-bit banding) and converted when the game
 ; reads them. off (default) / on
@@ -237,7 +255,9 @@ alternatepixelcenter=off
 
 ; Logging: 0 off (default), 1 info, 2 trace (every blit, lock, flip and palette change -
 ; very verbose, for diagnosing rendering problems).
-; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ...").
+; With log=1 or more, calls dd2d9 doesn't support are logged too ("stub: ..."), and how the
+; process ends: ExitProcess or TerminateProcess and who called it, and "the process exits" at
+; an orderly end (a log that stops without either ended in a crash Windows ended at once).
 log=0
 ; Default log file: dd2d9.log next to the game's exe. If that folder isn't writable, dd2d9
 ; falls back to the current directory, then %TEMP%. A relative path is relative to the

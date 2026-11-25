@@ -75,9 +75,10 @@ void LogInit() {
     for (const auto& e : g_iniErrors) Log(1, "config:  %s", Utf8(e).c_str());
     static const char* kAutoOnOff[] = {"auto", "on", "off"};  // (minimize=, vsync=, d3d=, flipcopy=)
     static const char* kFilter[] = {"point", "linear", "sharp"};
-    Log(1, "settings: display=%s minimize=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s log=%d",
+    Log(1, "settings: display=%s minimize=%s stretch=%s filter=%s vsync=%s d3d=%s d3d9=%s dpiaware=%s mousemerge=%s log=%d",
         kDisplay[g_config.display], kAutoOnOff[g_config.minimize], kStretch[g_config.stretch], kFilter[g_config.filter],
-        kAutoOnOff[g_config.vsync], kAutoOnOff[g_config.d3d], g_config.systemD3D9 ? "system" : "game", g_config.log);
+        kAutoOnOff[g_config.vsync], kAutoOnOff[g_config.d3d], g_config.systemD3D9 ? "system" : "game",
+        g_config.dpiAware ? "on" : "off", g_config.mouseMerge ? "on" : "off", g_config.log);
     if (g_config.minimize == kMinimizeAuto && g_tilingWm)
         Log(1, "minimize=auto: the fullscreen window isn't minimized under %s, which doesn't minimize windows",
             g_tilingWm);
@@ -115,7 +116,7 @@ static HMODULE ModuleAt(const void* addr) {
 }
 
 // "module.dll+0x1234" for a code address, or the bare address outside any module.
-static void DescribeAddress(const void* addr, char* out, size_t size) {
+void DescribeAddress(const void* addr, char* out, size_t size) {
     // No allocation (it runs in the crash handler, perhaps with the heap damaged).
     if (HMODULE m = ModuleAt(addr)) {
         char path[MAX_PATH];
@@ -162,13 +163,21 @@ static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep) {
     }
     Log(1, "exception 0x%08lx (%s%s) at %s - if the game crashed now, this is where", code, what, detail, at);
 #if defined(_M_IX86) || defined(__i386__)
-    // Return addresses: stack values that point into a loaded module. Only the
-    // committed memory region holding the stack pointer is read.
-    const auto* sp = reinterpret_cast<const ULONG_PTR*>(ep->ContextRecord->Esp);
+    LogStack(reinterpret_cast<const void*>(ep->ContextRecord->Esp));
+#endif
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The modules found on a stack from `from` up: return addresses, a rough call chain. Only the
+// committed memory region holding `from` is read.
+void LogStack(const void* from) {
+    if (!g_logFile) return;
+    const auto* sp = static_cast<const ULONG_PTR*>(from);
     MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return EXCEPTION_CONTINUE_SEARCH;
+    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return;
     const auto* top = reinterpret_cast<const ULONG_PTR*>(static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize);
     char chain[12 * 80] = "";
+    char at[300];
     size_t used = 0;
     int found = 0;
     for (int i = 0; i < 512 && sp + i < top && found < 12; i++) {
@@ -179,8 +188,6 @@ static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS* ep) {
         used += size_t(w);
     }
     Log(1, "  stack (modules found, innermost first): %s", found ? chain : "none");
-#endif
-    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 void Log(int level, const char* fmt, ...) {
@@ -214,6 +221,8 @@ void LogFlush(bool processExit) {
     } else {
         EnterCriticalSection(&g_logLock);
     }
+    // (A crash, or TerminateProcess, ends the process without this line.)
+    if (processExit) fprintf(g_logFile, "[%8lu %04lx] the process exits\n", GetTickCount(), GetCurrentThreadId());
     fflush(g_logFile);
     if (!processExit) {  // unloaded while the process goes on: a later load opens the file again
         fclose(g_logFile);

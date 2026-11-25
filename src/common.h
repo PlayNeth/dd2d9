@@ -36,6 +36,8 @@ struct Config {
     int vsync = kVSyncAuto;        // auto: Flip() follows the game's flags (DDFLIP_NOVSYNC); on / off: forced
     int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
+    bool dpiAware = true;          // dpiaware=on: the process handles the display's scaling, window mode scaled (dpi.cpp)
+    bool mouseMerge = true;        // mousemerge=on: a DirectInput mouse's buffered moves merged (dinputmouse.cpp)
     // Compatibility (compatsys.cpp): what the game is told about the machine.
     int ramMB = 1024;              // GlobalMemoryStatus(Ex) physical memory; 0: the real values
     int vramMB = 512;              // DirectDraw's video memory (GetCaps, GetAvailableVidMem)
@@ -87,6 +89,10 @@ inline int LogLevel() { return g_logLevel; }
 void Log(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void LogFlush(bool processExit);
 void CrashLoggerRemove();  // before the DLL is unloaded (FreeLibrary)
+// "module+0xoffset" for an address in a module (else the address), and the modules found on a
+// stack from an address in it (log.cpp).
+void DescribeAddress(const void* addr, char* out, size_t size);
+void LogStack(const void* from);
 const char* GuidName(REFIID riid);
 
 #define DD2D9_LOG(...) do { if (::dd2d9::LogLevel() >= 1) ::dd2d9::Log(1, __VA_ARGS__); } while (0)
@@ -272,6 +278,17 @@ void DescOutEnum(const DDSURFACEDESC2& in, DDSURFACEDESC* out);  // old-interfac
 // keep it in a register over several calls) would go on calling Windows' function.
 struct ImportHook;
 ImportHook* MouseHooks(size_t* n);
+// mousemerge= (dinputmouse.cpp): DirectInputCreate; set up before the hooks are installed,
+// and the patched interface tables restored before dd2d9 is unloaded.
+extern ImportHook kMouseMergeHooks[];
+extern const size_t kMouseMergeHookCount;
+void MouseMergeInit();
+void MouseMergeRestore();
+// dpiaware= (dpi.cpp): set from DllMain, before the game makes a window. A window's DPI (96
+// when Windows scales the process itself), and its frame for a client area at a DPI.
+void MakeDpiAware();
+UINT WindowDpi(HWND h);
+void AdjustWindowRectForDpi(RECT* r, DWORD style, bool menu, DWORD exStyle, UINT dpi);
 // Videos that Windows' player (MCI) draws into the game's window, placed where the image is
 // (video.cpp): installed with the mouse's.
 ImportHook* VideoHooks(size_t* n);

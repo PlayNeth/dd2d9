@@ -3,6 +3,51 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.10.0
+- **dd2d9 handles the display's scaling** (`dpiaware=on`, new, the default). On a display
+  scaled to 125%, 150% or more, Windows tells a program that doesn't say it handles the
+  scaling (every game of the DirectDraw era) a smaller screen than the real one (2560x1440
+  at 150%: 1707x960) and stretches all it shows, dd2d9's picture with it, blurring it. dd2d9
+  now tells Windows the process handles it, per monitor where Windows has it (Windows 10
+  1703 on), else the system's scaling (Vista on), as it loads, before the game makes its
+  first window: the game is told the real screen and its picture is shown 1:1. In
+  `display=window` the game's window is enlarged by the scaling, as far as the work area
+  takes it whole (640x480 at 150%: 960x720), its picture and the mouse scaled with it; moved
+  to a monitor of another scaling, it is resized as Windows suggests. A game whose manifest
+  or compatibility settings set its awareness already is left as it is (logged). `off`:
+  Windows scales the game, as before.
+- **A DirectInput mouse's buffered moves come merged** (`mousemerge=on`, new, the default).
+  A mouse polled 1000 to 8000 times a second puts that many moves of a pixel or two in
+  DirectInput's buffer, where a mouse of the DirectInput 1–7 era put 100 to 125. Need for
+  Speed III stuttered with such a mouse (dxwrapper's `FixHighFrequencyMouse` cured it). dd2d9
+  now points the game's `DirectInputCreateA`/`W`/`Ex` at its own, and for a device made for
+  the system mouse patches `GetDeviceData`, `SetProperty`, `GetProperty`, `SetDataFormat` and
+  `Release` in the device's interface tables: each read empties DirectInput's buffer (made 128
+  entries or more; the game is told the size it set) and hands the game the moves between two
+  button changes as one entry per axis holding all of their distance, in the order they came
+  with the buttons. Nothing is lost; a full game buffer reports an overflow as DirectInput
+  does. The axes are found in the game's data format. Logged: the device, its format, and
+  every 10 s the entries read and those handed out. `off`: as DirectInput gives them.
+  DirectInput 8 is left alone.
+- **The log says how the process ended** (`log=1` and above). A call to `ExitProcess` or to
+  `TerminateProcess` of the process itself is logged with the module and offset it came from
+  and the call chain found on the stack, and an orderly end with "the process exits". Need
+  for Speed III with a frame-rate mod left logs that stopped mid-race with no exception and
+  nothing in Windows' event log; only with these lines did it show that the game had quit
+  itself (`ExitProcess(0)` from its own code), a check of its race clock that the mod's
+  timing set off, and not a crash in dd2d9.
+- **Every thread the game terminates is logged** (the first 20, with `safeterminate=on`, the
+  default): its id, where it started, and where it was terminated from. Before, only the
+  first was mentioned, without which.
+- The crash logger's call chain is now a function of its own, used by both.
+- Tests: ddtest runs two processes of its own that terminate a thread, then end by
+  `ExitProcess` and by `TerminateProcess`, and reads their logs. It checks the process's DPI
+  awareness, and sends 64 mouse moves of a pixel and reads them through a DirectInput mouse
+  buffer of 16: one entry of 64 by default; in a process of its own with `dpiaware=off` and
+  `mousemerge=off`, an entry for each move DirectInput got, and the process left to Windows'
+  scaling. The audit's window mode expects the window enlarged by the display's scaling and
+  the picture filling it (run at 144 DPI under Wine: 960x720 for 640x480).
+
 ## 1.9.5
 - **Movies named by a path with spaces are scaled with the game again.** Street Fighter Zero
   plays its movies through MCI by their paths, quoted (`open "K:\DRM-Free Games\...\Z3.AVI"`,

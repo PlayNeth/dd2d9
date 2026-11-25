@@ -14,6 +14,8 @@
 #include <digitalv.h>
 #include <vfw.h>
 #include <d3d.h>
+#define DIRECTINPUT_VERSION 0x0700
+#include <dinput.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -217,6 +219,179 @@ static int RunHookedModules() {
     CHECK(asGame == own, "a DLL the game loads: answered as the game, %lu MB of memory (the game: %lu)", asGame, own);
     CHECK(asTool > own, "the same DLL as RTSSHooks.dll, an overlay tool's hook: left alone, the machine's %lu MB (the game: %lu)",
           asTool, own);
+    return 0;
+}
+
+// How a process ended, in the log (log=1 and above): "ddtest endlog exit" and "ddtest endlog
+// terminate", processes of their own logging to a file of their own (DD2D9_LOG), terminate a
+// thread they started, then end by ExitProcess(5) or TerminateProcess(6). The log names each,
+// and who called it; "the process exits" only after ExitProcess (TerminateProcess runs no
+// detach). dd2d9's own, as all of its log.
+static DWORD WINAPI EndLogIdle(void*) {
+    for (;;) Sleep(1);
+}
+
+static int RunEndLogChild(bool terminate) {
+    HANDLE th = CreateThread(nullptr, 0, EndLogIdle, nullptr, 0, nullptr);
+    Sleep(20);
+    TerminateThread(th, 0);
+    WaitForSingleObject(th, 1000);
+    CloseHandle(th);
+    if (terminate) TerminateProcess(GetCurrentProcess(), 6);
+    ExitProcess(5);
+}
+
+static int RunEndLog() {
+    char path[MAX_PATH], was[MAX_PATH] = "";
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    strcpy(strrchr(path, '\\') + 1, "endlog.txt");
+    const bool had = GetEnvironmentVariableA("DD2D9_LOG", was, MAX_PATH) - 1 < MAX_PATH - 1;
+    static char text[16384];
+    auto run = [&](const char* mode) {
+        DeleteFileA(path);
+        SetEnvironmentVariableA("DD2D9_LOG", path);
+        const DWORD code = RunChild(mode);
+        SetEnvironmentVariableA("DD2D9_LOG", had ? was : nullptr);
+        text[0] = 0;
+        if (FILE* f = fopen(path, "rb")) {
+            text[fread(text, 1, sizeof(text) - 1, f)] = 0;
+            fclose(f);
+        }
+        DeleteFileA(path);
+        return code;
+    };
+    DWORD code = run("endlog exit");
+    const bool thread = strstr(text, "(it starts in ddtest.exe+") && strstr(text, "terminated from ddtest.exe+");
+    CHECK(code == 5 && strstr(text, "ExitProcess(0x5) from ddtest.exe+") && strstr(text, "the process exits") && thread,
+          "a process ended by ExitProcess(5) (exit %lu): its log names the call and its caller (%d), the end (%d), and "
+          "the thread it terminated, where it starts and who ended it (%d)",
+          code, strstr(text, "ExitProcess(0x5) from ddtest.exe+") != nullptr,
+          strstr(text, "the process exits") != nullptr, thread);
+    code = run("endlog terminate");
+    CHECK(code == 6 && strstr(text, "TerminateProcess(this process, 0x6) from ddtest.exe+") &&
+              !strstr(text, "the process exits"),
+          "a process ended by TerminateProcess(6) (exit %lu): its log names the call and its caller (%d), and no end "
+          "(%d: none runs)",
+          code, strstr(text, "TerminateProcess(this process, 0x6) from ddtest.exe+") != nullptr,
+          strstr(text, "the process exits") != nullptr);
+    return 0;
+}
+
+// dpiaware= and mousemerge= (dd2d9's own). By default the process handles the display's
+// scaling (per monitor where Windows has it), and a DirectInput mouse's buffered moves come
+// merged: 64 moves of a pixel to the right, sent as a 1000 Hz mouse sends them, read through
+// a buffer of 16 entries, come as one entry of 64 pixels, with no overflow. "ddtest settings",
+// a process of its own run with dpiaware=off and mousemerge=off (a file named by DD2D9_INI),
+// is left to Windows' scaling, and gets the moves as DirectInput has them: an entry for each
+// (Wine's DirectInput already joins some of them: more than one, not 64).
+struct MouseRead {
+    HRESULT hr = E_FAIL;
+    int entries = 0;  // X moves read
+    LONG x = 0;       // their distance
+};
+
+static MouseRead ReadMouseMoves(HWND hwnd) {
+    MouseRead r;
+    IDirectInputA* di = nullptr;
+    IDirectInputDeviceA* dev = nullptr;
+    if (FAILED(DirectInputCreateA(GetModuleHandleA(nullptr), 0x0700, &di, nullptr))) return r;
+    if (SUCCEEDED(di->CreateDevice(GUID_SysMouse, &dev, nullptr))) {
+        dev->SetDataFormat(&c_dfDIMouse);
+        dev->SetCooperativeLevel(hwnd, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+        DIPROPDWORD p = {};
+        p.diph.dwSize = sizeof(p);
+        p.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+        p.diph.dwHow = DIPH_DEVICE;
+        p.dwData = 16;
+        dev->SetProperty(DIPROP_BUFFERSIZE, &p.diph);
+        SetForegroundWindow(hwnd);
+        Pump();
+        dev->Acquire();
+        DWORD flush = INFINITE;
+        dev->GetDeviceData(sizeof(DIDEVICEOBJECTDATA), nullptr, &flush, 0);
+        for (int i = 0; i < 64; i++) {
+            INPUT in = {};
+            in.type = INPUT_MOUSE;
+            in.mi.dx = 1;
+            in.mi.dwFlags = MOUSEEVENTF_MOVE;
+            SendInput(1, &in, sizeof(in));
+            Sleep(1);
+        }
+        for (int i = 0; i < 5; i++) {
+            Pump();
+            Sleep(20);
+        }
+        DIDEVICEOBJECTDATA d[16];
+        DWORD n = 16;
+        r.hr = dev->GetDeviceData(sizeof(DIDEVICEOBJECTDATA), d, &n, 0);
+        for (DWORD i = 0; SUCCEEDED(r.hr) && i < n; i++)
+            if (d[i].dwOfs == DIMOFS_X) {
+                r.entries++;
+                r.x += LONG(d[i].dwData);
+            }
+        dev->Unacquire();
+        dev->Release();
+    }
+    di->Release();
+    return r;
+}
+
+static int Awareness() {  // 0 unaware, 1 the system's, 2 per monitor (-1: not known)
+    HMODULE u = GetModuleHandleA("user32.dll");
+    using GetCtxFn = HANDLE(WINAPI*)();
+    using FromCtxFn = int(WINAPI*)(HANDLE);
+    using AwareFn = BOOL(WINAPI*)();
+    auto get = reinterpret_cast<GetCtxFn>(reinterpret_cast<void*>(GetProcAddress(u, "GetThreadDpiAwarenessContext")));
+    auto from = reinterpret_cast<FromCtxFn>(reinterpret_cast<void*>(GetProcAddress(u, "GetAwarenessFromDpiAwarenessContext")));
+    if (get && from) return from(get());
+    if (auto aware = reinterpret_cast<AwareFn>(reinterpret_cast<void*>(GetProcAddress(u, "IsProcessDPIAware"))))
+        return aware() ? 1 : 0;
+    return -1;
+}
+
+static int RunSettingsChild() {
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    const MouseRead r = ReadMouseMoves(hwnd);
+    DestroyWindow(hwnd);
+    return std::min(r.entries, 99) * 100 + (r.hr == DI_BUFFEROVERFLOW ? 10 : 0) + (Awareness() == 0 ? 1 : 0);
+}
+
+static int RunSettings() {
+    const int aware = Awareness();
+    const bool perMonitor = GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext") != nullptr;
+    CHECK(aware == (perMonitor ? 2 : 1), "dpiaware=on (default): the process handles the display's scaling, %d (%d: %s)",
+          aware, perMonitor ? 2 : 1, perMonitor ? "per monitor" : "the system's");
+    HWND hwnd = MakeWindow(WS_OVERLAPPEDWINDOW, 320, 240);
+    const MouseRead r = ReadMouseMoves(hwnd);
+    DestroyWindow(hwnd);
+    if (r.hr == E_FAIL || (SUCCEEDED(r.hr) && !r.entries)) {
+        fprintf(g_out, "SKIP mousemerge: no DirectInput mouse, or the moves sent didn't reach it (0x%08lx)\n", r.hr);
+    } else {
+        CHECK(r.hr == DI_OK && r.entries == 1 && r.x == 64,
+              "mousemerge=on (default): 64 moves of a pixel through a buffer of 16 come as one entry (%d) of 64 (%ld), "
+              "no overflow (0x%08lx)",
+              r.entries, r.x, r.hr);
+    }
+    char ini[MAX_PATH], was[MAX_PATH] = "";
+    GetModuleFileNameA(nullptr, ini, MAX_PATH);
+    strcpy(strrchr(ini, '\\') + 1, "settings.ini");
+    if (FILE* f = fopen(ini, "w")) {
+        fputs("[dd2d9]\ndpiaware=off\nmousemerge=off\n", f);
+        fclose(f);
+    }
+    const bool had = GetEnvironmentVariableA("DD2D9_INI", was, MAX_PATH) - 1 < MAX_PATH - 1;
+    SetEnvironmentVariableA("DD2D9_INI", ini);
+    const DWORD code = RunChild("settings");
+    SetEnvironmentVariableA("DD2D9_INI", had ? was : nullptr);
+    DeleteFileA(ini);
+    // (Without the moves reaching DirectInput, the first check skipped: nothing to compare.)
+    if (!(r.hr == E_FAIL || (SUCCEEDED(r.hr) && !r.entries)))
+        CHECK(code / 100 > 1 && code % 10 == 1,
+              "dpiaware=off and mousemerge=off, in a process of its own (%lu): the moves as DirectInput has them, an "
+              "entry for each it got (%lu, of 16 at most; overflowed %lu); the process left to Windows' scaling (%lu)",
+              code, code / 100, code / 10 % 10, code % 10);
+    else
+        CHECK(code % 10 == 1, "dpiaware=off, in a process of its own: the process left to Windows' scaling (%lu)", code % 10);
     return 0;
 }
 
@@ -7349,7 +7524,7 @@ void FillGreen(IDirectDraw7* dd, IDirectDrawSurface7** keep) {
 // The picture where the setting puts it: borderless, the screen's middle and the middle of its
 // bottom edge (scaled to the full height, not the mode's 480 lines in the corner); window, the
 // middle of a centered window whose client area is the mode's size.
-void Expect(HWND hwnd, int mw, int mh, const char* what) {
+void Expect(HWND hwnd, int mw, int mh, const char* what, bool scaled = true) {
     Settle();
     if (borderless) {
         const COLORREF mid = Screen(sw / 2, sh / 2), low = Screen(sw / 2, sh - 4);
@@ -7360,8 +7535,42 @@ void Expect(HWND hwnd, int mw, int mh, const char* what) {
         realClientRect(hwnd, &c);
         RECT w = {};
         realWindowRect(hwnd, &w);
-        CHECK(c.right == mw && c.bottom == mh, "audit %s: a window of the mode's size (%ldx%ld at %ld,%ld)", what, c.right,
-              c.bottom, w.left, w.top);
+        // Scaled with the display's scaling (dpiaware=on, dd2d9's own), as far as the work
+        // area takes it: at 96 DPI the mode's size.
+        int ew = mw, eh = mh;
+        HMODULE u32 = GetModuleHandleA("user32.dll");
+        using DpiFn = UINT(WINAPI*)(HWND);
+        using AdjustFn = BOOL(WINAPI*)(RECT*, DWORD, BOOL, DWORD, UINT);
+        using MonitorFn = BOOL(WINAPI*)(HMONITOR, MONITORINFO*);
+        auto dpiOf = reinterpret_cast<DpiFn>(reinterpret_cast<void*>(GetProcAddress(u32, "GetDpiForWindow")));
+        auto adjust = reinterpret_cast<AdjustFn>(reinterpret_cast<void*>(GetProcAddress(u32, "AdjustWindowRectExForDpi")));
+        auto monitor = reinterpret_cast<MonitorFn>(RealExport(u32, "GetMonitorInfoW"));
+        const UINT dpi = dpiOf ? dpiOf(hwnd) : 96;
+        double s = dpi / 96.0;
+        if (scaled && s > 1.0 && adjust && monitor) {
+            RECT f = {0, 0, 0, 0};
+            adjust(&f, DWORD(GetWindowLongA(hwnd, GWL_STYLE)), GetMenu(hwnd) != nullptr,
+                   DWORD(GetWindowLongA(hwnd, GWL_EXSTYLE)), dpi);
+            MONITORINFO mi = {};
+            mi.cbSize = sizeof(mi);
+            monitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+            const double fitW = double(mi.rcWork.right - mi.rcWork.left - (f.right - f.left)) / mw;
+            const double fitH = double(mi.rcWork.bottom - mi.rcWork.top - (f.bottom - f.top)) / mh;
+            s = std::max(1.0, std::min(s, std::min(fitW, fitH)));
+            ew = int(mw * s + 0.5);
+            eh = int(mh * s + 0.5);
+        }
+        CHECK(c.right == ew && c.bottom == eh, "audit %s: a window of the mode's size at %u DPI, %dx%d (%ldx%ld at %ld,%ld)",
+              what, dpi, ew, eh, c.right, c.bottom, w.left, w.top);
+        // The picture fills it: its middle and its bottom right corner green.
+        using PointFn = BOOL(WINAPI*)(HWND, POINT*);
+        auto toScreen = reinterpret_cast<PointFn>(RealExport(u32, "ClientToScreen"));
+        POINT mid = {c.right / 2, c.bottom / 2}, corner = {c.right - 3, c.bottom - 3};
+        toScreen(hwnd, &mid);
+        toScreen(hwnd, &corner);
+        const COLORREF pm = Screen(mid.x, mid.y), pc = Screen(corner.x, corner.y);
+        CHECK(!scaled || (pm & 0xFF00 && pc & 0xFF00), "audit %s: the picture fills the window (middle %06lx, corner %06lx)",
+              what, pm, pc);
     }
 }
 IDirectDraw7* Make() {
@@ -7399,7 +7608,7 @@ static int RunAudit(bool borderless) {
         dd->SetCooperativeLevel(h, fs | DDSCL_NOWINDOWCHANGES | DDSCL_ALLOWMODEX);
         dd->SetDisplayMode(640, 480, 16, 0, 0);
         FillGreen(dd, &prim);
-        Expect(h, 640, 480, "B no window changes");
+        Expect(h, 640, 480, "B no window changes", false);
         Done(dd, prim, h);
     }
     {  // C. An overlapped window with its frame, small, exclusive.
@@ -8524,11 +8733,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR cmd, int) {
     else if (strstr(cmd, "fuzz")) r = RunFuzz();
     else if (strstr(cmd, "calibrator")) r = RunCalibrator();
     else if (strstr(cmd, "leave")) r = RunLeave(strstr(cmd, "after") != nullptr);
+    else if (strstr(cmd, "endlog")) r = RunEndLogChild(strstr(cmd, "terminate") != nullptr);
+    else if (strstr(cmd, "settings")) r = RunSettingsChild();
     else
         r = RunUnit() | RunExecute() | RunTargetGone() | RunLargeTarget() | RunPalTarget() | RunDrawnPrimary(8) |
             RunDrawnPrimary(32) | RunFormats() | RunYuvSurfaces() | RunOwnDc() | RunKeyRanges() | RunLifetime() |
-            RunCoopModes() | RunHookedModules() | RunActivation() | RunPrintScreen() | RunScreenPalette() |
-            RunGamma() | RunMeasured();
+            RunCoopModes() | RunHookedModules() | RunEndLog() | RunSettings() | RunActivation() | RunPrintScreen() |
+            RunScreenPalette() | RunGamma() | RunMeasured();
     fprintf(g_out, "== %d failure(s)\n", g_fail);
     fclose(g_out);
     return r | (g_fail ? 2 : 0);

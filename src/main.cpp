@@ -92,6 +92,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
         LoadConfig(inst);
         ReadGammaCalibrator();
         LogInit();
+        MakeDpiAware();  // (before the game makes its first window)
         InstallCompatHooks(true);
         if (!PinsThreads()) DisableThreadLibraryCalls(inst);  // (threads announced only for cpus=)
     }
@@ -101,6 +102,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
         if (!reserved) {  // unloaded while the process goes on: nothing may point into it
             CrashLoggerRemove();
             UnpatchAll();
+            MouseMergeRestore();
         }
         LogFlush(reserved != nullptr);       // non-null: the process is exiting
     }

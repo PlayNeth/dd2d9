@@ -107,6 +107,8 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **3D quality:** antialiasing, anisotropic filtering, mipmaps for textures that have none, linear filtering of point-filtered textures, 32-bit rendering of 16-bit targets (no banding) and 24-bit Z buffers.
 - **Old-hardware fixes:** emulated W buffering (no z-fighting of light maps on roads in NFS III), and light maps and decals pulled forward as 16-bit depth buffers rounded them.
 - **A frame limiter** for games that run too fast or use a whole processor core.
+- **Sharp on scaled displays:** the game is told the real screen and shown 1:1 at 125%, 150% and other display scalings, its window in `display=window` enlarged to match (`dpiaware`), where Windows would stretch the picture of a program of the era and blur it.
+- **High-polling-rate mice:** a DirectInput mouse's buffered moves come merged (`mousemerge`), one entry per axis between two button changes, so a game reading a few each frame keeps up with a 1000–8000 Hz mouse instead of stuttering or losing moves.
 - **What the game is told about the machine,** as a PC of its era would answer:
   - 1 GB of memory by default (`ram`): Windows reports 2 GB and a 4 GB page file, and old games overflow adding them up and claim there isn't enough;
   - one processor for its threads (`cpus`), and a 2 GHz clock in the registry (`cpu`);
@@ -134,6 +136,8 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **A second DirectDraw object takes exclusive mode over** from a first one that has lost activation, or whose window is gone or hidden.
 - **Each DirectDraw object in normal mode keeps its own display mode.** In `ddraw.dll` the display mode is one for all: a mode one object sets shows in the others' `GetDisplayMode` and makes their `TestCooperativeLevel` return `DDERR_WRONGMODE`. In dd2d9 only an exclusive object's mode is shown to the others.
 - **Alt+Tab's and Alt+Esc's key-up and a suspend request set the game aside only where a focus loss minimizes its window:** left as it is (`minimize=off`, i3 and sway, `DDSCL_NOWINDOWCHANGES`), it would stay set aside in front, with nothing to restore it from.
+- **A DirectInput mouse's buffered moves come merged** (`mousemerge=on`): `dinput.dll` gives one entry per move the mouse reported, a thousand or more a second today.
+- **The process handles the display's scaling itself** (`dpiaware=on`): `ddraw.dll` left that to Windows, which on a scaled display tells the game a smaller screen and stretches its picture.
 - **Direct3D 3–6 checks what `d3dim.dll` used blindly:** unknown handles, a draw with no viewport, bad vertex types, execute-buffer offsets past the buffer and NULL pointers give errors instead of crashes.
 
 ### Not implemented (yet)
@@ -160,12 +164,14 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | --- | --- |
 | `display` | `switch` (real mode switches), `window`, `borderless` |
 | `minimize` | `auto` (a fullscreen game's window is minimized when the game loses the focus, as with `ddraw.dll`, except under i3 and sway), `on`, `off` (left as it is). Tiling window managers don't minimize windows: under Wine a game's window minimized there didn't get the keyboard focus back from another workspace, and the game's mouse stood still. `auto` finds i3 and sway by the `I3SOCK` and `SWAYSOCK` they give the programs they start, or by the session's desktop (`XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`, `DESKTOP_SESSION`), or under Wine by their IPC socket, and stops minimizing once a window manager leaves the window minimized in front; under another tiling window manager, set `off`, but not under one that minimizes: under Openbox the window, left as it is, came back in front as soon as another desktop was switched to |
+| `dpiaware` | `on`: the process handles the display's scaling (per monitor where Windows has it): the game sees the real screen, its picture is shown 1:1, and in `display=window` its window is enlarged by the scaling as far as the screen takes it; `off`: Windows scales the game, blurred. Left as it is when the game's manifest or compatibility settings set it |
 | `stretch` | `aspect`, `fill`, `integer` |
 | `filter` | `sharp` (sharp bilinear: flat pixels, blended only over one screen pixel at their edges), `point`, `linear` |
 | `vsync` | `auto` (the game decides), `on`, `off` (never waits, at most two presents a refresh). Under Windows' desktop compositor dd2d9 paces the frames to the screen's refresh itself; elsewhere (Wine, no compositor) Direct3D 9's vsync does |
 | `d3d` | `auto`: dd2d9's own Direct3D 3–7; `off`: no Direct3D (2D only) |
 | `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
 | `fpslimit` | `0` (off); frames per second at most |
+| `mousemerge` | `on`: a DirectInput 1–7 mouse's buffered moves (`GetDeviceData`) merged, one entry per axis between two button changes, its buffer made 128 entries or more (a 1000–8000 Hz mouse made Need for Speed III stutter); `off`: as DirectInput gives them |
 | `antialiasing` | `0` (off); `2`, `4` or `8` samples |
 | `antialias2d` | `off`: with `antialiasing`, 2D drawn through Direct3D (HUDs, menus: screen-aligned, the depth test off or always passing, no depth written) stays pixel-sharp; `on`: antialiased like the 3D |
 | `anisotropy` | `0` (off); `2`, `4`, `8` or `16`, on textures the game filters smoothly |
@@ -212,6 +218,8 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 - **Nothing changes, and `log=1` writes no `dd2d9.log`:** dd2d9 isn't being loaded. Under Wine, check the `ddraw=n` override, or run `install.sh` again after a Wine update. On load, dd2d9 also sends a debug message saying where it was loaded from: under Wine 9, `WINEDEBUG=warn+seh` prints it; on Windows, use DebugView.
 - **A game refuses to start on a 32-bit desktop** ("16 bit screen mode required"): set `desktopbpp=16` in a `[game.exe]` section; `desktopbpp=8` for one that asks for 256 colours.
 - **A game says there isn't enough memory:** keep `ram` at its default, or lower it.
+- **A game stutters or slows down while the mouse moves** (a 1000 Hz or faster mouse): keep `mousemerge=on`; a game that reads the mouse through window messages instead of DirectInput isn't covered.
+- **The picture is blurred, or the game's screen too small, on a display scaled to 125% or more:** keep `dpiaware=on`; if the log says the awareness was set already, remove "Override high DPI scaling" from the game's compatibility settings, or set it to "Application".
 - **A game runs too fast:** set `fpslimit`. If it times itself from the registry's processor clock, try `cpu=0`.
 - **The mouse is off in a scaled or windowed mode:** please report it with `dd2d9.log` (`log=2`); the translation can't be turned off since 1.3.0.
 - **Z-fighting (hatched light maps or decals):** try `wbuffer=force` or a higher `overlaybias`, and `depth24=on`.
