@@ -3,6 +3,32 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.11.1
+- **Another wrapper can bring dd2d9's GDI fullscreen in under the name it calls:** `ddraw.dll`
+  exports `WinmmProxyAttach` too, the same as `DD2D9_GdiFullscreen`. reAL's `winmm.dll` has to
+  keep its name, so dd2d9's loader can't sit beside it; reAL loads the `ddraw.dll` beside it
+  and calls `WinmmProxyAttach` instead.
+- **Such a wrapper loads dd2d9 into every game, not only GDI ones, so gdifullscreen now makes
+  way for the game's own APIs:**
+  - **DirectDraw:** a DirectDraw object of the game's taking exclusive mode, or making a
+    windowed primary, while dd2d9's GDI mode is shown, gets it: the mode ends first. Before,
+    it was refused (`DDERR_EXCLUSIVEMODEALREADYSET`, `DDERR_NOEXCLUSIVEMODE`), as for a game
+    that switches the display with `ChangeDisplaySettings` before making its DirectDraw object.
+    A request for the desktop's mode back ends dd2d9's mode even with objects of the game's
+    around.
+  - **OpenGL, Glide, Direct3D 8:** a game whose modules import one of them, or that looked up
+    one of their functions (`GetProcAddress`, as Quake II does), gets its display changes from
+    Windows as before, since its picture isn't GDI's and dd2d9's mode would cover it. Not told
+    by the DLL being loaded: Wine's Direct3D 9 loads `opengl32.dll` itself.
+- **gdifullscreen's locking:** the mode was made and ended holding dd2d9's main lock, which
+  making a DirectDraw object's mode must not hold (the window's messages, and the presenter
+  thread its release waits up to 3 s for take it). It has a lock of its own now, taken before
+  the others. A blit from the game's window procedure while the mode changes goes to the
+  window, and a display change asked for from inside one (the window told of its activation)
+  is answered as done.
+- Tests: `gditest` checks a windowed primary and exclusive mode of the game's own over
+  dd2d9's GDI mode.
+
 ## 1.11.0
 - **Games that draw with GDI go fullscreen through dd2d9** (`gdifullscreen=auto`, new). Pajama
   Sam 2 draws with GDI (DIB sections, `BitBlt`/`StretchBlt` to its window) and goes

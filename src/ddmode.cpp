@@ -117,6 +117,9 @@ void DDraw::RestoreDisplay() {
 
 HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags, int version) {
     DD2D9_LOG("SetCooperativeLevel(%p, 0x%lx)%s", static_cast<void*>(hwnd), flags, version == 1 ? " (DirectDraw 1)" : "");
+    // (gdifullscreen=: a mode of dd2d9's own for a game that drew with GDI gives way to the
+    // game's own exclusive mode. Before the display lock: see gdiscreen.cpp.)
+    if (flags & DDSCL_EXCLUSIVE) GdiFullscreenYield(this);
     DisplayGuard dg;
     // Called again from the window procedure while this runs (WM_ACTIVATEAPP from the
     // activation below): dd2d9 ignores the inner call (ddraw.dll would run it).

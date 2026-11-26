@@ -50,7 +50,7 @@ Or, for one game: put `ddraw.dll` next to the game's exe and run the game with `
 
 Some games of the era draw with plain GDI and go fullscreen by switching the display with `ChangeDisplaySettings` (Pajama Sam 2 and the other Humongous games). They load no `ddraw.dll`, so dd2d9 comes in with its loader: put `winmm.dll` from the release next to the game's exe, with `ddraw.dll` beside it (or, under Wine, installed in the prefix). It passes every call on to Windows' own `winmm.dll` and loads dd2d9, which then shows the game's display mode itself, scaled as for a DirectDraw game (`gdifullscreen`). Under Wine, add the override for it: `WINEDLLOVERRIDES="ddraw,winmm=n,b"`.
 
-Another `winmm.dll` wrapper in the same folder: rename it `winmm_next.dll`, and dd2d9's passes the calls on to it instead (if it works under another name). One that has to keep its name can load dd2d9 itself: `LoadLibrary` the `ddraw.dll` beside it and call its `DD2D9_GdiFullscreen` export (no arguments), before the game's code runs.
+Another `winmm.dll` wrapper in the same folder: rename it `winmm_next.dll`, and dd2d9's passes the calls on to it instead (if it works under another name). One that has to keep its name can load dd2d9 itself: `LoadLibrary` the `ddraw.dll` beside it and call its `WinmmProxyAttach` (or `DD2D9_GdiFullscreen`) export, no arguments, before the game's code runs. reAL's `winmm.dll` does: with reAL, put only dd2d9's `ddraw.dll` beside it. A game that turns out to draw with DirectDraw, OpenGL, Glide or Direct3D 8 is left to them.
 
 ### Checking it works
 
@@ -178,7 +178,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `d3d` | `auto`: dd2d9's own Direct3D 3–7; `off`: no Direct3D (2D only) |
 | `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
 | `fpslimit` | `0` (off); frames per second at most |
-| `gdifullscreen` | `auto`: on when dd2d9 was loaded by its `winmm.dll` (a game that loads no `ddraw.dll`); `on`; `off`. A game with no DirectDraw object of its own that switches the display with `ChangeDisplaySettings` gets a display mode of dd2d9's own (always 32-bit), in exclusive mode on its window, and its GDI blits to that window are drawn into it; a switch back to the desktop's mode, or to none, ends it |
+| `gdifullscreen` | `auto`: on when dd2d9 was loaded by its `winmm.dll` or another wrapper that asks for it (a game that loads no `ddraw.dll`); `on`; `off`. A game with no DirectDraw object of its own that switches the display with `ChangeDisplaySettings` gets a display mode of dd2d9's own (always 32-bit), in exclusive mode on its window, and its GDI blits to that window are drawn into it; a switch back to the desktop's mode, or to none, ends it |
 | `mousemerge` | `on`: a DirectInput 1–7 mouse's buffered moves (`GetDeviceData`) merged, one entry per axis between two button changes, its buffer made 128 entries or more (a 1000–8000 Hz mouse made Need for Speed III stutter); `off`: as DirectInput gives them |
 | `antialiasing` | `0` (off); `2`, `4` or `8` samples |
 | `antialias2d` | `off`: with `antialiasing`, 2D drawn through Direct3D (HUDs, menus: screen-aligned, the depth test off or always passing, no depth written) stays pixel-sharp; `on`: antialiased like the 3D |

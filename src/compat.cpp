@@ -809,6 +809,7 @@ HookTable g_tables[17];
 
 FARPROC WINAPI HookGetProcAddress(HMODULE m, LPCSTR name) {
     const FARPROC p = DD2D9_NEXT(g_getProcAddress)(m, name);
+    GdiFullscreenProcLookup(m);
     if (p)
         if (void* hook = InstalledHookFor(reinterpret_cast<void*>(p))) return reinterpret_cast<FARPROC>(hook);
     return p;

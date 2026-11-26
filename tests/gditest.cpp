@@ -16,6 +16,8 @@
 namespace {
 
 FILE* g_out;
+// (ddraw.h's, the test not including it)
+constexpr DWORD DDSCL_FULLSCREEN_ = 0x1, DDSCL_NORMAL_ = 0x8, DDSCL_EXCLUSIVE_ = 0x10;
 int g_fail;
 
 void Check(bool ok, const char* what) {
@@ -259,6 +261,45 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int) {
     snprintf(line, sizeof(line), "the screen the desktop's again (GetSystemMetrics %dx%d)", GetSystemMetrics(SM_CXSCREEN),
              GetSystemMetrics(SM_CYSCREEN));
     Check(GetSystemMetrics(SM_CXSCREEN) == realW && GetSystemMetrics(SM_CYSCREEN) == realH, line);
+
+    // DirectDraw objects of the game's own while dd2d9's GDI mode is shown (a game that also
+    // draws with DirectDraw, loaded with dd2d9 by another wrapper): a windowed primary, then
+    // exclusive mode, the GDI mode made for each. Each gets what it asks for.
+    // (IDirectDraw's vtable: Release is entry 2, CreateSurface 6, SetCooperativeLevel 20.)
+    using CreateFn = HRESULT(WINAPI*)(GUID*, void**, IUnknown*);
+    using CoopFn = HRESULT(WINAPI*)(void*, HWND, DWORD);
+    using SurfaceFn = HRESULT(WINAPI*)(void*, void*, void**, IUnknown*);
+    using ReleaseFn = ULONG(WINAPI*)(void*);
+    const auto create = reinterpret_cast<CreateFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ddraw.dll"), "DirectDrawCreate")));
+    auto vt = [](void* o) { return *static_cast<void***>(o); };
+    for (int exclusive = 0; exclusive < 2; exclusive++) {
+        cds(&dm, 0);  // (the GDI mode)
+        void* dd = nullptr;
+        if (!create || FAILED(create(nullptr, &dd, nullptr)) || !dd) {
+            Check(false, "DirectDrawCreate from dd2d9");
+            break;
+        }
+        HRESULT hr;
+        if (exclusive) {
+            hr = reinterpret_cast<CoopFn>(vt(dd)[20])(dd, hwnd, DDSCL_EXCLUSIVE_ | DDSCL_FULLSCREEN_);
+            snprintf(line, sizeof(line), "the game's own DirectDraw object takes exclusive mode (0x%08lx)",
+                     static_cast<unsigned long>(hr));
+        } else {
+            reinterpret_cast<CoopFn>(vt(dd)[20])(dd, hwnd, DDSCL_NORMAL_);
+            // (DDSURFACEDESC: dwSize, dwFlags = DDSD_CAPS; ddsCaps at 104 = DDSCAPS_PRIMARYSURFACE)
+            DWORD sd[27] = {sizeof(sd), 1};
+            sd[26] = 0x200;
+            void* primary = nullptr;
+            hr = reinterpret_cast<SurfaceFn>(vt(dd)[6])(dd, sd, &primary, nullptr);
+            snprintf(line, sizeof(line), "the game's own DirectDraw object makes a windowed primary (0x%08lx)",
+                     static_cast<unsigned long>(hr));
+            if (primary) reinterpret_cast<ReleaseFn>(vt(primary)[2])(primary);
+        }
+        Check(hr == 0, line);
+        reinterpret_cast<CoopFn>(vt(dd)[20])(dd, hwnd, DDSCL_NORMAL_);
+        reinterpret_cast<ReleaseFn>(vt(dd)[2])(dd);
+    }
 
     DestroyWindow(hwnd);
     DeleteDC(mem);

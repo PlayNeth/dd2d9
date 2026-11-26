@@ -328,6 +328,16 @@ bool GdiFullscreenChange(bool hasMode, bool sized, DWORD w, DWORD h, DWORD flags
 // The game's blit to the window of that display mode drawn into its primary, as
 // DrawIntoShownPrimary does for a windowed one. Any thread.
 bool GdiFullscreenDraw(HDC dc, void (*draw)(HDC, void*), void* ctx);
+// gdiscreen.cpp's lock, made in DllMain.
+void GdiScreenInit();
+class DDraw;
+// A DirectDraw object of the game's taking exclusive mode (SetCooperativeLevel) or a primary
+// (CreateSurface) while dd2d9's gdifullscreen mode is shown: that mode makes way for it (true:
+// it did). Holding none of dd2d9's locks.
+bool GdiFullscreenYield(const DDraw* taker);
+// The game's GetProcAddress on module `m` (compat.cpp): one of OpenGL's, Glide's or Direct3D 8's
+// tells gdifullscreen= the game doesn't draw with GDI.
+void GdiFullscreenProcLookup(HMODULE m);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.
 void LimitFrame();

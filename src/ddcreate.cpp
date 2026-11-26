@@ -51,7 +51,13 @@ static void FinishCaps(DDSURFACEDESC2* d) {
 }
 
 HRESULT DDraw::CreateSurface(const void* inDesc, void** out, IUnknown* outer, int ddVersion) {
-    const HRESULT hr = CreateSurfaceImpl(inDesc, out, outer, ddVersion);
+    HRESULT hr = CreateSurfaceImpl(inDesc, out, outer, ddVersion);
+    // A windowed primary refused for another object's exclusive mode, that being dd2d9's own
+    // gdifullscreen mode (a game that switched the display with ChangeDisplaySettings before
+    // making its DirectDraw object): the mode makes way, and the primary is made. (Out here:
+    // making way takes the locks CreateSurfaceImpl holds.)
+    if (hr == DDERR_NOEXCLUSIVEMODE && !Exclusive() && GdiFullscreenYield(this))
+        hr = CreateSurfaceImpl(inDesc, out, outer, ddVersion);
     if (FAILED(hr)) DD2D9_LOG("CreateSurface failed: 0x%08lx", hr);
     return hr;
 }

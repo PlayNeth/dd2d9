@@ -612,11 +612,11 @@ void DDraw::CheckCover(HWND h, bool moved) {
 // CheckCover does the same afterwards, but from a posted message, which a game that doesn't
 // read its messages while it loads sees late: Hydro Thunder sizes its window to 640x480
 // right after SetDisplayMode, and showed in the corner for its first two seconds. A smaller
-// window is left alone when the game made it so (going windowed), not otherwise (below). With a frame change (games set their style,
-// then SetWindowPos with SWP_FRAMECHANGED: Hydro Thunder still started in the corner) the
-// covering rectangle is worked out for the new frame (the style is set by now); CheckCover
-// checks the client area once the game has handled it. Returns whether the position was
-// changed. g_displayLock held.
+// window is left alone when the game made it so (going windowed), not otherwise (below). With
+// a frame change (games set their style, then SetWindowPos with SWP_FRAMECHANGED: Hydro
+// Thunder still started in the corner) the covering rectangle is worked out for the new frame
+// (the style is set by now); CheckCover checks the client area once the game has handled it.
+// Returns whether the position was changed. g_displayLock held.
 bool DDraw::FitCover(HWND h, WINDOWPOS* wp) {
     if (!Exclusive() || !alive || covering_ || h != coverHwnd_ || !coverSize_.cx || applying_ || suspended_ ||
         !WindowChanges() || !modeSet_ || activeDisplay_ != kDisplayBorderless || IsIconic(h))

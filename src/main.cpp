@@ -89,6 +89,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void* reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         InitializeCriticalSection(&g_lock);
         InitializeCriticalSection(&g_displayLock);
+        GdiScreenInit();
         LoadConfig(inst);
         ReadGammaCalibrator();
         LogInit();
