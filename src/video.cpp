@@ -676,7 +676,39 @@ bool Scale(HWND parent, double* sx, double* sy) {
     return true;
 }
 
+// The game moving, sizing or showing a window itself (these hooks, which only the game's
+// modules call: dd2d9's own calls aren't patched): see GameSizingWindow. Counted across
+// threads: a window's changes come in its own thread, which may not be the caller's.
+volatile LONG g_gameSizing;
+struct GameSizing {
+    GameSizing() { InterlockedIncrement(&g_gameSizing); }
+    ~GameSizing() { InterlockedDecrement(&g_gameSizing); }
+};
+
+using ShowWindowFn = BOOL(WINAPI*)(HWND, int);
+using SetWindowPlacementFn = BOOL(WINAPI*)(HWND, const WINDOWPLACEMENT*);
+using EndDeferWindowPosFn = BOOL(WINAPI*)(HDWP);
+ShowWindowFn g_showWindow;
+SetWindowPlacementFn g_setWindowPlacement;
+EndDeferWindowPosFn g_endDeferWindowPos;
+
+BOOL WINAPI HookShowWindow(HWND h, int cmd) {
+    const GameSizing sizing;
+    return DD2D9_NEXT(g_showWindow)(h, cmd);
+}
+
+BOOL WINAPI HookSetWindowPlacement(HWND h, const WINDOWPLACEMENT* wp) {
+    const GameSizing sizing;
+    return DD2D9_NEXT(g_setWindowPlacement)(h, wp);
+}
+
+BOOL WINAPI HookEndDeferWindowPos(HDWP d) {
+    const GameSizing sizing;
+    return DD2D9_NEXT(g_endDeferWindowPos)(d);
+}
+
 BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
+    const GameSizing sizing;
     {
         long r[4] = {x, y, w, ht};
         if (DeviceWindowToReal(h, r)) {
@@ -697,6 +729,7 @@ BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint) {
 }
 
 BOOL WINAPI HookSetWindowPos(HWND h, HWND after, int x, int y, int w, int ht, UINT flags) {
+    const GameSizing sizing;
     if ((flags & (SWP_NOMOVE | SWP_NOSIZE)) != (SWP_NOMOVE | SWP_NOSIZE)) {
         long r[4] = {x, y, w, ht};
         const HWND parent = MciWndParent(h);
@@ -736,6 +769,11 @@ LRESULT WINAPI HookSendMessageW(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 ImportHook kHooks[] = {
     {"user32", "MoveWindow", reinterpret_cast<void*>(HookMoveWindow), reinterpret_cast<void**>(&g_moveWindow)},
     {"user32", "SetWindowPos", reinterpret_cast<void*>(HookSetWindowPos), reinterpret_cast<void**>(&g_setWindowPos)},
+    {"user32", "ShowWindow", reinterpret_cast<void*>(HookShowWindow), reinterpret_cast<void**>(&g_showWindow)},
+    {"user32", "SetWindowPlacement", reinterpret_cast<void*>(HookSetWindowPlacement),
+     reinterpret_cast<void**>(&g_setWindowPlacement)},
+    {"user32", "EndDeferWindowPos", reinterpret_cast<void*>(HookEndDeferWindowPos),
+     reinterpret_cast<void**>(&g_endDeferWindowPos)},
     {"user32", "SendMessageA", reinterpret_cast<void*>(HookSendMessageA), reinterpret_cast<void**>(&g_sendMessageA)},
     {"user32", "SendMessageW", reinterpret_cast<void*>(HookSendMessageW), reinterpret_cast<void**>(&g_sendMessageW)},
     {"winmm", "mciSendStringA", reinterpret_cast<void*>(HookSendStringA), reinterpret_cast<void**>(&g_sendStringA)},
@@ -762,6 +800,10 @@ bool VideoOnWindow(HWND hwnd) {
             if (d.second.window == hwnd) on = true;
     LeaveCriticalSection(&g_videoLock);
     return on;
+}
+
+bool GameSizingWindow() {
+    return g_gameSizing != 0;
 }
 
 ImportHook* VideoHooks(size_t* n) {

@@ -1,5 +1,5 @@
 project('dd2d9', 'cpp',
-  version : '1.10.0',
+  version : '1.11.0',
   default_options : ['cpp_std=c++17', 'warning_level=2', 'buildtype=release', 'b_ndebug=if-release'])
 
 cpp = meson.get_compiler('cpp')
@@ -27,7 +27,7 @@ ddraw = shared_library('ddraw',
     'src/compatsys.cpp', 'src/config.cpp', 'src/convert.cpp', 'src/d3d6dev.cpp', 'src/d3d6draw.cpp',
     'src/d3d6drv.cpp', 'src/d3d6exec.cpp', 'src/d3d6obj.cpp', 'src/d3d6vp.cpp', 'src/d3d6xform.cpp',
     'src/d3d7draw.cpp', 'src/d3d7obj.cpp', 'src/d3d7pipe.cpp', 'src/d3d7sb.cpp', 'src/d3d7state.cpp',
-    'src/d3dxlate.cpp', 'src/ddcaps.cpp', 'src/ddcreate.cpp', 'src/ddgdi.cpp', 'src/ddhook.cpp',
+    'src/d3dxlate.cpp', 'src/ddcaps.cpp', 'src/ddcreate.cpp', 'src/ddgdi.cpp', 'src/ddhook.cpp', 'src/gdiscreen.cpp',
     'src/ddmode.cpp', 'src/ddraw.cpp', 'src/ddscreen.cpp', 'src/ddtiming.cpp', 'src/ddvideoport.cpp',
     'src/ddwindow.cpp', 'src/format.cpp', 'src/fourcc.cpp', 'src/gpu.cpp', 'src/gpucontext.cpp',
     'src/gpudepth.cpp', 'src/gpudraw.cpp', 'src/gpuformat.cpp', 'src/gpusurf.cpp', 'src/gputex.cpp',
@@ -38,6 +38,14 @@ ddraw = shared_library('ddraw',
   vs_module_defs : 'src/ddraw.def',
   dependencies : win_deps,
   link_args : static_link + ['-Wl,--enable-stdcall-fixup', '-s'],
+  install : true)
+
+# dd2d9's loader: a winmm.dll for the folder of a game that loads no ddraw.dll (a GDI game going
+# fullscreen with ChangeDisplaySettings), passing every call on and loading dd2d9 beside it.
+shared_library('winmm', 'loader/winmm.cpp', 'loader/stubs.cpp',
+  name_prefix : '',
+  vs_module_defs : 'loader/winmm.def',
+  link_args : static_link + ['-s'],
   install : true)
 
 # Test program; links against the system ddraw.dll import library, so it runs
@@ -52,6 +60,13 @@ executable('ddtest', 'tests/ddtest.cpp',
 shared_library('wincaller', 'tests/wincaller.cpp',
   name_prefix : '',
   link_args : static_link + ['-Wl,--kill-at'],
+  install : false)
+
+# GDI fullscreen test: a GDI game going fullscreen with ChangeDisplaySettings, dd2d9 brought in by
+# the loader (run beside winmm.dll and ddraw.dll; see the file).
+executable('gditest', 'tests/gditest.cpp',
+  dependencies : [cpp.find_library('gdi32'), cpp.find_library('user32'), cpp.find_library('winmm')],
+  link_args : static_link + ['-mwindows'],
   install : false)
 
 # Performance benchmark (blitter throughput, flip loop, windowed updates).

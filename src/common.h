@@ -37,6 +37,7 @@ struct Config {
     int d3d = kD3DAuto;            // dd2d9's Direct3D (3-7): auto / on = offered, off = none (2D only)
     bool systemD3D9 = true;        // present through Windows' own d3d9.dll, not one in the game folder (DXVK)
     bool dpiAware = true;          // dpiaware=on: the process handles the display's scaling, window mode scaled (dpi.cpp)
+    int gdiFullscreen = kMinimizeAuto;  // gdifullscreen=: a GDI game's display switch shown by dd2d9 (gdiscreen.cpp): auto (when the loader loaded dd2d9), on, off
     bool mouseMerge = true;        // mousemerge=on: a DirectInput mouse's buffered moves merged (dinputmouse.cpp)
     // Compatibility (compatsys.cpp): what the game is told about the machine.
     int ramMB = 1024;              // GlobalMemoryStatus(Ex) physical memory; 0: the real values
@@ -294,6 +295,10 @@ void AdjustWindowRectForDpi(RECT* r, DWORD style, bool menu, DWORD exStyle, UINT
 ImportHook* VideoHooks(size_t* n);
 // Whether such a video draws into `hwnd` now (an MCI device "window ... handle" of it).
 bool VideoOnWindow(HWND hwnd);
+// The game itself moving, sizing or showing a window right now (SetWindowPos, MoveWindow,
+// ShowWindow, SetWindowPlacement, EndDeferWindowPos; video.cpp): a change to its window
+// without it came from Windows or the window manager.
+bool GameSizingWindow();
 // A top-level window the game made in its mode's coordinates (a popup over its screen), shown
 // scaled over the image (inputpaint.cpp): the scale from the game's coordinates to its real ones.
 bool ScaledPopup(HWND h, double* sx, double* sy);
@@ -315,6 +320,14 @@ bool PresentsOnWindow(HWND hwnd);
 // (origin, clipping, the state blits use), which then goes out with the primary's frames.
 // False, `draw` not called: `dc` isn't such a window's, or the primary gave no DC. Any thread.
 bool DrawIntoShownPrimary(HDC dc, void (*draw)(HDC, void*), void* ctx);
+// gdifullscreen= (gdiscreen.cpp). A display change of the game's (ChangeDisplaySettings on the
+// primary display: `hasMode` with a DEVMODE, `sized` if it gives w x h; no DEVMODE: back to the
+// desktop's), shown by dd2d9 instead: true with what to answer in *result; false, passed on.
+// Any thread.
+bool GdiFullscreenChange(bool hasMode, bool sized, DWORD w, DWORD h, DWORD flags, LONG* result);
+// The game's blit to the window of that display mode drawn into its primary, as
+// DrawIntoShownPrimary does for a windowed one. Any thread.
+bool GdiFullscreenDraw(HDC dc, void (*draw)(HDC, void*), void* ctx);
 // fpslimit=: waits until the next frame is due (the game shows a frame: Flip, or a blit
 // covering most of the primary). Called without g_lock.
 void LimitFrame();

@@ -82,13 +82,13 @@ void LogInit() {
     if (g_config.minimize == kMinimizeAuto && g_tilingWm)
         Log(1, "minimize=auto: the fullscreen window isn't minimized under %s, which doesn't minimize windows",
             g_tilingWm);
-    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s zaccess=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d antialias2d=%s texfilter=%s wbuffer=%s overlaybias=%d videooverlay=%s palettizedtextures=%s heapzero=%s fairlocks=%s safetimers=%s joypoll=%s selfsuspend=%s nobuffering=%s safeterminate=%s flipcopy=%s", g_config.fpsLimit, g_config.ramMB,
+    Log(1, "settings: fpslimit=%d ram=%d vram=%d cpu=%d cpus=%d desktopbpp=%d lockwhole=%s zaccess=%s mipmaps=%s anisotropy=%d alternatepixelcenter=%s render32=%s depth24=%s antialiasing=%d antialias2d=%s texfilter=%s wbuffer=%s overlaybias=%d videooverlay=%s palettizedtextures=%s heapzero=%s fairlocks=%s safetimers=%s joypoll=%s selfsuspend=%s nobuffering=%s safeterminate=%s flipcopy=%s gdifullscreen=%s", g_config.fpsLimit, g_config.ramMB,
         g_config.vramMB, g_config.cpuMHz, g_config.cpus, g_config.desktopBpp, g_config.lockWhole ? "on" : "off", g_config.zAccess ? "on" : "off", g_config.mipmaps ? "on" : "off", g_config.anisotropy, g_config.pixelCenter ? "on" : "off",
         g_config.render32 ? "on" : "off", g_config.depth24 ? "on" : "off", g_config.msaa, g_config.aa2d ? "on" : "off",
         g_config.texLinear ? "linear" : "game", g_config.wbuffer == 2 ? "force" : g_config.wbuffer ? "on" : "off",
         g_config.overlayBias, g_config.overlays ? "on" : "off", g_config.palTextures ? "on" : "off",
         g_config.heapZero ? "on" : "off", g_config.fairLocks ? "on" : "off", g_config.safeTimers ? "on" : "off", g_config.joyPoll ? "on" : "off", g_config.selfSuspend ? "on" : "off", g_config.noBuffering ? "on" : "off", g_config.safeTerminate ? "on" : "off",
-        kAutoOnOff[g_config.flipCopy]);
+        kAutoOnOff[g_config.flipCopy], kAutoOnOff[g_config.gdiFullscreen]);
     if (LoadedBehindWrapper()) Log(1, "loaded behind a wrapper (as %s)", Utf8(BaseName(g_dllPath)).c_str());
     g_crashHandler = AddVectoredExceptionHandler(0, CrashLogger);  // 0: after the handlers registered first
 }

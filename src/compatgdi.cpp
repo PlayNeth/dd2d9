@@ -179,8 +179,11 @@ HBITMAP WINAPI HookCreateBitmapIndirect(const BITMAP* bm) {
 // the next one (the refresh four times a second included), or with the desktop compositor
 // shown in turn with them. Swordman (神魔至尊傳)'s windowed versions draw the game with
 // StretchDIBits and play their movies through Bink's DirectDraw primary: after the first
-// movie its last frame flashed over the game. Calls from Windows' modules, a DIB with
-// palette indices (the window DC's palette) and a source on the screen are passed on.
+// movie its last frame flashed over the game. Calls from Windows' modules and a source on the
+// screen are passed on. A DIB with palette indices (DIB_PAL_COLORS) is drawn with the colours
+// of the palette selected into the window DC (RgbFromPalColors): GDI would look them up in the
+// primary DC's, which has none of the game's (Pajama Sam 2's DisplayAPI=2 under
+// gdifullscreen=).
 using StretchDIBitsFn = int(WINAPI*)(HDC, int, int, int, int, int, int, int, int, const void*, const BITMAPINFO*, UINT,
                                      DWORD);
 using SetDIBitsToDeviceFn = int(WINAPI*)(HDC, int, int, DWORD, DWORD, int, int, UINT, UINT, const void*,
@@ -193,6 +196,37 @@ SetDIBitsToDeviceFn g_setDIBitsToDevice;
 BitBltFn g_bitBlt;
 StretchBltFn g_stretchBlt;
 PatBltFn g_patBlt;
+
+// A DIB's palette indices (DIB_PAL_COLORS, up to 8 bits a pixel) as colours: looked up in the
+// palette selected into `dc`, as GDI does (an index past its end wraps, as in Wine).
+// (Others, such as a BITMAPCOREHEADER's, are passed on as before.)
+struct RgbInfo {
+    BITMAPINFOHEADER h;
+    RGBQUAD colors[256];
+};
+bool PalColors(UINT usage, const BITMAPINFO* bi) {
+    if (usage != DIB_PAL_COLORS || !bi || bi->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return false;
+    const WORD bpp = bi->bmiHeader.biBitCount;
+    return bpp == 1 || bpp == 4 || bpp == 8;
+}
+// (PalColors first. False only without a palette, which every DC has.)
+bool RgbFromPalColors(HDC dc, const BITMAPINFO* bi, RgbInfo* out) {
+    const DWORD most = 1u << bi->bmiHeader.biBitCount;
+    const DWORD n = bi->bmiHeader.biClrUsed && bi->bmiHeader.biClrUsed < most ? bi->bmiHeader.biClrUsed : most;
+    const HPALETTE pal = static_cast<HPALETTE>(GetCurrentObject(dc, OBJ_PAL));
+    PALETTEENTRY e[256];
+    const UINT count = pal ? GetPaletteEntries(pal, 0, 256, e) : 0;
+    if (!count) return false;
+    out->h = bi->bmiHeader;
+    out->h.biSize = sizeof(BITMAPINFOHEADER);
+    out->h.biClrUsed = n;
+    const auto* index = reinterpret_cast<const WORD*>(reinterpret_cast<const BYTE*>(bi) + bi->bmiHeader.biSize);
+    for (DWORD i = 0; i < n; i++) {
+        const PALETTEENTRY& c = e[index[i] % count];
+        out->colors[i] = {c.peBlue, c.peGreen, c.peRed, 0};
+    }
+    return true;
+}
 
 template <class F>
 bool IntoShownPrimary(HDC dc, F& f) {
@@ -209,8 +243,15 @@ int WINAPI HookStretchDIBits(HDC dc, int x, int y, int w, int h, int sx, int sy,
     DD2D9_PASS_WINDOWS(g_stretchDIBits, dc, x, y, w, h, sx, sy, sw, sh, bits, bi, usage, rop);
     const StretchDIBitsFn next = DD2D9_NEXT(g_stretchDIBits);
     int r = 0;
-    auto f = [&](HDC p) { r = next(p, x, y, w, h, sx, sy, sw, sh, bits, bi, usage, rop); };
-    if (usage == DIB_RGB_COLORS && IntoShownPrimary(dc, f)) return r;
+    const bool pal = PalColors(usage, bi);
+    auto f = [&](HDC p) {
+        RgbInfo rgb;
+        if (pal && RgbFromPalColors(dc, bi, &rgb))
+            r = next(p, x, y, w, h, sx, sy, sw, sh, bits, reinterpret_cast<BITMAPINFO*>(&rgb), DIB_RGB_COLORS, rop);
+        else
+            r = next(p, x, y, w, h, sx, sy, sw, sh, bits, bi, usage, rop);
+    };
+    if ((usage == DIB_RGB_COLORS || pal) && IntoShownPrimary(dc, f)) return r;
     return next(dc, x, y, w, h, sx, sy, sw, sh, bits, bi, usage, rop);
 }
 
@@ -219,8 +260,15 @@ int WINAPI HookSetDIBitsToDevice(HDC dc, int x, int y, DWORD w, DWORD h, int sx,
     DD2D9_PASS_WINDOWS(g_setDIBitsToDevice, dc, x, y, w, h, sx, sy, start, lines, bits, bi, usage);
     const SetDIBitsToDeviceFn next = DD2D9_NEXT(g_setDIBitsToDevice);
     int r = 0;
-    auto f = [&](HDC p) { r = next(p, x, y, w, h, sx, sy, start, lines, bits, bi, usage); };
-    if (usage == DIB_RGB_COLORS && IntoShownPrimary(dc, f)) return r;
+    const bool pal = PalColors(usage, bi);
+    auto f = [&](HDC p) {
+        RgbInfo rgb;
+        if (pal && RgbFromPalColors(dc, bi, &rgb))
+            r = next(p, x, y, w, h, sx, sy, start, lines, bits, reinterpret_cast<BITMAPINFO*>(&rgb), DIB_RGB_COLORS);
+        else
+            r = next(p, x, y, w, h, sx, sy, start, lines, bits, bi, usage);
+    };
+    if ((usage == DIB_RGB_COLORS || pal) && IntoShownPrimary(dc, f)) return r;
     return next(dc, x, y, w, h, sx, sy, start, lines, bits, bi, usage);
 }
 

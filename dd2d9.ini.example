@@ -176,6 +176,15 @@ palettizedtextures=on
 ; primary or more (games that show frames that way).
 fpslimit=0
 
+; A game that draws with GDI and switches the display with ChangeDisplaySettings (Pajama
+; Sam 2: 640x480) gets a display mode of dd2d9's own instead, shown scaled as a DirectDraw
+; game's; its blits to its window are drawn into it. Such a game loads no ddraw.dll: dd2d9
+; comes in with its winmm.dll, put next to the game's exe.
+;   auto - when dd2d9 was loaded by its winmm.dll (default)
+;   on   - whenever a game with no DirectDraw object of its own changes the display
+;   off  - never
+gdifullscreen=auto
+
 ; A DirectInput mouse's buffered moves (what games read with GetDeviceData) merged: on
 ; (default). A mouse polled 1000 to 8000 times a second puts that many moves of a pixel or
 ; two in DirectInput's buffer, where a mouse of the time put 100 to 125: a game that reads a

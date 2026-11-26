@@ -121,24 +121,38 @@ template <typename Dev> bool AlreadyShown(const Dev* dm) {
            GameImage(&r, &m) && dm->dmPelsWidth == DWORD(m.cx) && dm->dmPelsHeight == DWORD(m.cy);
 }
 
+// gdifullscreen= (gdiscreen.cpp): a GDI game's display change shown by dd2d9 instead.
+template <typename Dev> bool GdiChange(const Dev* dm, DWORD flags, LONG* r) {
+    const bool sized = dm && (dm->dmFields & (DM_PELSWIDTH | DM_PELSHEIGHT)) == (DM_PELSWIDTH | DM_PELSHEIGHT);
+    return GdiFullscreenChange(dm != nullptr, sized, sized ? dm->dmPelsWidth : 0, sized ? dm->dmPelsHeight : 0, flags, r);
+}
+
 LONG WINAPI HookChangeDisplaySettingsA(DEVMODEA* dm, DWORD flags) {
+    LONG r;
+    if (GdiChange(dm, flags, &r)) return r;
     if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEA c;
     return DD2D9_NEXT(g_changeDisplaySettingsA)(const_cast<DEVMODEA*>(RealDepth(dm, &c)), flags);
 }
 LONG WINAPI HookChangeDisplaySettingsW(DEVMODEW* dm, DWORD flags) {
+    LONG r;
+    if (GdiChange(dm, flags, &r)) return r;
     if (AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEW c;
     return DD2D9_NEXT(g_changeDisplaySettingsW)(const_cast<DEVMODEW*>(RealDepth(dm, &c)), flags);
 }
 // (A display named: only the primary's depth is made up; the name left to the system.)
 LONG WINAPI HookChangeDisplaySettingsExA(LPCSTR device, DEVMODEA* dm, HWND h, DWORD flags, LPVOID p) {
+    LONG r;
+    if (!(device && device[0]) && GdiChange(dm, flags, &r)) return r;
     if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEA c;
     DEVMODEA* const sent = device && device[0] ? dm : const_cast<DEVMODEA*>(RealDepth(dm, &c));
     return DD2D9_NEXT(g_changeDisplaySettingsExA)(device, sent, h, flags, p);
 }
 LONG WINAPI HookChangeDisplaySettingsExW(LPCWSTR device, DEVMODEW* dm, HWND h, DWORD flags, LPVOID p) {
+    LONG r;
+    if (!(device && device[0]) && GdiChange(dm, flags, &r)) return r;
     if (!(device && device[0]) && AlreadyShown(dm)) return DISP_CHANGE_SUCCESSFUL;
     DEVMODEW c;
     DEVMODEW* const sent = device && device[0] ? dm : const_cast<DEVMODEW*>(RealDepth(dm, &c));

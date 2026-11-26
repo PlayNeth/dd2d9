@@ -49,6 +49,7 @@ bool PresentsOnWindow(HWND hwnd) {
 
 bool DrawIntoShownPrimary(HDC dc, void (*draw)(HDC, void*), void* ctx) {
     if (!dc || GetObjectType(dc) != OBJ_DC) return false;  // (a memory DC: not the screen)
+    if (GdiFullscreenDraw(dc, draw, ctx)) return true;     // (gdifullscreen=: its own display mode)
     const HWND hwnd = WindowFromDC(dc);
     if (!hwnd) return false;
     // Most such calls go to a window no primary is shown in (every one, in exclusive mode):

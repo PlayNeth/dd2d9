@@ -216,6 +216,11 @@ static void Apply(const std::string& key, const std::string& rawVal, const std::
         if (v == "auto") g_config.flipCopy = kFlipCopyAuto;
         else if (ParseBool(v, &b)) g_config.flipCopy = b ? kFlipCopyOn : kFlipCopyOff;
         else ok = false;
+    } else if (key == "gdifullscreen") {
+        int b;
+        if (v == "auto") g_config.gdiFullscreen = kMinimizeAuto;
+        else if (ParseBool(v, &b)) g_config.gdiFullscreen = b ? kMinimizeOn : kMinimizeOff;
+        else ok = false;
     } else if (key == "minimize") {
         int b;
         if (v == "auto") g_config.minimize = kMinimizeAuto;

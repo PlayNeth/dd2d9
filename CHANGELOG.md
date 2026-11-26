@@ -3,6 +3,49 @@
 Each entry says what changed and, for behaviour fixes, the game or test that showed it,
 so a later change doesn't undo it without knowing why.
 
+## 1.11.0
+- **Games that draw with GDI go fullscreen through dd2d9** (`gdifullscreen=auto`, new). Pajama
+  Sam 2 draws with GDI (DIB sections, `BitBlt`/`StretchBlt` to its window) and goes
+  fullscreen by asking Windows for 640x480 with `ChangeDisplaySettingsA`; today's screens (and
+  Wine) refuse it, and the game stayed a 640x480 window in the middle of the desktop unless the
+  desktop itself was set to 640x480. Now such a switch, from a game with no DirectDraw object
+  of its own, is made by dd2d9: a DirectDraw object of its own in exclusive mode on the game's
+  window (its active one, else its largest), a 640x480 mode (32-bit: GDI converts the game's
+  bitmaps to it), and a primary, into which the game's blits to that window (`BitBlt`,
+  `StretchBlt`, `StretchDIBits`, `SetDIBitsToDevice`, `PatBlt`) are drawn, as into a windowed
+  primary already. The game is told a 640x480 screen and window and gets its mouse mapped, as a
+  DirectDraw game, and the picture is shown with `display=`, `stretch=` and `filter=`.
+  `CDS_TEST` answers that the mode can be set; a switch to the desktop's mode, or to none, ends
+  it. Back from the background, a lost primary is restored and the game asked to paint again.
+- **WinG's blits are the game's** (`wing32.dll`, wherever it is): its imports are patched as
+  the game's and its calls no longer passed on as Windows'. Pajama Sam 2 draws through WinG
+  when it can load it (`DisplayAPI=1` in `hegames.ini`, its first choice), and under Wine it
+  gets Wine's own `wing32.dll`, in the system folder: its blits went to the window, past
+  dd2d9, and the game showed in the top left corner of the screen, under dd2d9's picture.
+- **A DIB with palette indices** (`DIB_PAL_COLORS`, `StretchDIBits` and `SetDIBitsToDevice`)
+  drawn to a window dd2d9 shows a primary in now goes into that primary too, with the colours
+  of the palette selected into the window's DC; it was passed on to the window. Pajama Sam 2's
+  `DisplayAPI=2`.
+- **A fullscreen window the window manager shrinks covers the screen again** (`display=borderless`,
+  and the borderless fallback). dd2d9 left a smaller window alone, as the game going windowed;
+  now only when the game sized it itself (`SetWindowPos`, `MoveWindow`, `ShowWindow`,
+  `SetWindowPlacement`, `EndDeferWindowPos`, now hooked to tell). i3 shrank Pajama Sam 2's
+  window to 75x50 in the middle of the screen (its smallest floating size) when the game's quit
+  prompt came up, and the game stayed that small.
+- **dd2d9's loader:** such a game loads no `ddraw.dll`. `winmm.dll`, new in the release, goes
+  next to the game's exe: it passes every one of winmm's exports on (Wine's list, ordinals
+  kept) to `winmm_next.dll` beside it if there is one (another wrapper, renamed), else to
+  Windows' own, then loads dd2d9 (the `ddraw.dll` beside it, else the system's when that is
+  dd2d9) and tells it it came that way (`DD2D9_GdiFullscreen`, a new export, which a wrapper
+  that must keep the name `winmm.dll` can call itself); `gdifullscreen=auto` is on then. All
+  of it before the game's code runs, so its run-time lookup of `ChangeDisplaySettingsA` gets
+  dd2d9's.
+- Tests: `gditest` goes fullscreen as Pajama Sam 2 does, through the loader, and checks the
+  mode the game sees, its blits on the screen where the image is (`BitBlt`, `StretchBlt`,
+  `StretchDIBits` with palette indices, and WinG's `WinGStretchBlt` when there is a
+  `wing32.dll`; at 1280x960 and 1920x1080 under Wine), the mouse, the window covering the
+  screen again after something other than the game shrinks it, and the way back.
+
 ## 1.10.0
 - **dd2d9 handles the display's scaling** (`dpiaware=on`, new, the default). On a display
   scaled to 125%, 150% or more, Windows tells a program that doesn't say it handles the

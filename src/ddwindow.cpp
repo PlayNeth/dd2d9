@@ -612,7 +612,7 @@ void DDraw::CheckCover(HWND h, bool moved) {
 // CheckCover does the same afterwards, but from a posted message, which a game that doesn't
 // read its messages while it loads sees late: Hydro Thunder sizes its window to 640x480
 // right after SetDisplayMode, and showed in the corner for its first two seconds. A smaller
-// window (the game going windowed) is left alone. With a frame change (games set their style,
+// window is left alone when the game made it so (going windowed), not otherwise (below). With a frame change (games set their style,
 // then SetWindowPos with SWP_FRAMECHANGED: Hydro Thunder still started in the corner) the
 // covering rectangle is worked out for the new frame (the style is set by now); CheckCover
 // checks the client area once the game has handled it. Returns whether the position was
@@ -632,8 +632,22 @@ bool DDraw::FitCover(HWND h, WINDOWPOS* wp) {
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(GameMonitor(h), &mi);
     const LONG mx = mi.rcMonitor.left, my = mi.rcMonitor.top;
-    if (x > mx || y > my || x + cx < mx + LONG(modeW_) || y + cy < my + LONG(modeH_)) return false;  // smaller: windowed
-    DD2D9_LOG("the game sizes its window to %ldx%ld at %ld,%ld: kept covering the screen", cx, cy, x, y);
+    if (x > mx || y > my || x + cx < mx + LONG(modeW_) || y + cy < my + LONG(modeH_)) {
+        // Smaller: the game going windowed, when it's the game's own change. One it didn't make
+        // is the window manager's: i3 shrank Pajama Sam 2's window to 75x50 in the middle of
+        // the screen (its smallest floating size) when the game's quit prompt came up, and the
+        // game stayed that small. Covered again, a few tries at most, as CheckCover.
+        if (GameSizingWindow()) return false;
+        const DWORD now = GetTickCount();
+        if (now - recoverStart_ > 2000) recoverCount_ = 0;
+        recoverStart_ = now;
+        if (++recoverCount_ > 5) return false;
+        DD2D9_LOG("the window is sized to %ldx%ld at %ld,%ld, not by the game (the window manager): kept covering the "
+                  "screen",
+                  cx, cy, x, y);
+    } else {
+        DD2D9_LOG("the game sizes its window to %ldx%ld at %ld,%ld: kept covering the screen", cx, cy, x, y);
+    }
     if (wp->flags & SWP_FRAMECHANGED) {
         RECT r = mi.rcMonitor;
         AdjustWindowRectEx(&r, DWORD(GetWindowLongW(h, GWL_STYLE)), GetMenu(h) != nullptr,

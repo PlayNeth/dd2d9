@@ -46,6 +46,12 @@ That copies the `ddraw.dll` beside the script (or `build/ddraw.dll`, in a source
 
 Or, for one game: put `ddraw.dll` next to the game's exe and run the game with `WINEDLLOVERRIDES="ddraw=n"`.
 
+### Games that draw with GDI (no DirectDraw)
+
+Some games of the era draw with plain GDI and go fullscreen by switching the display with `ChangeDisplaySettings` (Pajama Sam 2 and the other Humongous games). They load no `ddraw.dll`, so dd2d9 comes in with its loader: put `winmm.dll` from the release next to the game's exe, with `ddraw.dll` beside it (or, under Wine, installed in the prefix). It passes every call on to Windows' own `winmm.dll` and loads dd2d9, which then shows the game's display mode itself, scaled as for a DirectDraw game (`gdifullscreen`). Under Wine, add the override for it: `WINEDLLOVERRIDES="ddraw,winmm=n,b"`.
+
+Another `winmm.dll` wrapper in the same folder: rename it `winmm_next.dll`, and dd2d9's passes the calls on to it instead (if it works under another name). One that has to keep its name can load dd2d9 itself: `LoadLibrary` the `ddraw.dll` beside it and call its `DD2D9_GdiFullscreen` export (no arguments), before the game's code runs.
+
 ### Checking it works
 
 Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the game's exe, with the version, the config files read and the settings in effect.
@@ -107,6 +113,7 @@ Set `log=1` in `dd2d9.ini` and start the game. `dd2d9.log` appears next to the g
 - **3D quality:** antialiasing, anisotropic filtering, mipmaps for textures that have none, linear filtering of point-filtered textures, 32-bit rendering of 16-bit targets (no banding) and 24-bit Z buffers.
 - **Old-hardware fixes:** emulated W buffering (no z-fighting of light maps on roads in NFS III), and light maps and decals pulled forward as 16-bit depth buffers rounded them.
 - **A frame limiter** for games that run too fast or use a whole processor core.
+- **GDI games fullscreen:** a game that draws with GDI and asks Windows for 640x480 (`ChangeDisplaySettings`), loaded through dd2d9's `winmm.dll`, gets that mode from dd2d9: the game sees a 640x480 screen and its drawing (WinG's included) is shown scaled, where the screen or Wine refused the mode and the game stayed a 640x480 window in the middle of the desktop (`gdifullscreen`).
 - **Sharp on scaled displays:** the game is told the real screen and shown 1:1 at 125%, 150% and other display scalings, its window in `display=window` enlarged to match (`dpiaware`), where Windows would stretch the picture of a program of the era and blur it.
 - **High-polling-rate mice:** a DirectInput mouse's buffered moves come merged (`mousemerge`), one entry per axis between two button changes, so a game reading a few each frame keeps up with a 1000–8000 Hz mouse instead of stuttering or losing moves.
 - **What the game is told about the machine,** as a PC of its era would answer:
@@ -171,6 +178,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | `d3d` | `auto`: dd2d9's own Direct3D 3–7; `off`: no Direct3D (2D only) |
 | `d3d9` | `system` (Windows' or the prefix's `d3d9.dll`, even when the game folder has DXVK's), `game` (the one the game loads) |
 | `fpslimit` | `0` (off); frames per second at most |
+| `gdifullscreen` | `auto`: on when dd2d9 was loaded by its `winmm.dll` (a game that loads no `ddraw.dll`); `on`; `off`. A game with no DirectDraw object of its own that switches the display with `ChangeDisplaySettings` gets a display mode of dd2d9's own (always 32-bit), in exclusive mode on its window, and its GDI blits to that window are drawn into it; a switch back to the desktop's mode, or to none, ends it |
 | `mousemerge` | `on`: a DirectInput 1–7 mouse's buffered moves (`GetDeviceData`) merged, one entry per axis between two button changes, its buffer made 128 entries or more (a 1000–8000 Hz mouse made Need for Speed III stutter); `off`: as DirectInput gives them |
 | `antialiasing` | `0` (off); `2`, `4` or `8` samples |
 | `antialias2d` | `off`: with `antialiasing`, 2D drawn through Direct3D (HUDs, menus: screen-aligned, the depth test off or always passing, no depth written) stays pixel-sharp; `on`: antialiased like the 3D |
@@ -210,6 +218,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 | File | |
 | --- | --- |
 | `ddraw.dll` | dd2d9 itself. |
+| `winmm.dll` | dd2d9's loader, only for games that draw with GDI and load no `ddraw.dll` (see [Games that draw with GDI](#games-that-draw-with-gdi-no-directdraw)). Every call goes on to Windows' `winmm.dll` (or `winmm_next.dll` beside it). |
 | `dd2d9.ini` | Settings (see [Settings](#settings)). |
 | `dd2d9.log` | Next to the game's exe, with `log=1` or more. If that folder can't be written to, the current folder or `%TEMP%`. Send it with any bug report. |
 
@@ -223,6 +232,7 @@ Keys outside any section, in `[dd2d9]` or in `[default]` apply to every game. A 
 - **A game runs too fast:** set `fpslimit`. If it times itself from the registry's processor clock, try `cpu=0`.
 - **The mouse is off in a scaled or windowed mode:** please report it with `dd2d9.log` (`log=2`); the translation can't be turned off since 1.3.0.
 - **Z-fighting (hatched light maps or decals):** try `wbuffer=force` or a higher `overlaybias`, and `depth24=on`.
+- **A game that draws with GDI stays a small window in the middle of the screen** (it asks for 640x480 and doesn't get it): put dd2d9's `winmm.dll` next to it, see [Games that draw with GDI](#games-that-draw-with-gdi-no-directdraw).
 - **Display mode switches are a problem:** `display=borderless` or `display=window` avoid them.
 - **Under a tiling window manager, the game's mouse stops after switching workspaces:** set `minimize=off` (i3 and sway have it by default).
 - **Under Wine with DXVK in the game's folder:** `d3d9=system`, the default, presents through the prefix's own Direct3D 9; `d3d9=game` uses the game folder's.
@@ -266,6 +276,8 @@ The output is `build/ddraw.dll`, statically linked, with no MinGW runtime to ins
 - `ddtest fuzz` runs thousands of random blits (8, 16 and 32-bit, colour keys (ranges in video memory, compared colour by colour; in system memory, as `ddraw.dll`'s software blitter, single colours), mirroring, stretching, overlapping copies, surfaces 65535 pixels wide and tall) against a reference implementation.
 
 `build/focustest.exe [paintfg]` runs a 640×480×16 exclusive-mode flip chain for a minute, to be switched away from and back to (Alt+Tab); each second it writes the frames flipped and whether the window is minimized to `focustest.txt`. `paintfg` takes the foreground back in the window's `WM_PAINT`, as Need for Speed III does: switched away, it must stay away.
+
+`build/gditest.exe`, run beside `build/winmm.dll` and `build/ddraw.dll` (under Wine `WINEDLLOVERRIDES="ddraw,winmm=n,b"`), is a GDI game going fullscreen as Pajama Sam 2 does: it checks that the loader brought dd2d9 in, that `ChangeDisplaySettingsA(640x480)` succeeds, that the game sees a 640x480 screen and window, that what it blits to its window with `BitBlt`, `StretchBlt`, `StretchDIBits` (palette indices) and WinG's `WinGStretchBlt` (when there is a `wing32.dll`, as under Wine) is on the screen scaled, where the image is, that the mouse is mapped, that the window covers the screen again when something other than the game (a window manager) shrinks it, and that `ChangeDisplaySettingsA(NULL)` brings the desktop back. It writes `gditest.txt`.
 
 `build/d3d7test.exe [w h [bpp]] [3d] [gamma]` renders a Direct3D 7 triangle with DirectDraw fills and GDI text on top (`3d`: without), then flips; `gamma` sets an inverting gamma ramp. It writes `d3d7test.txt`.
 

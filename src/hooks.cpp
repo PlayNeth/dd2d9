@@ -353,6 +353,11 @@ bool LeaveAlone(HMODULE m, const wchar_t* path) {
         nw = GetWindowsDirectoryW(win, MAX_PATH);
         known = true;
     }
+    // WinG is the game's, wherever it is: a library games shipped beside them, drawing for them
+    // with GDI. Wine has its own in the system folder, which a game's
+    // LoadLibrary("WING32.DLL") gets: left alone, its blits to the game's window went past dd2d9
+    // (Pajama Sam 2's DisplayAPI=1, its first choice, and gdifullscreen=).
+    if (_wcsicmp(name, L"wing32.dll") == 0) return false;
     // (A whole folder: C:\Windows matches C:\Windows\..., not C:\WindowsGames\...)
     auto under = [&](const wchar_t* dir, UINT n) {
         return n && n < MAX_PATH && _wcsnicmp(path, dir, n) == 0 && (path[n] == L'\\' || dir[n - 1] == L'\\');
